@@ -35,6 +35,13 @@ namespace {
 const char kDataDir[] = "ux0:data/OpenCMR2/";
 const char kUserDir[] = "ux0:data/OpenCMR2/user/";
 
+// Defaults that differ from the PC's; opencmr2.ini overrides them.
+// outline_fonts: fitting the outlines to a font takes about 20 s on the
+// Vita at every start; 0 draws the original's bitmap fonts.
+const char kVitaDefaults[] =
+    "[video]\n"
+    "outline_fonts = 0\n";
+
 SysSettings::Values s_settings;
 SysEventRing s_events;
 bool s_resumed;
@@ -349,6 +356,7 @@ void SysVita_FramePresented(void)
 bool Platform_Init(int, char **)
 {
     s_settings.clear();
+    SysSettings::Parse(kVitaDefaults, s_settings);
     s_dirs.Clear();
     s_host.MakeDirectory(kUserDir);
     s_logFile = sceIoOpen((std::string(kUserDir) + "opencmr2.log").c_str(), SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
