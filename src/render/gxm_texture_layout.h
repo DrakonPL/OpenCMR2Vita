@@ -10,6 +10,10 @@
 // on the device). A level is its power-of-two size in 4x4 blocks, each block
 // at its Morton index (Gxm_SwizzledBlock), the levels back to back, as vitaGL
 // uploads them.
+//
+// Cube maps (Gxm_CubeLayout) are 32-bit, square, a power of two and one
+// level: the render targets of the car reflections. Each face is swizzled
+// texel by texel, the six faces back to back (+X, -X, +Y, -Y, +Z, -Z).
 #ifndef OPENCMR2_GXM_TEXTURE_LAYOUT_H
 #define OPENCMR2_GXM_TEXTURE_LAYOUT_H
 
@@ -28,7 +32,8 @@ struct GxmTextureLayout {
     unsigned blockBytes = 0;
     int levels = 0;
     GxmLevelLayout level[16];
-    unsigned bytes = 0;         // all levels
+    unsigned bytes = 0;         // all levels (of all faces)
+    unsigned faceBytes = 0;     // a cube: from one face to the next (0: not a cube)
 };
 
 // x in the odd bits, y in the even bits.
@@ -87,6 +92,29 @@ inline GxmTextureLayout Gxm_TextureLayout(int format, int width, int height, int
         layout.bytes += l.rowBytes * l.rows;
     }
     return layout;
+}
+
+// The smallest cube side Gxm_CubeLayout takes: from 32 texels a face is a
+// multiple of 4 KB, so the faces need no padding between them.
+constexpr int kGxmMinCubeSize = 32;
+
+// A cube of size x size texels: false when GXM cannot take it as laid out
+// here (not a power of two, below kGxmMinCubeSize, or more than one level).
+inline bool Gxm_CubeLayout(int size, int mipLevels, GxmTextureLayout *layout)
+{
+    if (size < kGxmMinCubeSize || Gxm_PowerOfTwo((unsigned)size) != (unsigned)size || mipLevels > 1)
+        return false;
+    *layout = GxmTextureLayout();
+    layout->swizzled = true;
+    layout->blockBytes = 4;     // a texel
+    layout->levels = 1;
+    GxmLevelLayout &l = layout->level[0];
+    l.offset = 0;
+    l.rowBytes = l.sourceRowBytes = (unsigned)size * 4;
+    l.rows = l.sourceRows = (unsigned)size;
+    layout->faceBytes = l.rowBytes * l.rows;
+    layout->bytes = 6 * layout->faceBytes;
+    return true;
 }
 
 #endif

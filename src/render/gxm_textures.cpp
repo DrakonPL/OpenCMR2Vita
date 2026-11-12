@@ -85,6 +85,8 @@ GxmTextures::~GxmTextures()
 int InitTexture(GxmTexture &g, const GfxTexture *t)
 {
     const SceGxmTextureFormat format = kGxmFormats[t->format];
+    if (g.layout.faceBytes != 0)
+        return sceGxmTextureInitCube(&g.texture, g.memory, format, t->width, t->height, g.layout.levels);
     if (!g.layout.swizzled)
         return sceGxmTextureInitLinear(&g.texture, g.memory, format, t->width, t->height, g.layout.levels);
     if (Gxm_PowerOfTwo(t->width) == (unsigned)t->width && Gxm_PowerOfTwo(t->height) == (unsigned)t->height)
@@ -99,18 +101,23 @@ GxmTexture *GxmTextures::Ensure(GfxTexture *t)
         GxmTexture *g = (GxmTexture *)t->gpu;
         return g->failed ? nullptr : g;
     }
-    if (t->flags & GFX_TEXTURE_CUBE) {
-        // No draw of the PC trace samples a cube map (variants.txt has no
-        // texture kind 2), and GXM cube maps need swizzled faces.
+    if (t->format < 0 || t->format >= kFormats)
+        return nullptr;
+    GxmTextureLayout layout;
+    if (!(t->flags & GFX_TEXTURE_CUBE)) {
+        layout = Gxm_TextureLayout(t->format, t->width, t->height, t->mipLevels);
+    } else if (t->width != t->height || Gfx_BytesPerPixel(t->format) != 4 || !(t->flags & GFX_TEXTURE_RENDER_TARGET) ||
+               !Gxm_CubeLayout(t->width, t->mipLevels, &layout)) {
+        // The game's cube maps are the car reflections: square 32-bit render
+        // targets of one level.
         if (!loggedCube)
-            Sys_Log("gxm tex: cube maps are not on the GPU (%dx%d)", t->width, t->height);
+            Sys_Log("gxm tex: a cube map of %dx%d, %d levels, format %d is not on the GPU", t->width, t->height,
+                    t->mipLevels, t->format);
         loggedCube = true;
         return nullptr;
     }
-    if (t->format < 0 || t->format >= kFormats)
-        return nullptr;
     GxmTexture *g = new GxmTexture;
-    g->layout = Gxm_TextureLayout(t->format, t->width, t->height, t->mipLevels);
+    g->layout = layout;
     g->memory = memory.Textures().Alloc(g->layout.bytes);
     if (g->memory == nullptr) {
         if (!loggedFull)
@@ -120,11 +127,13 @@ GxmTexture *GxmTextures::Ensure(GfxTexture *t)
         return nullptr;
     }
     const int err = InitTexture(*g, t);
-    if (err < 0 || ((t->flags & GFX_TEXTURE_RENDER_TARGET) && !CreateTarget(t, *g))) {
+    const bool cube = (t->flags & GFX_TEXTURE_CUBE) != 0;
+    if (err < 0 ||
+        ((t->flags & GFX_TEXTURE_RENDER_TARGET) && !(cube ? CreateCubeTarget(t, *g) : CreateTarget(t, *g)))) {
         // Kept as failed, so that it is not tried (and logged) again each frame.
         if (err < 0)
             Sys_Log("gxm tex: %s %dx%d, %d levels, %s: 0x%08x", kFormatNames[t->format], t->width, t->height,
-                    g->layout.levels, g->layout.swizzled ? "swizzled" : "linear", (unsigned)err);
+                    g->layout.levels, cube ? "cube" : g->layout.swizzled ? "swizzled" : "linear", (unsigned)err);
         if (g->target != nullptr)
             sceGxmDestroyRenderTarget(g->target);
         g->target = nullptr;
@@ -167,6 +176,35 @@ bool GxmTextures::CreateTarget(const GfxTexture *t, GxmTexture &g)
     return Check("sceGxmCreateRenderTarget", sceGxmCreateRenderTarget(&params, &g.target));
 }
 
+// A cube's render target: one render target and one depth buffer, the size
+// of a face, and a swizzled colour surface on each face. A frame draws the six
+// faces as six scenes.
+bool GxmTextures::CreateCubeTarget(const GfxTexture *t, GxmTexture &g)
+{
+    g.faces.reset(new SceGxmColorSurface[6]);
+    for (int face = 0; face < 6; face++)
+        if (!Check("sceGxmColorSurfaceInit(cube face)",
+                   sceGxmColorSurfaceInit(&g.faces[face], SCE_GXM_COLOR_FORMAT_U8U8U8U8_ARGB,
+                                          SCE_GXM_COLOR_SURFACE_SWIZZLED, SCE_GXM_COLOR_SURFACE_SCALE_NONE,
+                                          SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, t->width, t->height, t->width,
+                                          (uint8_t *)g.memory + (size_t)face * g.layout.faceBytes)))
+            return false;
+    const unsigned depthWidth = Align(t->width, kTile);
+    g.depthMemory = memory.Static().Alloc(depthWidth * Align(t->height, kTile) * 4);
+    if (g.depthMemory == nullptr ||
+        !Check("sceGxmDepthStencilSurfaceInit(cube)",
+               sceGxmDepthStencilSurfaceInit(&g.depth, SCE_GXM_DEPTH_STENCIL_FORMAT_S8D24,
+                                             SCE_GXM_DEPTH_STENCIL_SURFACE_TILED, depthWidth, g.depthMemory, nullptr)))
+        return false;
+    SceGxmRenderTargetParams params{};
+    params.width = t->width;
+    params.height = t->height;
+    params.scenesPerFrame = 6;
+    params.multisampleMode = SCE_GXM_MULTISAMPLE_NONE;
+    params.driverMemBlock = -1;
+    return Check("sceGxmCreateRenderTarget(cube)", sceGxmCreateRenderTarget(&params, &g.target));
+}
+
 void GxmTextures::Upload(std::vector<GfxTexture *> &textures, unsigned frame)
 {
     for (GfxTexture *t : textures) {
@@ -187,12 +225,15 @@ void GxmTextures::Upload(std::vector<GfxTexture *> &textures, unsigned frame)
                 sceGxmTextureSetData(&g->texture, fresh);
             }
         }
-        for (int m = 0; m < g->layout.levels; m++) {
-            const GxmLevelLayout &l = g->layout.level[m];
-            if (t->levels[0][m].size() < (size_t)l.sourceRowBytes * l.sourceRows)
-                continue;
-            CopyLevel(t->format, t->levels[0][m].data(), g->layout, l, (uint8_t *)g->memory + l.offset);
-        }
+        const int faces = g->layout.faceBytes != 0 ? 6 : 1;
+        for (int face = 0; face < faces; face++)
+            for (int m = 0; m < g->layout.levels; m++) {
+                const GxmLevelLayout &l = g->layout.level[m];
+                if (t->levels[face][m].size() < (size_t)l.sourceRowBytes * l.sourceRows)
+                    continue;
+                CopyLevel(t->format, t->levels[face][m].data(), g->layout, l,
+                          (uint8_t *)g->memory + (size_t)face * g->layout.faceBytes + l.offset);
+            }
     }
 }
 
@@ -230,7 +271,9 @@ void GxmTextures::Release(GxmTexture *g)
 void GxmTextures::Read(GfxTexture *t)
 {
     GxmTexture *g = (GxmTexture *)t->gpu;
-    if (g == nullptr || g->failed || (t->format != GFX_FORMAT_BGRX8 && t->format != GFX_FORMAT_BGRA8))
+    // A cube's faces are swizzled: the game does not lock them.
+    if (g == nullptr || g->failed || g->layout.faceBytes != 0 ||
+        (t->format != GFX_FORMAT_BGRX8 && t->format != GFX_FORMAT_BGRA8))
         return;
     const GxmLevelLayout &l = g->layout.level[0];
     std::vector<uint8_t> &level = t->levels[0][0];
@@ -260,7 +303,9 @@ void GxmTextures::SetSampler(GxmTexture &g, int minFilter, int magFilter, int mi
     sceGxmTextureSetMipFilter(t, mipFilter == GFX_MIPFILTER_LINEAR ? SCE_GXM_TEXTURE_MIP_FILTER_ENABLED
                                                                    : SCE_GXM_TEXTURE_MIP_FILTER_DISABLED);
     sceGxmTextureSetMipmapCount(t, mipFilter == GFX_MIPFILTER_NONE ? 1 : g.layout.levels);
-    const SceGxmTextureAddrMode mode = address == GFX_ADDRESS_CLAMP    ? SCE_GXM_TEXTURE_ADDR_CLAMP
+    // A cube is read by direction: Direct3D ignores its address mode.
+    const SceGxmTextureAddrMode mode = address == GFX_ADDRESS_CLAMP || g.layout.faceBytes != 0
+                                           ? SCE_GXM_TEXTURE_ADDR_CLAMP
                                        : address == GFX_ADDRESS_MIRROR ? SCE_GXM_TEXTURE_ADDR_MIRROR
                                                                        : SCE_GXM_TEXTURE_ADDR_REPEAT;
     sceGxmTextureSetUAddrMode(t, mode);

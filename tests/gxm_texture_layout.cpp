@@ -103,6 +103,22 @@ int main()
                 if (CheckLayout(format, w, h, 10))
                     return 1;
 
+    // Cube maps: the car reflections are 64 and 128 texels, one level. Each
+    // face is the swizzled square, the faces back to back.
+    GxmTextureLayout cube;
+    REQUIRE(Gxm_CubeLayout(64, 1, &cube));
+    REQUIRE(cube.swizzled && cube.blockBytes == 4 && cube.levels == 1);
+    REQUIRE(cube.level[0].rowBytes == 256 && cube.level[0].rows == 64);
+    REQUIRE(cube.level[0].sourceRowBytes == 256 && cube.level[0].sourceRows == 64);
+    REQUIRE(cube.faceBytes == 64u * 64u * 4u && cube.bytes == 6u * cube.faceBytes);
+    REQUIRE(Gxm_CubeLayout(128, 1, &cube) && cube.faceBytes == 65536u);
+    // Each face from 32 texels is a multiple of 4 KB.
+    REQUIRE(Gxm_CubeLayout(kGxmMinCubeSize, 1, &cube) && cube.faceBytes % 4096 == 0);
+    // Refused: not a power of two, too small, mipmaps.
+    REQUIRE(!Gxm_CubeLayout(96, 1, &cube));
+    REQUIRE(!Gxm_CubeLayout(16, 1, &cube));
+    REQUIRE(!Gxm_CubeLayout(64, 7, &cube));
+
     printf("gxm_texture_layout: ok\n");
     return 0;
 }
