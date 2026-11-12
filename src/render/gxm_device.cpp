@@ -183,14 +183,13 @@ bool GxmDevice::SetMode(int w, int h)
         return false;
     // A smaller back buffer is the centre of the display, with a black border.
     const int x = (kDisplayWidth - w) / 2, y = (kDisplayHeight - h) / 2;
-    origin = ((size_t)y * kDisplayStride + x) * 4;
     for (DisplayBuffer &d : display) {
         memset(d.memory.data, 0, kDisplayBytes);
-        unsigned char *start = (unsigned char *)d.memory.data + origin;
+        unsigned char *origin = (unsigned char *)d.memory.data + ((size_t)y * kDisplayStride + x) * 4;
         if (!Check("sceGxmColorSurfaceInit",
                    sceGxmColorSurfaceInit(&d.surface, SCE_GXM_COLOR_FORMAT_A8B8G8R8, SCE_GXM_COLOR_SURFACE_LINEAR,
                                           SCE_GXM_COLOR_SURFACE_SCALE_NONE, SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, w, h,
-                                          kDisplayStride, start)))
+                                          kDisplayStride, origin)))
             return false;
     }
     if (!Check("sceGxmDepthStencilSurfaceInit",
@@ -223,12 +222,6 @@ void GxmDevice::Present(bool vsync)
     front = back;
     back = (back + 1) % kFrameSlots;
     frameSlot = (frameSlot + 1) % kFrameSlots;
-}
-
-const uint32_t *GxmDevice::ShownPixels(int *stride) const
-{
-    *stride = kDisplayStride;
-    return (const uint32_t *)((const unsigned char *)display[front].memory.data + origin);
 }
 
 void GxmDevice::Finish()

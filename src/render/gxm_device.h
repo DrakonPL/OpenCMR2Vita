@@ -10,9 +10,6 @@
 
 #include <psp2/gxm.h>
 
-#include <stddef.h>
-#include <stdint.h>
-
 #include <memory>
 
 class GxmDevice {
@@ -44,9 +41,6 @@ public:
     void Present(bool vsync);
     // 0, 1, 2, ...: the slot of the frame being recorded.
     int FrameSlot() const { return frameSlot; }
-    // The back buffer's pixels (A8B8G8R8, rows of stride pixels) of the frame
-    // Present queued last. The CPU can read them once the GPU is done.
-    const uint32_t *ShownPixels(int *stride) const;
     // Waits until the GPU has done all queued work.
     void Finish();
 
@@ -75,7 +69,6 @@ private:
     GxmBlock patcherBuffer, patcherVertexUsse, patcherFragmentUsse;
     SceGxmShaderPatcher *patcher = nullptr;
     int width = 0, height = 0;
-    size_t origin = 0;      // bytes from a display buffer's start to the back buffer's
     int frameSlot = 0;
 };
 
