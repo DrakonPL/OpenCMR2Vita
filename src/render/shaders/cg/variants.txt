@@ -30,6 +30,8 @@ fragment 01110c464  # italy-cube-maps
 fragment 11110c464  # italy-cube-maps
 fragment 03110c464  # the fog form of a car key with cube map reflections on
 fragment 13110c464  # the fog form of a car key with cube map reflections on
+fragment 01110c864  # a draw too near for the distance fade
+fragment 03110c864  # a draw too near for the distance fade
 triple 000004442 off tl  # the intro movies (video/movie.cpp, not in a scenario)
 triple 010000001 5/6 3d  # preliminary-map
 triple 010000001 5/6 tl  # preliminary-map
@@ -67,6 +69,9 @@ triple 01110c464 5/2 3d  # italy-cube-maps
 triple 11110c464 5/2 3d  # italy-cube-maps
 triple 03110c464 5/2 3d  # the fog form of a car key with cube map reflections on
 triple 13110c464 5/2 3d  # the fog form of a car key with cube map reflections on
+triple 030004484 5/2 3d  # a draw too near for the distance fade
+triple 01110c864 5/2 3d  # a draw too near for the distance fade
+triple 03110c864 5/2 3d  # a draw too near for the distance fade
 args 010000001 10000000000  # arcade-single-race-australia
 args 030000001 10000000000  # the fog form: arcade-single-race-australia
 args 010004424 10000000002  # arcade-single-race-australia
@@ -92,3 +97,6 @@ args 11110c864 10082000002  # italy-cube-maps
 args 13110c864 10082000002  # the fog form: italy-cube-maps
 args 03110c464 10082000002  # the fog form: italy-cube-maps
 args 13110c464 10082000002  # the fog form: italy-cube-maps
+args 01110c864 10082000002  # a draw too near for the distance fade
+args 03110c864 10082000002  # a draw too near for the distance fade
+args 000004442 00000000802  # the intro movies (the device log)
