@@ -13,6 +13,8 @@
 
 #include <stdint.h>
 
+#include <memory>
+
 struct GxmTexture {
     SceGxmTexture texture;
     void *memory = nullptr;         // from the texture pool
@@ -23,6 +25,8 @@ struct GxmTexture {
     // A render target: its colour surface is the texture's memory.
     SceGxmRenderTarget *target = nullptr;
     SceGxmColorSurface color;
+    // A cube's render target: a colour surface for each face (color unused).
+    std::unique_ptr<SceGxmColorSurface[]> faces;
     void *depthMemory = nullptr;    // from the static pool
     SceGxmDepthStencilSurface depth;
 };
@@ -36,7 +40,7 @@ public:
     ~GxmTextures();
 
     // The GPU texture of t, made on first use. nullptr when t cannot be on the
-    // GPU (cube maps for now, a full pool).
+    // GPU (a cube map that Gxm_CubeLayout refuses, a full pool).
     GxmTexture *Ensure(GfxTexture *t);
     // Copies the CPU levels of the dirty textures in. A staging texture no
     // draw has used stays on the CPU. A texture that a frame still on the GPU
@@ -60,6 +64,7 @@ public:
 
 private:
     bool CreateTarget(const GfxTexture *t, GxmTexture &g);
+    bool CreateCubeTarget(const GfxTexture *t, GxmTexture &g);
     void Release(GxmTexture *g);
 
     GxmMemory &memory;

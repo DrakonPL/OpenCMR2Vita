@@ -278,6 +278,7 @@ struct Executor : GfxExecutor {
 
     uint16_t *identityIndices = nullptr;
     GxmTexture white;   // for a slot a program reads but the draw has no texture for
+    GxmTexture whiteCube;   // the same for a cube slot
     // The back buffer as it was at GFX_CMD_BACKDROP: the distance fade reads it.
     GxmTexture backdrop;
     int backdropW = 0, backdropH = 0;
@@ -299,6 +300,7 @@ struct Executor : GfxExecutor {
     bool depthStored = false;       // the next back buffer scene loads the depth the last one stored
     bool inScene = false;
     const GxmTexture *sceneTarget = nullptr;    // nullptr: the back buffer
+    int sceneFace = 0;                          // a cube target: its face
     Bound bound;
     // The vertex uniforms last filled: for the state and the target size.
     const GfxDrawState *vertexUniformState = nullptr;
@@ -336,6 +338,7 @@ struct Executor : GfxExecutor {
             memory.Static().Free(e.memory);
         memory.Static().Free(identityIndices);
         memory.Textures().Free(white.memory);
+        memory.Textures().Free(whiteCube.memory);
         ReleaseBackdrop();
     }
 
@@ -470,7 +473,14 @@ struct Executor : GfxExecutor {
         identityIndices = (uint16_t *)memory.Static().Alloc(kIdentityIndices * sizeof(uint16_t));
         white.layout = Gxm_TextureLayout(GFX_FORMAT_BGRA8, 8, 8, 1);
         white.memory = memory.Textures().Alloc(white.layout.bytes);
-        if (identityIndices == nullptr || white.memory == nullptr)
+        Gxm_CubeLayout(kGxmMinCubeSize, 1, &whiteCube.layout);
+        whiteCube.memory = memory.Textures().Alloc(whiteCube.layout.bytes);
+        if (identityIndices == nullptr || white.memory == nullptr || whiteCube.memory == nullptr)
+            return false;
+        memset(whiteCube.memory, 0xff, whiteCube.layout.bytes);
+        if (!Check("sceGxmTextureInitCube(white)",
+                   sceGxmTextureInitCube(&whiteCube.texture, whiteCube.memory, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ARGB,
+                                         kGxmMinCubeSize, kGxmMinCubeSize, 1)))
             return false;
         for (unsigned i = 0; i < kIdentityIndices; i++)
             identityIndices[i] = (uint16_t)i;
@@ -691,6 +701,8 @@ struct Executor : GfxExecutor {
                 }
                 gpuTextures.SetSampler(*g, minFilter, magFilter, mipFilter, stage.address);
             }
+            if (g == nullptr && (slot == GXM_SLOT_CUBE0 || slot == GXM_SLOT_CUBE1))
+                g = &whiteCube;
             BindTexture(unit, g);
         }
     }
@@ -709,9 +721,10 @@ struct Executor : GfxExecutor {
         inScene = false;
     }
 
-    bool BeginScene(const GxmTexture *target)
+    // face: the face of a cube target (0 otherwise).
+    bool BeginScene(const GxmTexture *target, int face = 0)
     {
-        if (inScene && sceneTarget == target)
+        if (inScene && sceneTarget == target && sceneFace == face)
             return true;
         EndScene();
         bool ok;
@@ -727,11 +740,13 @@ struct Executor : GfxExecutor {
             depthStored = false;
             backBufferBegun = backBufferBegun || ok;
         } else {
+            const SceGxmColorSurface *color = target->faces != nullptr ? &target->faces[face] : &target->color;
             ok = Check("sceGxmBeginScene(target)", sceGxmBeginScene(device.Context(), 0, target->target, nullptr,
-                                                                    nullptr, nullptr, &target->color, &target->depth));
+                                                                    nullptr, nullptr, color, &target->depth));
         }
         inScene = ok;
         sceneTarget = target;
+        sceneFace = face;
         bound = Bound();
         return ok;
     }
@@ -1059,10 +1074,12 @@ struct Executor : GfxExecutor {
         for (int phase = 0; phase < 2; phase++) {
             GfxTexture *target = nullptr;
             const GxmTexture *targetTexture = nullptr;
+            int targetFace = 0;
             for (const GfxCommand &c : frame.commands) {
                 if (c.type == GFX_CMD_TARGET) {
                     target = c.target;
                     targetTexture = nullptr;
+                    targetFace = target != nullptr && target->cube != nullptr ? target->face : 0;
                     if (target != nullptr)
                         targetTexture = (const GxmTexture *)(target->cube != nullptr ? target->cube : target)->gpu;
                     continue;
@@ -1074,10 +1091,10 @@ struct Executor : GfxExecutor {
                         CopyBackdrop();
                     continue;
                 }
-                // A target with no GPU surface (a cube face) is not drawn.
+                // A target with no GPU surface is not drawn.
                 if (target != nullptr && (targetTexture == nullptr || targetTexture->target == nullptr))
                     continue;
-                if (!BeginScene(targetTexture))
+                if (!BeginScene(targetTexture, targetFace))
                     continue;
                 const int w = target != nullptr ? target->width : device.Width();
                 const int h = target != nullptr ? target->height : device.Height();

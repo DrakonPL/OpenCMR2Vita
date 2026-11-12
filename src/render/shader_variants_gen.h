@@ -59,10 +59,12 @@ extern const unsigned char fixed_f_110000001_t2_gxp_start[];
 extern const unsigned char fixed_f_110004424_t2_gxp_start[];
 extern const unsigned char fixed_f_110004484_t1_gxp_start[];
 extern const unsigned char fixed_f_110004484_t2_gxp_start[];
+extern const unsigned char fixed_f_11110c864_t2_gxp_start[];
 extern const unsigned char fixed_f_130000001_t2_gxp_start[];
 extern const unsigned char fixed_f_130004424_t2_gxp_start[];
 extern const unsigned char fixed_f_130004484_t1_gxp_start[];
 extern const unsigned char fixed_f_130004484_t2_gxp_start[];
+extern const unsigned char fixed_f_13110c864_t2_gxp_start[];
 }
 #define GXM_GXP(name) name##_gxp_start
 #else
@@ -90,10 +92,12 @@ static const GxmFragmentVariant kGxmFragmentVariants[] = {
     { 0x110004424ull, 2, "fixed_f_110004424_t2", GXM_GXP(fixed_f_110004424_t2), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x110004484ull, 1, "fixed_f_110004484_t1", GXM_GXP(fixed_f_110004484_t1), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x110004484ull, 2, "fixed_f_110004484_t2", GXM_GXP(fixed_f_110004484_t2), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x11110c864ull, 2, "fixed_f_11110c864_t2", GXM_GXP(fixed_f_11110c864_t2), { GXM_SLOT_CUBE0, GXM_SLOT_TEX1, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x130000001ull, 2, "fixed_f_130000001_t2", GXM_GXP(fixed_f_130000001_t2), { GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x130004424ull, 2, "fixed_f_130004424_t2", GXM_GXP(fixed_f_130004424_t2), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x130004484ull, 1, "fixed_f_130004484_t1", GXM_GXP(fixed_f_130004484_t1), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x130004484ull, 2, "fixed_f_130004484_t2", GXM_GXP(fixed_f_130004484_t2), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x13110c864ull, 2, "fixed_f_13110c864_t2", GXM_GXP(fixed_f_13110c864_t2), { GXM_SLOT_CUBE0, GXM_SLOT_TEX1, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
 };
 
 static const GxmPipelineTriple kGxmPipelineTriples[] = {
@@ -122,11 +126,13 @@ static const GxmPipelineTriple kGxmPipelineTriples[] = {
     { 18, 0, 0, false },
     { 19, 5, 2, false },
     { 19, 5, 6, false },
-    { 20, 5, 6, false },
-    { 21, 2, 2, false },
-    { 22, 0, 0, false },
-    { 23, 5, 2, false },
-    { 23, 5, 6, false },
+    { 20, 5, 2, false },
+    { 21, 5, 6, false },
+    { 22, 2, 2, false },
+    { 23, 0, 0, false },
+    { 24, 5, 2, false },
+    { 24, 5, 6, false },
+    { 25, 5, 2, false },
 };
 
 #endif

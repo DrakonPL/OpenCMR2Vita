@@ -21,6 +21,8 @@ fragment 030004484  # the fog form of a 3D key (a foggy stage on the device)
 fragment 130000001  # the fog form of a 3D key (a foggy stage on the device)
 fragment 130004424  # the fog form of a 3D key (a foggy stage on the device)
 fragment 130004484  # the fog form of a 3D key (a foggy stage on the device)
+fragment 11110c864  # the car reflection: a cube map (arcade Italy, environment mapping 3)
+fragment 13110c864  # the fog form of the car reflection
 triple 000004442 off tl  # the intro movies (video/movie.cpp, not in a scenario)
 triple 010000001 5/6 3d  # preliminary-map
 triple 010000001 5/6 tl  # preliminary-map
@@ -51,3 +53,5 @@ triple 130004424 2/2 3d  # the fog form of a 3D triple (no run drew it yet)
 triple 130004484 5/2 3d  # a foggy stage on the device
 triple 130004484 5/6 3d  # a foggy stage on the device
 triple 130004484 off 3d  # a foggy stage on the device
+triple 11110c864 5/2 3d  # the car reflection: a cube map (arcade Italy, environment mapping 3)
+triple 13110c864 5/2 3d  # the fog form of the car reflection

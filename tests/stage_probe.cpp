@@ -590,6 +590,21 @@ int main(int argc, char **argv) {
         if (mode != 3)
             if (const char *detail = getenv("OPENCMR2_PROBE_CAR_DETAIL"))
                 CGameInfo::SetPreviewMode(unsigned(atoi(detail)));
+        // The environment mapping of the render device menu (0 to 3; 3: cube
+        // maps, the car reflections), as FrontendMenu_ApplyRenderDeviceOptions
+        // sets it.
+        if (mode != 3)
+            if (const char *envMap = getenv("OPENCMR2_PROBE_ENV_MAP")) {
+                const int choice = atoi(envMap);
+                CGameInfo::SetGraphicsOptionBits1To2(unsigned(choice));
+                g_pGraphics->field913_0x3bc &= ~(8u | 0x10u | 0x80u);
+                if (choice != 0)
+                    g_pGraphics->field913_0x3bc |= 8;
+                if (choice == 2)
+                    g_pGraphics->field913_0x3bc |= 0x10;
+                if (choice == 3)
+                    g_pGraphics->field913_0x3bc |= 0x80;
+            }
         // Stage lighting (shadow zones) is loaded only with this graphics option.
         if (mode != 3 && getenv("OPENCMR2_PROBE_LIGHTING")) CGameInfo::SetGraphicsOptionBit4(1);
         static bool lightingDone;
