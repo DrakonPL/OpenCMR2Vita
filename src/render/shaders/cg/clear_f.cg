@@ -1,0 +1,6 @@
+// The clear colour (GXM has no clear call: a clear is a drawn triangle).
+
+float4 main(uniform float4 clearColor) : COLOR
+{
+    return clearColor;
+}

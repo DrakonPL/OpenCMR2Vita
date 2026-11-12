@@ -1,1 +1,3 @@
 tools/build_vita.sh text eol=lf
+tools/*.bat text eol=crlf
+*.gxp binary

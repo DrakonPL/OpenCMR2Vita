@@ -154,6 +154,10 @@ add_test(NAME sys_paths COMMAND sys_paths_test)
 add_executable(shader_key_test shader_key.cpp)
 target_include_directories(shader_key_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME shader_key COMMAND shader_key_test)
+add_executable(shader_variants_test shader_variants.cpp)
+target_include_directories(shader_variants_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME shader_variants COMMAND shader_variants_test
+    ${PROJECT_SOURCE_DIR}/src/render/shaders/cg/variants.txt)
 
 # The Vita backend's event queue, without SDL.
 add_executable(sys_events_test sys_events.cpp)

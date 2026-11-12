@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 project(OpenCMR2 LANGUAGES C CXX)
+if(VITA)
+    enable_language(ASM)   # embeds the precompiled GXM shaders (src/CMakeLists.txt)
+endif()
 
 # Targets (see CMakePresets.json):
 #  - linux-x86: 32-bit x86, the reference build. The game's data structures

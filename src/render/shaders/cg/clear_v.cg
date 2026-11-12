@@ -1,0 +1,9 @@
+// A triangle covering the viewport at the clear depth, from the vertex
+// index alone (indices 0, 1, 2). The backdrop copy draws with it too.
+
+float4 main(unsigned int aIndex : INDEX, uniform float4 clearDepth) : POSITION
+{
+    float x = aIndex == 1 ? 3.0 : -1.0;
+    float y = aIndex == 2 ? 3.0 : -1.0;
+    return float4(x, y, clearDepth.x, 1.0);
+}

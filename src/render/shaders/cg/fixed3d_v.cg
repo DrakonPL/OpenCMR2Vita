@@ -1,0 +1,134 @@
+// Direct3D 7 fixed-function vertex processing: a port of ../fixed3d.vert.
+// Matrices are Direct3D row-vector matrices as uploaded: mul(v, M).
+
+#include "uniforms.h"
+
+#define ROW(r) vu[r]
+#define MATRIX(r) float4x4(vu[r], vu[(r) + 1], vu[(r) + 2], vu[(r) + 3])
+#define LIGHT(i, field) vu[VU_LIGHTS + (i) * VU_LIGHT_ROWS + VU_LIGHT_##field]
+
+float4 MaterialColor(float source, float colourVertex, float4 material, float4 color1, float4 color2)
+{
+    if (colourVertex > 0.5) {
+        if (abs(source - 1.0) < 0.5)
+            return color1;
+        if (abs(source - 2.0) < 0.5)
+            return color2;
+    }
+    return material;
+}
+
+float4 TexCoord(float source, float transform, float4x4 textureMatrix, float2 tex0, float2 tex1,
+                float3 eyePosition, float3 eyeNormal)
+{
+    float4 tc;
+    if (source > 1.5) {
+        // Camera-space reflection vector.
+        float3 e = normalize(-eyePosition);
+        tc = float4(2.0 * dot(e, eyeNormal) * eyeNormal - e, 1.0);
+    } else {
+        tc = float4(source > 0.5 ? tex1 : tex0, 1.0, 0.0);
+    }
+    if (transform > 0.5)
+        tc = float4(mul(float4(tc.xyz, 1.0), textureMatrix).xyz, 1.0);
+    return tc;
+}
+
+void main(
+    float3 aPosition,
+    float3 aNormal,
+    float4 aDiffuse,    // B, G, R, A bytes
+    float4 aSpecular,
+    float2 aTex0,
+    float2 aTex1,
+    uniform float4 vu[VU_ROWS],
+    out float4 vPosition : POSITION,
+    out float4 vDiffuse : TEXCOORD0,
+    out float4 vSpecular : TEXCOORD1,
+    out float4 vTex0 : TEXCOORD2,
+    out float4 vTex1 : TEXCOORD3,
+    out float4 vEye : TEXCOORD4)    // eye position (its z the eye depth); w: fog
+{
+    const float4 lightFlags = ROW(VU_LIGHT_FLAGS);
+    const float4 sources = ROW(VU_SOURCES);
+    const float4 fogFlags = ROW(VU_FOG_FLAGS);
+    const float4 texCoord = ROW(VU_TEX_COORD);
+    const float4x4 worldView = MATRIX(VU_WORLD_VIEW);
+
+    float4 color1 = aDiffuse.zyxw;
+    float4 color2 = aSpecular.zyxw;
+    float4 eye = mul(float4(aPosition, 1.0), worldView);
+    float3 n = mul(aNormal, float3x3(worldView[0].xyz, worldView[1].xyz, worldView[2].xyz));
+    if (fogFlags.y > 0.5 && dot(n, n) > 0.0)
+        n = normalize(n);
+
+    float4 diffuse = color1;
+    float4 specular = color2;
+    if (lightFlags.x > 0.5) {
+        float4 matDiffuse = MaterialColor(sources.x, lightFlags.y, ROW(VU_MATERIAL_DIFFUSE), color1, color2);
+        float4 matSpecular = MaterialColor(sources.y, lightFlags.y, ROW(VU_MATERIAL_SPECULAR), color1, color2);
+        float4 matAmbient = MaterialColor(sources.z, lightFlags.y, ROW(VU_MATERIAL_AMBIENT), color1, color2);
+        float4 matEmissive = MaterialColor(sources.w, lightFlags.y, ROW(VU_MATERIAL_EMISSIVE), color1, color2);
+        const float4 globalAmbient = ROW(VU_GLOBAL_AMBIENT);
+        float3 ambient = globalAmbient.rgb;
+        float3 diffuseSum = float3(0.0, 0.0, 0.0);
+        float3 specularSum = float3(0.0, 0.0, 0.0);
+        float3 toEye = lightFlags.w > 0.5 ? normalize(-eye.xyz) : float3(0.0, 0.0, -1.0);
+        for (int i = 0; i < 8; i++) {
+            if (LIGHT(i, SPOT).z < 0.5)
+                continue;
+            const float4 position = LIGHT(i, POSITION);
+            const float4 direction = LIGHT(i, DIRECTION);
+            const float4 attenuation = LIGHT(i, ATTENUATION);
+            const float4 spot = LIGHT(i, SPOT);
+            float3 L;
+            float atten = 1.0;
+            float spotFactor = 1.0;
+            if (position.w > 2.5) {
+                L = normalize(-direction.xyz);
+            } else {
+                float3 toLight = position.xyz - eye.xyz;
+                float d = length(toLight);
+                if (d > direction.w)
+                    continue;
+                L = d > 0.0 ? toLight / d : float3(0.0, 0.0, 1.0);
+                float denom = attenuation.x + attenuation.y * d + attenuation.z * d * d;
+                atten = denom > 0.0 ? 1.0 / denom : 1.0;
+                if (position.w > 1.5) {
+                    float rho = dot(-L, normalize(direction.xyz));
+                    if (rho <= spot.y)
+                        spotFactor = 0.0;
+                    else if (rho < spot.x)
+                        spotFactor = pow((rho - spot.y) / max(spot.x - spot.y, 1e-6), attenuation.w);
+                }
+            }
+            float scale = atten * spotFactor;
+            ambient += LIGHT(i, AMBIENT).rgb * scale;
+            float nDotL = max(dot(n, L), 0.0);
+            diffuseSum += LIGHT(i, DIFFUSE).rgb * nDotL * scale;
+            if (lightFlags.z > 0.5 && nDotL > 0.0) {
+                float3 h = normalize(toEye + L);
+                specularSum += LIGHT(i, SPECULAR).rgb * pow(max(dot(n, h), 0.0), globalAmbient.w) * scale;
+            }
+        }
+        diffuse = float4(saturate(matEmissive.rgb + ambient * matAmbient.rgb + diffuseSum * matDiffuse.rgb),
+                         matDiffuse.a);
+        specular = float4(saturate(specularSum * matSpecular.rgb), color2.a);
+    }
+
+    vDiffuse = diffuse;
+    vSpecular = specular;
+    vTex0 = TexCoord(texCoord.x, texCoord.z, MATRIX(VU_TEXTURE_MATRIX0), aTex0, aTex1, eye.xyz, n);
+    vTex1 = TexCoord(texCoord.y, texCoord.w, MATRIX(VU_TEXTURE_MATRIX1), aTex0, aTex1, eye.xyz, n);
+    float fog = fogFlags.z > 0.5 ? color2.a : 1.0;
+    if (fogFlags.x > 0.5) {
+        const float4 fogParams = ROW(VU_FOG_PARAMS);
+        float range = fogParams.y - fogParams.x;
+        fog = range != 0.0 ? saturate((fogParams.y - eye.z) / range) : 1.0;
+    }
+    vEye = float4(eye.xyz, fog);
+
+    float4 clipPosition = mul(eye, MATRIX(VU_PROJECTION));
+    clipPosition.xy += ROW(VU_TARGET).zw * clipPosition.w;
+    vPosition = clipPosition;
+}
