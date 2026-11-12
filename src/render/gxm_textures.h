@@ -18,6 +18,7 @@ struct GxmTexture {
     void *memory = nullptr;         // from the texture pool
     GxmTextureLayout layout;
     uint32_t sampler = ~0u;         // the sampler state last set on texture (SamplerKey)
+    unsigned lastDrawn = ~0u;       // the last frame that drew with it (~0u: none)
     // A render target: its colour surface is the texture's memory.
     SceGxmRenderTarget *target = nullptr;
     SceGxmColorSurface color;
@@ -37,8 +38,10 @@ public:
     // GPU (cube maps for now, a full pool).
     GxmTexture *Ensure(GfxTexture *t);
     // Copies the CPU levels of the dirty textures in. A staging texture no
-    // draw has used stays on the CPU.
-    void Upload(std::vector<GfxTexture *> &textures);
+    // draw has used stays on the CPU. A texture that a frame still on the GPU
+    // may read gets new memory; the old goes back later. frame: the number
+    // of the frame being recorded.
+    void Upload(std::vector<GfxTexture *> &textures, unsigned frame);
     // frame: the number of the frame being recorded.
     void Destroy(GfxTexture *t, unsigned frame);
     // At the start of recording frame: frees what the GPU is done with.
@@ -59,7 +62,8 @@ private:
     void Release(GxmTexture *g);
 
     GxmMemory &memory;
-    GxmDeferredFree deferred;
+    GxmDeferredFree deferred;           // GxmTexture objects
+    GxmDeferredFree deferredMemory;     // texture pool blocks replaced by an upload
     unsigned count[5] = {}, bytes[5] = {};   // live, by GFX_FORMAT_*
     bool changed = false;
     bool loggedCube = false, loggedFull = false;

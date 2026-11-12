@@ -69,6 +69,8 @@ GxmTextures::~GxmTextures()
 {
     for (const GxmDeferredFree::Entry &e : deferred.entries)
         Release((GxmTexture *)e.memory);
+    for (const GxmDeferredFree::Entry &e : deferredMemory.entries)
+        memory.Textures().Free(e.memory);
 }
 
 GxmTexture *GxmTextures::Ensure(GfxTexture *t)
@@ -130,7 +132,7 @@ bool GxmTextures::CreateTarget(const GfxTexture *t, GxmTexture &g)
     return Check("sceGxmCreateRenderTarget", sceGxmCreateRenderTarget(&params, &g.target));
 }
 
-void GxmTextures::Upload(std::vector<GfxTexture *> &textures)
+void GxmTextures::Upload(std::vector<GfxTexture *> &textures, unsigned frame)
 {
     for (GfxTexture *t : textures) {
         if (!t->dirty)
@@ -142,6 +144,14 @@ void GxmTextures::Upload(std::vector<GfxTexture *> &textures)
         t->dirty = false;
         if (g == nullptr)
             continue;
+        if (g->lastDrawn != ~0u && frame - g->lastDrawn < (unsigned)kGxmFrameSlots && g->target == nullptr) {
+            void *fresh = memory.Textures().Alloc(g->layout.bytes);
+            if (fresh != nullptr) {
+                deferredMemory.Add(g->memory, frame);
+                g->memory = fresh;
+                sceGxmTextureSetData(&g->texture, fresh);
+            }
+        }
         for (int m = 0; m < g->layout.levels; m++) {
             const GxmLevelLayout &l = g->layout.level[m];
             if (t->levels[0][m].size() < (size_t)l.sourceRowBytes * l.rows)
@@ -166,6 +176,7 @@ void GxmTextures::Destroy(GfxTexture *t, unsigned frame)
 void GxmTextures::Collect(unsigned frame)
 {
     deferred.Collect(frame, [this](void *g) { Release((GxmTexture *)g); });
+    deferredMemory.Collect(frame, [this](void *block) { memory.Textures().Free(block); });
 }
 
 void GxmTextures::Release(GxmTexture *g)
