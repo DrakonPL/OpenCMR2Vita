@@ -481,8 +481,18 @@ extern "C" void Sys_Log(const char *format, ...)
     va_start(args, format);
     vsnprintf(line, sizeof(line), format, args);
     va_end(args);
+#ifdef OPENCMR2_DEV
+    // Seconds since the start on each line, and each line on the card at once:
+    // a crash or a close from the LiveArea keeps every line.
+    char stamped[sizeof(line) + 16];
+    snprintf(stamped, sizeof(stamped), "[%8.2f] %s", (double)sceKernelGetProcessTimeWide() / 1e6, line);
+    sceClibPrintf("%s\n", stamped);
+    AppendLog(stamped);
+    FlushLog();
+#else
     sceClibPrintf("%s\n", line);
     AppendLog(line);
+#endif
 }
 
 extern "C" void Sys_Fatal(const char *format, ...)
