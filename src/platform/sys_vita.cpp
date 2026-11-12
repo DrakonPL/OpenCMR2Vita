@@ -38,9 +38,11 @@ const char kUserDir[] = "ux0:data/OpenCMR2/user/";
 // Defaults that differ from the PC's; opencmr2.ini overrides them.
 // outline_fonts: fitting the outlines to a font takes about 20 s on the
 // Vita at every start; 0 draws the original's bitmap fonts.
+// movie_workers: the Bink decode uses the two other cores.
 const char kVitaDefaults[] =
     "[video]\n"
-    "outline_fonts = 0\n";
+    "outline_fonts = 0\n"
+    "movie_workers = 2\n";
 
 SysSettings::Values s_settings;
 SysEventRing s_events;

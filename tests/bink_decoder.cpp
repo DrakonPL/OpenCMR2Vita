@@ -76,5 +76,35 @@ int main() {
         mutated[offset] ^= 1u << (random & 7);
         if (Open(decoder, mutated)) while (decoder.Decode(frame)) {}
     }
+
+    // Workers: the same frames and audio as on one thread, and errors that
+    // leave no partial frame and no stuck thread.
+    for (bool dct : {false, true}) {
+        auto audio = Audio(dct), video = Video(16, 16, 6, 40);
+        std::vector<uint8_t> packet(4); Put32(packet, 0, audio.size());
+        packet.insert(packet.end(), audio.begin(), audio.end()); packet.insert(packet.end(), video.begin(), video.end());
+        auto movie = Container(16, 16, {packet, packet, packet}, 0x2000 | (dct ? 0x1000 : 0));
+        Bink::Decoder single, threaded;
+        threaded.SetWorkers(2);
+        Check(Open(single, movie, 7) && Open(threaded, movie, 7), "open for the worker test");
+        Bink::Frame a, b;
+        for (int i = 0; i < 3; ++i) {
+            Check(single.Decode(a) && threaded.Decode(b), threaded.Error().c_str());
+            Check(a.bgrx == b.bgrx && a.audio == b.audio, "workers change the output");
+        }
+    }
+    Bink::Decoder threaded;
+    threaded.SetWorkers(2);
+    Check(Open(threaded, invalidType) && !threaded.Decode(frame), "invalid block type accepted with workers");
+    Check(frame.audio.empty() && frame.bgrx.empty(), "partial frame exposed with workers");
+    random = 0x51f15e;
+    for (unsigned i = 0; i < 2000; ++i) {
+        auto mutated = data;
+        random = random * 1664525 + 1013904223;
+        size_t offset = 56 + random % (mutated.size() - 56);
+        random = random * 1664525 + 1013904223;
+        mutated[offset] ^= 1u << (random & 7);
+        if (Open(threaded, mutated)) while (threaded.Decode(frame)) {}
+    }
     std::puts("Bink container, video, audio, truncation and corruption tests passed");
 }
