@@ -3,10 +3,12 @@
 
 #include "platform/platform_vita.h"
 #include "platform/sys_common.h"
+#include "platform/sys_event_ring.h"
 #include "platform/sys_paths.h"
 #include "port/sys.h"
 
 #include <psp2/apputil.h>
+#include <psp2/appmgr.h>
 #include <psp2/common_dialog.h>
 #include <psp2/display.h>
 #include <psp2/gxm.h>
@@ -33,6 +35,8 @@ const char kDataDir[] = "ux0:data/OpenCMR2/";
 const char kUserDir[] = "ux0:data/OpenCMR2/user/";
 
 SysSettings::Values s_settings;
+SysEventRing s_events;
+bool s_resumed;
 std::string s_lastMissingFile;  // game path of the last file that could not be read
 
 // ---- host files -----------------------------------------------------------------
@@ -260,6 +264,32 @@ int RunMessageDialog(const char *text, int buttonType)
     return button;
 }
 
+// ---- system events --------------------------------------------------------------
+
+void PushFocusEvent(int type)
+{
+    SysEvent event = {};
+    event.type = type;
+    s_events.Push(event);
+    Sys_Log("system: %s", type == SYS_EVENT_FOCUS_LOST ? "FOCUS_LOST" : "FOCUS_GAINED");
+}
+
+void PollSystem()
+{
+    // Auto-sleep tears down the GXM context under the game: keep the console
+    // awake while the game runs. The power button still sleeps it.
+    sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);
+    SceAppMgrSystemEvent event;
+    memset(&event, 0, sizeof(event));
+    if (sceAppMgrReceiveSystemEvent(&event) < 0 || event.systemEvent != SCE_APPMGR_SYSTEMEVENT_ON_RESUME)
+        return;
+    // The app is frozen while the LiveArea or sleep is on, so both events
+    // come on the return: the game stops and restarts its music and logic.
+    PushFocusEvent(SYS_EVENT_FOCUS_LOST);
+    PushFocusEvent(SYS_EVENT_FOCUS_GAINED);
+    s_resumed = true;
+}
+
 #ifdef OPENCMR2_DEV
 // The resolver end to end: a mixed-case DOS path read through Sys_OpenFile.
 void LogFileProbe()
@@ -355,12 +385,29 @@ extern "C" void Sys_Sleep(DWORD ms)
 
 // ---- events and window ---------------------------------------------------------
 
-extern "C" int Sys_PollEvent(SysEvent *) { return 0; }
-
-extern "C" int Sys_WaitEvent(SysEvent *)
+void SysVita_PushEvent(const SysEvent &event)
 {
-    Sys_Sleep(16);
-    return 0;
+    s_events.Push(event);
+}
+
+bool Platform_TakeResumed(void)
+{
+    const bool resumed = s_resumed;
+    s_resumed = false;
+    return resumed;
+}
+
+extern "C" int Sys_PollEvent(SysEvent *event)
+{
+    PollSystem();
+    return s_events.Pop(event) ? 1 : 0;
+}
+
+extern "C" int Sys_WaitEvent(SysEvent *event)
+{
+    while (!Sys_PollEvent(event))
+        Sys_Sleep(10);
+    return 1;
 }
 
 extern "C" void Sys_RequestTextInput(const char *, const char *, int) {}

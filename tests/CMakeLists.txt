@@ -150,6 +150,11 @@ add_executable(sys_paths_test sys_paths.cpp ${PROJECT_SOURCE_DIR}/src/platform/s
 target_include_directories(sys_paths_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME sys_paths COMMAND sys_paths_test)
 
+# The Vita backend's event queue, without SDL.
+add_executable(sys_events_test sys_events.cpp)
+target_include_directories(sys_events_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME sys_events COMMAND sys_events_test)
+
 add_executable(replay_disk_test replay_disk.cpp)
 target_link_libraries(replay_disk_test PRIVATE opencmr2_platform)
 add_test(NAME replay_disk COMMAND replay_disk_test)

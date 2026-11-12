@@ -304,5 +304,5 @@ target_link_libraries(opencmr2_platform PRIVATE opencmr2_bink)
 if(VITA)
     target_link_libraries(opencmr2_platform PUBLIC
         SceGxm_stub SceDisplay_stub SceCtrl_stub SceAudio_stub SceCommonDialog_stub SceSysmodule_stub
-        SceNet_stub SceNetCtl_stub SceAppUtil_stub SceIme_stub SceTouch_stub)
+        SceNet_stub SceNetCtl_stub SceAppUtil_stub SceAppMgr_stub SceIme_stub SceTouch_stub)
 endif()
