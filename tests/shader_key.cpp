@@ -102,6 +102,52 @@ int main()
     alpha.alphaTest = false;
     REQUIRE(Gfx_AlphaCompare(alpha) == GFX_ALPHA_COMPARE_OFF && Gfx_FragmentArgsKey(alpha) >> 40 == 0);
 
+    // The lower bound of a draw's alpha, from the least alpha of the diffuse
+    // colour and of the textures. The HUD sprite: texture times diffuse.
+    REQUIRE(Gfx_AlphaLowerBound(hud, 1.0f, 1.0f, 1.0f) == 1.0f);
+    REQUIRE(Gfx_AlphaLowerBound(hud, 0.5f, 0.5f, 1.0f) == 0.25f);
+    // A texture with a transparent texel, or a vertex with alpha 0: no bound.
+    REQUIRE(Gfx_AlphaLowerBound(hud, 1.0f, 0.0f, 1.0f) == 0.0f);
+    REQUIRE(Gfx_AlphaLowerBound(hud, 0.0f, 1.0f, 1.0f) == 0.0f);
+    // One argument selected: the other does not count.
+    GfxDrawState bound = hud;
+    bound.stages[0].alphaOp = GFX_TOP_SELECTARG2;
+    REQUIRE(Gfx_AlphaLowerBound(bound, 0.75f, 0.0f, 1.0f) == 0.75f);
+    bound.stages[0].alphaOp = GFX_TOP_SELECTARG1;
+    REQUIRE(Gfx_AlphaLowerBound(bound, 0.75f, 0.25f, 1.0f) == 0.25f);
+    // No alpha operation: the diffuse alpha. A stage that is off: the same.
+    bound.stages[0].alphaOp = GFX_TOP_DISABLE;
+    REQUIRE(Gfx_AlphaLowerBound(bound, 0.75f, 0.0f, 1.0f) == 0.75f);
+    bound.stages[0].colorOp = GFX_TOP_DISABLE;
+    REQUIRE(Gfx_AlphaLowerBound(bound, 0.5f, 0.0f, 0.0f) == 0.5f);
+    // What the bound does not know gives 0: a complement, the specular
+    // colour, an operation that can go below its arguments, a bump stage.
+    bound = hud;
+    bound.stages[0].alphaArg1 = GFX_TA_TEXTURE | GFX_TA_COMPLEMENT;
+    REQUIRE(Gfx_AlphaLowerBound(bound, 1.0f, 1.0f, 1.0f) == 0.0f);
+    bound.stages[0].alphaArg1 = GFX_TA_SPECULAR;
+    REQUIRE(Gfx_AlphaLowerBound(bound, 1.0f, 1.0f, 1.0f) == 0.0f);
+    bound = hud;
+    bound.stages[0].alphaOp = GFX_TOP_SUBTRACT;
+    REQUIRE(Gfx_AlphaLowerBound(bound, 1.0f, 1.0f, 1.0f) == 0.0f);
+    bound = hud;
+    bound.stages[0].colorOp = GFX_TOP_BUMPENVMAP;
+    REQUIRE(Gfx_AlphaLowerBound(bound, 1.0f, 1.0f, 1.0f) == 0.0f);
+    // The texture factor's alpha is the top byte of its colour.
+    bound = hud;
+    bound.stages[0].alphaArg2 = GFX_TA_TFACTOR;
+    bound.textureFactor = 0x80ffffff;
+    REQUIRE(Gfx_AlphaLowerBound(bound, 1.0f, 1.0f, 1.0f) > 0.5f && Gfx_AlphaLowerBound(bound, 1.0f, 1.0f, 1.0f) < 0.51f);
+    // Stage 1 goes on from stage 0's alpha, with its own texture.
+    bound = hud;
+    bound.stages[1].colorOp = GFX_TOP_MODULATE;
+    bound.stages[1].alphaOp = GFX_TOP_MODULATE;
+    bound.stages[1].alphaArg1 = GFX_TA_TEXTURE;
+    bound.stages[1].alphaArg2 = GFX_TA_CURRENT;
+    REQUIRE(Gfx_AlphaLowerBound(bound, 1.0f, 0.5f, 0.5f) == 0.25f);
+    bound.stages[1].alphaOp = GFX_TOP_DISABLE;
+    REQUIRE(Gfx_AlphaLowerBound(bound, 1.0f, 0.5f, 0.0f) == 0.5f);
+
     // Stage 1 does not run when stage 0 is off.
     GfxDrawState off = stage;
     off.stages[0].colorOp = GFX_TOP_DISABLE;
