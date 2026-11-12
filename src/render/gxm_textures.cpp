@@ -31,9 +31,17 @@ bool Check(const char *call, int err)
     return err >= 0;
 }
 
-// One level of the CPU copy into its GPU rows.
-void CopyLevel(int format, const uint8_t *src, const GxmLevelLayout &l, uint8_t *dst)
+// One level of the CPU copy into its GPU layout.
+void CopyLevel(int format, const uint8_t *src, const GxmTextureLayout &layout, const GxmLevelLayout &l, uint8_t *dst)
 {
+    if (layout.swizzled) {
+        const unsigned width = l.rowBytes / layout.blockBytes;
+        for (unsigned y = 0; y < l.sourceRows; y++)
+            for (unsigned x = 0; x < l.sourceRowBytes / layout.blockBytes; x++)
+                memcpy(dst + (size_t)Gxm_SwizzledBlock(x, y, width, l.rows) * layout.blockBytes,
+                       src + (size_t)y * l.sourceRowBytes + x * layout.blockBytes, layout.blockBytes);
+        return;
+    }
     for (unsigned y = 0; y < l.rows; y++) {
         const uint8_t *in = src + (size_t)y * l.sourceRowBytes;
         uint8_t *out = dst + (size_t)y * l.rowBytes;
@@ -73,10 +81,24 @@ GxmTextures::~GxmTextures()
         memory.Textures().Free(e.memory);
 }
 
+// The texture descriptor of g's layout over its memory.
+int InitTexture(GxmTexture &g, const GfxTexture *t)
+{
+    const SceGxmTextureFormat format = kGxmFormats[t->format];
+    if (!g.layout.swizzled)
+        return sceGxmTextureInitLinear(&g.texture, g.memory, format, t->width, t->height, g.layout.levels);
+    if (Gxm_PowerOfTwo(t->width) == (unsigned)t->width && Gxm_PowerOfTwo(t->height) == (unsigned)t->height)
+        return sceGxmTextureInitSwizzled(&g.texture, g.memory, format, t->width, t->height, g.layout.levels);
+    return sceGxmTextureInitSwizzledArbitrary(&g.texture, g.memory, format, t->width, t->height,
+                                              g.layout.levels);
+}
+
 GxmTexture *GxmTextures::Ensure(GfxTexture *t)
 {
-    if (t->gpu != nullptr)
-        return (GxmTexture *)t->gpu;
+    if (t->gpu != nullptr) {
+        GxmTexture *g = (GxmTexture *)t->gpu;
+        return g->failed ? nullptr : g;
+    }
     if (t->flags & GFX_TEXTURE_CUBE) {
         // No draw of the PC trace samples a cube map (variants.txt has no
         // texture kind 2), and GXM cube maps need swizzled faces.
@@ -88,16 +110,29 @@ GxmTexture *GxmTextures::Ensure(GfxTexture *t)
     if (t->format < 0 || t->format >= kFormats)
         return nullptr;
     GxmTexture *g = new GxmTexture;
-    g->layout = Gxm_LinearLayout(t->format, t->width, t->height, t->mipLevels);
+    g->layout = Gxm_TextureLayout(t->format, t->width, t->height, t->mipLevels);
     g->memory = memory.Textures().Alloc(g->layout.bytes);
-    if (g->memory == nullptr ||
-        !Check("sceGxmTextureInitLinear", sceGxmTextureInitLinear(&g->texture, g->memory, kGxmFormats[t->format],
-                                                                  t->width, t->height, g->layout.levels)) ||
-        ((t->flags & GFX_TEXTURE_RENDER_TARGET) && !CreateTarget(t, *g))) {
-        if (g->memory == nullptr && !loggedFull)
+    if (g->memory == nullptr) {
+        if (!loggedFull)
             Sys_Log("gxm tex: no room for %dx%d (%u KB)", t->width, t->height, g->layout.bytes / 1024);
-        loggedFull = loggedFull || g->memory == nullptr;
-        Release(g);
+        loggedFull = true;
+        delete g;
+        return nullptr;
+    }
+    const int err = InitTexture(*g, t);
+    if (err < 0 || ((t->flags & GFX_TEXTURE_RENDER_TARGET) && !CreateTarget(t, *g))) {
+        // Kept as failed, so that it is not tried (and logged) again each frame.
+        if (err < 0)
+            Sys_Log("gxm tex: %s %dx%d, %d levels, %s: 0x%08x", kFormatNames[t->format], t->width, t->height,
+                    g->layout.levels, g->layout.swizzled ? "swizzled" : "linear", (unsigned)err);
+        if (g->target != nullptr)
+            sceGxmDestroyRenderTarget(g->target);
+        g->target = nullptr;
+        memory.Static().Free(g->depthMemory);
+        memory.Textures().Free(g->memory);
+        g->depthMemory = g->memory = nullptr;
+        g->failed = true;
+        t->gpu = g;
         return nullptr;
     }
     count[t->format]++;
@@ -154,9 +189,9 @@ void GxmTextures::Upload(std::vector<GfxTexture *> &textures, unsigned frame)
         }
         for (int m = 0; m < g->layout.levels; m++) {
             const GxmLevelLayout &l = g->layout.level[m];
-            if (t->levels[0][m].size() < (size_t)l.sourceRowBytes * l.rows)
+            if (t->levels[0][m].size() < (size_t)l.sourceRowBytes * l.sourceRows)
                 continue;
-            CopyLevel(t->format, t->levels[0][m].data(), l, (uint8_t *)g->memory + l.offset);
+            CopyLevel(t->format, t->levels[0][m].data(), g->layout, l, (uint8_t *)g->memory + l.offset);
         }
     }
 }
@@ -166,11 +201,15 @@ void GxmTextures::Destroy(GfxTexture *t, unsigned frame)
     GxmTexture *g = (GxmTexture *)t->gpu;
     if (g == nullptr)
         return;
+    t->gpu = nullptr;
+    if (g->failed) {
+        delete g;
+        return;
+    }
     count[t->format]--;
     bytes[t->format] -= g->layout.bytes;
     changed = true;
     deferred.Add(g, frame);
-    t->gpu = nullptr;
 }
 
 void GxmTextures::Collect(unsigned frame)
@@ -191,7 +230,7 @@ void GxmTextures::Release(GxmTexture *g)
 void GxmTextures::Read(GfxTexture *t)
 {
     GxmTexture *g = (GxmTexture *)t->gpu;
-    if (g == nullptr || (t->format != GFX_FORMAT_BGRX8 && t->format != GFX_FORMAT_BGRA8))
+    if (g == nullptr || g->failed || (t->format != GFX_FORMAT_BGRX8 && t->format != GFX_FORMAT_BGRA8))
         return;
     const GxmLevelLayout &l = g->layout.level[0];
     std::vector<uint8_t> &level = t->levels[0][0];

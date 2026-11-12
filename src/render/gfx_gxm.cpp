@@ -427,7 +427,7 @@ struct Executor : GfxExecutor {
     bool CreateBuffers()
     {
         identityIndices = (uint16_t *)memory.Static().Alloc(kIdentityIndices * sizeof(uint16_t));
-        white.layout = Gxm_LinearLayout(GFX_FORMAT_BGRA8, 8, 8, 1);
+        white.layout = Gxm_TextureLayout(GFX_FORMAT_BGRA8, 8, 8, 1);
         white.memory = memory.Textures().Alloc(white.layout.bytes);
         if (identityIndices == nullptr || white.memory == nullptr)
             return false;
