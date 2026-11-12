@@ -43,8 +43,9 @@ public:
     Decoder &operator=(const Decoder &) = delete;
     // Threads that decode beside the caller: 1 decodes the audio, 2 also the
     // chroma planes and half of the picture. 0 (the default) decodes on the
-    // calling thread. The output is the same. Kept by Open.
-    void SetWorkers(unsigned count);
+    // calling thread. The output is the same. Kept by Open. Returns the
+    // workers made: fewer when a thread cannot start.
+    unsigned SetWorkers(unsigned count);
     // Reader remains owned by caller. Track is a Bink track ID (language);
     // unavailable IDs fall back to the first track, -1 selects silence.
     bool Open(Reader reader, int track);

@@ -379,6 +379,12 @@ bool Platform_Init(int, char **)
     Sys_Log("user directory: %s", kUserDir);
 #ifdef OPENCMR2_DEV
     LogFileProbe();
+    // The app's memory budget, after the heap and the program are taken out.
+    SceKernelFreeMemorySizeInfo memory;
+    memory.size = sizeof(memory);
+    if (sceKernelGetFreeMemorySize(&memory) >= 0)
+        Sys_Log("memory free: main %d KB, CDRAM %d KB, physically contiguous %d KB", memory.size_user / 1024,
+                memory.size_cdram / 1024, memory.size_phycont / 1024);
 #endif
     return true;
 }

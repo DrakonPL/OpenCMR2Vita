@@ -1302,10 +1302,18 @@ struct Decoder::Impl {
 
 Decoder::Decoder() : impl(new Impl) {}
 Decoder::~Decoder() = default;
-void Decoder::SetWorkers(unsigned count) {
+unsigned Decoder::SetWorkers(unsigned count) {
     count = std::min(count, 2u);
     while (impl->workers.size() > count) impl->workers.pop_back();
-    while (impl->workers.size() < count) impl->workers.emplace_back(new Worker);
+    try {
+        while (impl->workers.size() < count) {
+            std::unique_ptr<Worker> worker(new Worker);
+            impl->workers.push_back(std::move(worker));
+        }
+    } catch (const std::exception &) {
+        // No thread (the Vita fails when its memory budget is spent): fewer workers.
+    }
+    return unsigned(impl->workers.size());
 }
 bool Decoder::Open(Reader reader, int track) {
     std::vector<std::unique_ptr<Worker>> workers = std::move(impl->workers);

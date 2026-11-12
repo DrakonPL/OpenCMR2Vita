@@ -66,7 +66,10 @@ extern "C" Movie *Movie_Open(const char *path, int audioTrack)
     }
     movie->file = file;
     // Threads beside the game's for the decode (Bink::Decoder::SetWorkers).
-    movie->decoder.SetWorkers((unsigned)Sys_GetOption("video.movie_workers", 0));
+    const unsigned wanted = (unsigned)Sys_GetOption("video.movie_workers", 0);
+    const unsigned workers = movie->decoder.SetWorkers(wanted);
+    if (workers < wanted)
+        Sys_Log("movie %s: %u of %u decode workers (no thread)", path, workers, wanted);
     DWORD size = Sys_GetFileSize(file);
     if (size > 0x7fffffff || !movie->decoder.Open({file, size, ReadMovie}, audioTrack)) {
         Sys_Log("movie %s: %s", path, movie->decoder.Error().c_str());

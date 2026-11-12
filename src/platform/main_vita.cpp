@@ -7,9 +7,10 @@
 
 #include <psp2/kernel/processmgr.h>
 
-// The original game ran in 64 MB.
+// The original game ran in 64 MB. The heap is taken from the app's memory
+// budget at the start: 192 MB left no memory for a thread's stack.
 extern "C" {
-unsigned int _newlib_heap_size_user = 192 * 1024 * 1024;
+unsigned int _newlib_heap_size_user = 128 * 1024 * 1024;
 unsigned int sceUserMainThreadStackSize = 1 * 1024 * 1024;
 }
 
