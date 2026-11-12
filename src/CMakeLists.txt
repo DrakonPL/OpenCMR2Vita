@@ -352,7 +352,3 @@ if(VITA)
         SceGxm_stub SceDisplay_stub SceCtrl_stub SceAudio_stub SceCommonDialog_stub SceSysmodule_stub
         SceNet_stub SceNetCtl_stub SceAppUtil_stub SceAppMgr_stub SceIme_stub SceTouch_stub)
 endif()
-if(VITA AND OPENCMR2_DEV)
-    # The stage load diagnosis in sys_vita.cpp (__wrap_malloc): removed with it.
-    target_link_options(opencmr2 PRIVATE -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc)
-endif()
