@@ -1,6 +1,8 @@
 // System services on SDL3: see port/sys.h.
 
 #include "platform/platform.h"
+#include "platform/sys_common.h"
+#include "platform/sys_paths.h"
 #include "platform/testing.h"
 #include "port/sys.h"
 #include "port/gfx.h"
@@ -58,125 +60,62 @@ FILE *OpenHostFile(const char *path, const char *mode)
 }
 
 // ---- paths -----------------------------------------------------------------
+// The path code (sys_paths.cpp) on SDL's file system calls.
 
-std::string Lower(const std::string &s)
-{
-    std::string out = s;
-    for (char &c : out)
-        c = (char)SDL_tolower((unsigned char)c);
-    return out;
-}
-
-// Splits a game path into its components: drive letters, "." and empty
-// components dropped, ".." applied.
-std::vector<std::string> SplitGamePath(const char *path)
-{
-    std::vector<std::string> parts;
-    const char *p = path;
-
-    if (p[0] && p[1] == ':')
-        p += 2;
-    std::string part;
-    for (;; p++) {
-        if (*p == '\\' || *p == '/' || *p == 0) {
-            if (part == "..") {
-                if (!parts.empty())
-                    parts.pop_back();
-            } else if (!part.empty() && part != ".") {
-                parts.push_back(part);
-            }
-            part.clear();
-            if (*p == 0)
-                break;
-        } else {
-            part += *p;
-        }
-    }
-    return parts;
-}
-
-// Directory listings, lower-case name -> name on disk.
-std::map<std::string, std::map<std::string, std::string>> s_dirCache;
+using SysPaths::Lower;
+using SysPaths::MatchPattern;
+using SysPaths::SplitGamePath;
+using SysPaths::WithSlash;
 
 SDL_EnumerationResult SDLCALL CollectDirectoryEntry(void *userdata, const char *, const char *name)
 {
-    auto &entries = *(std::map<std::string, std::string> *)userdata;
+    auto &entries = *(SysPaths::Entries *)userdata;
     entries.emplace(Lower(name), name);
     return SDL_ENUM_CONTINUE;
 }
 
-const std::map<std::string, std::string> &ListDir(const std::string &dir)
-{
-    auto it = s_dirCache.find(dir);
-    if (it != s_dirCache.end())
-        return it->second;
+struct SdlHost : SysPaths::Host {
+    void List(const std::string &dir, SysPaths::Entries &entries) override
+    {
+        // Enumerate direct children only. A glob with no pattern can recurse
+        // through the entire tree on some SDL backends, especially drive roots.
+        SDL_EnumerateDirectory(dir.c_str(), CollectDirectoryEntry, &entries);
+    }
+    void MakeDirectory(const std::string &path) override { SDL_CreateDirectory(path.c_str()); }
+    SysPaths::Kind GetKind(const std::string &path, uint64_t *size) override
+    {
+        SDL_PathInfo info{};
+        if (!SDL_GetPathInfo(path.c_str(), &info))
+            return SysPaths::Kind::None;
+        if (size != NULL)
+            *size = info.size;
+        return info.type == SDL_PATHTYPE_FILE        ? SysPaths::Kind::File
+               : info.type == SDL_PATHTYPE_DIRECTORY ? SysPaths::Kind::Directory
+                                                     : SysPaths::Kind::None;
+    }
+};
 
-    std::map<std::string, std::string> &entries = s_dirCache[dir];
-    // Enumerate direct children only. A glob with no pattern can recurse
-    // through the entire tree on some SDL backends, especially drive roots.
-    SDL_EnumerateDirectory(dir.c_str(), CollectDirectoryEntry, &entries);
-    return entries;
+SdlHost s_host;
+SysPaths::Cache s_dirs(s_host);
+
+const SysPaths::Entries &ListDir(const std::string &dir)
+{
+    return s_dirs.List(dir);
 }
 
-// Finds parts under root without regard to case; returns the host path or "".
 std::string FindUnder(const std::string &root, const std::vector<std::string> &parts)
 {
-    std::string path = root;
-    for (size_t i = 0; i < parts.size(); i++) {
-        const auto &entries = ListDir(path);
-        auto it = entries.find(Lower(parts[i]));
-        if (it == entries.end())
-            return std::string();
-        path += it->second;
-        if (i + 1 < parts.size())
-            path += '/';
-    }
-    return path;
+    return s_dirs.FindUnder(root, parts);
 }
 
-// Host path for writing under the user directory; creates the directories,
-// reusing existing ones whatever their case.
 std::string PathForWriting(const std::vector<std::string> &parts)
 {
-    std::string path = s_userDir;
-    for (size_t i = 0; i < parts.size(); i++) {
-        const auto &entries = ListDir(path);
-        auto it = entries.find(Lower(parts[i]));
-        std::string name = it != entries.end() ? it->second : parts[i];
-        bool isDir = i + 1 < parts.size();
-        if (it == entries.end()) {
-            if (isDir)
-                SDL_CreateDirectory((path + name).c_str());
-            s_dirCache[path].emplace(Lower(name), name);
-        }
-        path += name;
-        if (isDir)
-            path += '/';
-    }
-    return path;
+    return s_dirs.PathForWriting(s_userDir, parts);
 }
 
 std::string ResolveForReading(const char *gamePath)
 {
-    std::vector<std::string> parts = SplitGamePath(gamePath);
-    if (parts.empty())
-        return std::string();
-    std::string found = FindUnder(s_userDir, parts);
-    if (found.empty())
-        found = FindUnder(s_dataDir, parts);
-    return found;
-}
-
-bool MatchPattern(const std::string &name, const std::string &pattern)
-{
-    // One '*' at most, compared without regard to case ("*.sav").
-    std::string n = Lower(name), p = Lower(pattern);
-    size_t star = p.find('*');
-    if (star == std::string::npos)
-        return n == p;
-    std::string head = p.substr(0, star), tail = p.substr(star + 1);
-    return n.size() >= head.size() + tail.size() && n.compare(0, head.size(), head) == 0 &&
-           n.compare(n.size() - tail.size(), tail.size(), tail) == 0;
+    return s_dirs.ResolveForReading(s_userDir, s_dataDir, gamePath);
 }
 
 // ---- settings ----------------------------------------------------------------
@@ -186,36 +125,13 @@ void LoadSettings(const std::string &file)
     char *contents = (char *)SDL_LoadFile(file.c_str(), NULL);
     if (contents == NULL)
         return;
-    std::istringstream input(contents);
+    std::string text = contents;
     SDL_free(contents);
-    std::string line;
-    std::string section;
-    while (std::getline(input, line)) {
-        std::string s = line;
-        while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
-            s.pop_back();
-        size_t start = s.find_first_not_of(" \t");
-        if (start == std::string::npos || s[start] == ';' || s[start] == '#')
-            continue;
-        s = s.substr(start);
-        if (s[0] == '[') {
-            section = Lower(s.substr(1, s.find(']') - 1));
-            continue;
-        }
-        size_t eq = s.find('=');
-        if (eq == std::string::npos)
-            continue;
-        std::string key = s.substr(0, eq), value = s.substr(eq + 1);
-        while (!key.empty() && key.back() == ' ')
-            key.pop_back();
-        value.erase(0, value.find_first_not_of(' '));
-        s_settings[section + "." + Lower(key)] = value;
-    }
+    SysSettings::Parse(text, s_settings);
 }
 
-// Sets "key = value" in [section] of the settings file: the first such line
-// is replaced in place and repeats (in any [section] block) are dropped.
-// Unrelated settings and comments are kept; SDL's UTF-8 paths work on Windows too.
+// Sets "key = value" in [section] of the settings file (SysSettings::Edit).
+// SDL's UTF-8 paths work on Windows too.
 bool SaveSetting(const std::string &file, const std::string &section, const std::string &key,
                  const std::string &value)
 {
@@ -224,45 +140,9 @@ bool SaveSetting(const std::string &file, const std::string &section, const std:
     char *contents = (char *)SDL_LoadFile(file.c_str(), NULL);
     if (!contents)
         return false;
-    std::istringstream input(contents);
+    std::string text = contents;
     SDL_free(contents);
-    const std::string setting = key + " = " + value;
-    std::vector<std::string> lines;
-    std::string line, current;
-    size_t headerEnd = std::string::npos;
-    bool written = false;
-    while (std::getline(input, line)) {
-        if (!line.empty() && line.back() == '\r')
-            line.pop_back();
-        size_t start = line.find_first_not_of(" \t");
-        std::string text = start == std::string::npos ? "" : line.substr(start);
-        if (!text.empty() && text[0] == '[') {
-            current = Lower(text.substr(1, text.find(']') - 1));
-            lines.push_back(line);
-            if (current == section && headerEnd == std::string::npos)
-                headerEnd = lines.size();
-            continue;
-        }
-        size_t eq = text.find('=');
-        if (current == section && eq != std::string::npos) {
-            std::string name = text.substr(0, eq);
-            size_t end = name.find_last_not_of(" \t");
-            if (end != std::string::npos && Lower(name.substr(0, end + 1)) == key) {
-                if (!written)
-                    lines.push_back(setting);
-                written = true;
-                continue;
-            }
-        }
-        lines.push_back(line);
-    }
-    if (!written && headerEnd != std::string::npos)
-        lines.insert(lines.begin() + headerEnd, setting);
-    else if (!written)
-        lines.insert(lines.end(), {"", "[" + section + "]", setting});
-    std::string output;
-    for (const std::string &l : lines)
-        output += l + '\n';
+    const std::string output = SysSettings::Edit(text, section, key, value);
     const std::string temporary = file + ".tmp";
     if (!SDL_SaveFile(temporary.c_str(), output.data(), output.size()))
         return false;
@@ -350,33 +230,7 @@ const char s_defaultSettings[] =
 
 std::string MissingGameData(const std::string &dir)
 {
-    std::string missing;
-    // These archives are common to the PC editions; folder names alone also
-    // match empty directories and unextracted installer media.
-    for (const char *file : {"Game/Bigfiles/common.bfl", "FrontEnd/common.bfl", "Sounds/surface.bfl"}) {
-        std::string path = FindUnder(dir, SplitGamePath(file));
-        SDL_PathInfo info{};
-        if (path.empty() || !SDL_GetPathInfo(path.c_str(), &info) ||
-            info.type != SDL_PATHTYPE_FILE || info.size == 0)
-            missing += std::string("\n- ") + file;
-    }
-    // The text, speech and loading screens are in these folders, which some
-    // copies of an installation leave out; the game cannot start without them.
-    for (const char *folder : {"CountrySpecific", "SetupRep"}) {
-        std::string path = FindUnder(dir, {folder});
-        SDL_PathInfo info{};
-        if (path.empty() || !SDL_GetPathInfo(path.c_str(), &info) ||
-            info.type != SDL_PATHTYPE_DIRECTORY || ListDir(path + "/").empty())
-            missing += std::string("\n- ") + folder + "/";
-    }
-    return missing;
-}
-
-std::string WithSlash(std::string dir)
-{
-    if (!dir.empty() && dir.back() != '/')
-        dir += '/';
-    return dir;
+    return s_dirs.MissingGameData(dir);
 }
 
 std::vector<std::string> FindNearbyGameData(const std::string &selected)
@@ -506,7 +360,7 @@ bool SelectGameData(const std::string &settingsFile)
             s_setupCanceled = true;
             return false; // Cancel is a normal exit, with no extra error box.
         }
-        s_dirCache.clear(); // Allow retry after the user copies missing files.
+        s_dirs.Clear(); // Allow retry after the user copies missing files.
         std::vector<std::string> matches = FindNearbyGameData(selection.path);
         if (matches.size() > 1) {
             message = "More than one game installation was found in this folder:\n";
@@ -612,7 +466,7 @@ bool Platform_Init(int argc, char **argv)
     s_dataDir.clear();
     s_commandLine.clear();
     s_settings.clear();
-    s_dirCache.clear();
+    s_dirs.Clear();
     s_setupCanceled = false;
     // The identifier names the window for the desktop (the Wayland app ID,
     // matching a future .desktop file) and the game's audio streams.
@@ -767,22 +621,6 @@ extern "C" double Sys_GetTicksPrecise(void)
     if (s_testClock)
         return s_testClock->ticksPrecise ? s_testClock->ticksPrecise() : (double)s_testClock->ticks();
     return (double)SDL_GetTicksNS() / 1000000.0;
-}
-
-extern "C" int Sys_TakeSteps(SysStepClock *clock, int rate, int max)
-{
-    const DWORD now = Sys_GetTicks();
-    const DWORD elapsed = now - clock->last;
-    clock->last = now;
-    if (!clock->started || elapsed > 250) {
-        clock->started = 1;
-        clock->remainder = 0;
-        return 1;
-    }
-    const DWORD units = clock->remainder + elapsed * (DWORD)rate;
-    clock->remainder = units % 1000;
-    const int steps = (int)(units / 1000);
-    return steps < max ? steps : max;
 }
 
 extern "C" unsigned int Sys_GetUnixTime(void)
@@ -1407,28 +1245,14 @@ extern "C" BOOL Sys_DeleteFile(const char *path)
     std::string host = FindUnder(s_userDir, SplitGamePath(path));
     if (host.empty() || !SDL_RemovePath(host.c_str()))
         return FALSE;
-    s_dirCache.clear();
+    s_dirs.Clear();
     return TRUE;
 }
 
 extern "C" void Sys_ListFiles(const char *directory, const char *pattern, SysListCallback callback, void *context)
 {
-    std::vector<std::string> parts = SplitGamePath(directory);
-    std::map<std::string, std::string> names;
-    for (const std::string *root : { &s_dataDir, &s_userDir }) {
-        std::string dir = parts.empty() ? *root : FindUnder(*root, parts);
-        if (dir.empty())
-            continue;
-        dir = WithSlash(dir);
-        for (const auto &entry : ListDir(dir)) {
-            SDL_PathInfo info;
-            if (MatchPattern(entry.second, pattern) && SDL_GetPathInfo((dir + entry.second).c_str(), &info) &&
-                info.type == SDL_PATHTYPE_FILE)
-                names[entry.first] = entry.second;   // the user directory's copy wins
-        }
-    }
-    for (const auto &name : names)
-        if (!callback(name.second.c_str(), context))
+    for (const std::string &name : s_dirs.ListFiles(s_dataDir, s_userDir, directory, pattern))
+        if (!callback(name.c_str(), context))
             break;
 }
 
@@ -1442,30 +1266,13 @@ namespace {
 // without editing the settings, which Android does not let the player do.
 const char *InstalledSku()
 {
-    static const char *const skus[][2] = {
-        { "EUROPE", "Europe" }, { "AMERICA", "Usa" }, { "JAPAN", "Japan" }, { "POLAND", "Poland" } };
     const char *configured = Platform_GetSetting("install.sku", "EUROPE");
-    if (s_dataDir.empty())
-        return configured;
-    auto present = [](const char *folder) {
-        std::string path = FindUnder(s_dataDir, { "CountrySpecific", folder });
-        SDL_PathInfo info{};
-        return !path.empty() && SDL_GetPathInfo(path.c_str(), &info) && info.type == SDL_PATHTYPE_DIRECTORY;
-    };
-    const char *found = NULL;
-    for (const auto &sku : skus) {
-        if (SDL_strcasecmp(sku[0], configured) == 0 && present(sku[1]))
-            return configured;
-        if (present(sku[1]))
-            found = found == NULL ? sku[0] : "";
-    }
-    if (found == NULL || *found == 0)
-        return configured;
+    const char *sku = s_dirs.DataSku(s_dataDir, configured);
     static bool logged;
-    if (!logged)
-        Sys_Log("install: no CountrySpecific folder for sku %s; the data is the %s edition", configured, found);
-    logged = true;
-    return found;
+    if (!logged && sku != configured)
+        Sys_Log("install: no CountrySpecific folder for sku %s; the data is the %s edition", configured, sku);
+    logged = logged || sku != configured;
+    return sku;
 }
 
 } // namespace

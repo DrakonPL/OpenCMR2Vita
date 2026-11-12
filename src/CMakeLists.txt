@@ -57,6 +57,8 @@ set_source_files_properties(${GAME_QIFIST_UNITS} TARGET_DIRECTORY cmr2_game
 # Platform layer plus the game objects; tests link this too.
 add_library(opencmr2_platform STATIC
     platform/msvcrt.cpp
+    platform/sys_common.cpp
+    platform/sys_paths.cpp
     port/disk.cpp
     port/replay_disk.cpp
     $<TARGET_OBJECTS:cmr2_game>)
