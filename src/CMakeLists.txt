@@ -20,7 +20,9 @@ target_compile_options(cmr2_game PRIVATE
     "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/port/msvcrt.h"
     -fms-extensions)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    target_compile_options(cmr2_game PRIVATE -w)
+    # GCC rejects two MSVC habits that Clang takes in its MS mode: member functions
+    # declared again outside the class, and case values above INT_MAX in an int switch.
+    target_compile_options(cmr2_game PRIVATE -w -fpermissive -Wno-narrowing)
 else()
     target_compile_options(cmr2_game PRIVATE -Wno-everything -ferror-limit=0)
 endif()
