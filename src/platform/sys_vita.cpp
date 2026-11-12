@@ -37,13 +37,17 @@ namespace {
 const char kDataDir[] = "ux0:data/OpenCMR2/";
 const char kUserDir[] = "ux0:data/OpenCMR2/user/";
 
-// Defaults that differ from the PC's; opencmr2.ini overrides them.
+// Defaults that differ from the PC's. opencmr2.ini overrides them.
 // outline_fonts: fitting the outlines to a font takes about 20 s on the
-// Vita at every start; 0 draws the original's bitmap fonts.
+// Vita at every start. 0 draws the original's bitmap fonts.
+// vector_icons: the trace of the co-driver arrows takes about 48 s on the
+// Vita at the first stage load of every start, that of the menu icons 4 s
+// and that of an arcade map 11 s. 0 draws the original's bitmaps.
 // movie_workers: the Bink decode uses the two other cores.
 const char kVitaDefaults[] =
     "[video]\n"
     "outline_fonts = 0\n"
+    "vector_icons = 0\n"
     "movie_workers = 2\n";
 
 SysSettings::Values s_settings;
