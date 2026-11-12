@@ -6,6 +6,7 @@
 #include "platform/sys_event_ring.h"
 #include "platform/sys_paths.h"
 #include "port/sys.h"
+#include "render/gxm_memory.h"
 
 #include <psp2/apputil.h>
 #include <psp2/appmgr.h>
@@ -172,10 +173,9 @@ constexpr int kDisplayWidth = 960;
 constexpr int kDisplayHeight = 544;
 constexpr int kDisplayStride = 1024;   // pixels
 constexpr int kDisplayBuffers = 2;
-constexpr unsigned kMemblockAlign = 256 * 1024;
 
 struct DialogBuffer {
-    SceUID uid;
+    GxmBlock memory;
     void *data;
     SceGxmSyncObject *sync;
 };
@@ -201,12 +201,13 @@ bool OpenDialogDisplay(DialogBuffer (&buffers)[kDisplayBuffers])
     params.parameterBufferSize = SCE_GXM_DEFAULT_PARAMETER_BUFFER_SIZE;
     if (sceGxmInitialize(&params) < 0)
         return false;
-    const unsigned size = (kDisplayStride * kDisplayHeight * 4 + kMemblockAlign - 1) & ~(kMemblockAlign - 1);
+    const unsigned size = kDisplayStride * kDisplayHeight * 4;
     for (DialogBuffer &b : buffers) {
-        b.uid = sceKernelAllocMemBlock("dialog_display", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, size, NULL);
-        sceKernelGetMemBlockBase(b.uid, &b.data);
-        sceGxmMapMemory(b.data, size, (SceGxmMemoryAttribFlags)(SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE));
-        memset(b.data, 0, size);
+        Gxm_AllocGpu(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, size,
+                     (SceGxmMemoryAttribFlags)(SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE), b.memory);
+        b.data = b.memory.data;
+        if (b.data != nullptr)
+            memset(b.data, 0, size);
         sceGxmSyncObjectCreate(&b.sync);
     }
     return true;
@@ -217,8 +218,7 @@ void CloseDialogDisplay(DialogBuffer (&buffers)[kDisplayBuffers])
     sceGxmDisplayQueueFinish();
     for (DialogBuffer &b : buffers) {
         sceGxmSyncObjectDestroy(b.sync);
-        sceGxmUnmapMemory(b.data);
-        sceKernelFreeMemBlock(b.uid);
+        Gxm_FreeGpu(b.memory);
     }
     sceGxmTerminate();
 }

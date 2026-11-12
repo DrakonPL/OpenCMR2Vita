@@ -18,6 +18,7 @@ namespace {
 
 struct Executor : GfxExecutor {
     GxmDevice device;
+    GxmMemory memory;   // after the device: freed before it
     bool ready = false;
     bool loggedInit = false;
     unsigned presented = 0;
@@ -25,7 +26,7 @@ struct Executor : GfxExecutor {
     SceGxmVertexProgram *clearVertex = nullptr;
     SceGxmFragmentProgram *clearFragment = nullptr;
     const SceGxmProgramParameter *clearDepthParam = nullptr, *clearColorParam = nullptr;
-    GxmBlock clearIndices;
+    uint16_t *clearIndices = nullptr;
 
     ~Executor() override
     {
@@ -36,7 +37,7 @@ struct Executor : GfxExecutor {
         sceGxmShaderPatcherReleaseVertexProgram(device.Patcher(), clearVertex);
         sceGxmShaderPatcherUnregisterProgram(device.Patcher(), clearFragmentId);
         sceGxmShaderPatcherUnregisterProgram(device.Patcher(), clearVertexId);
-        Gxm_FreeGpu(clearIndices);
+        memory.Static().Free(clearIndices);
     }
 
     static bool Check(const char *call, int err)
@@ -70,20 +71,19 @@ struct Executor : GfxExecutor {
             Sys_Log("gxm: the clear programs lack clearDepth or clearColor");
             return false;
         }
-        if (!Gxm_AllocGpu(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, 3 * sizeof(uint16_t), SCE_GXM_MEMORY_ATTRIB_READ,
-                          clearIndices))
+        clearIndices = (uint16_t *)memory.Static().Alloc(3 * sizeof(uint16_t));
+        if (clearIndices == nullptr)
             return false;
-        uint16_t *indices = (uint16_t *)clearIndices.data;
-        indices[0] = 0;
-        indices[1] = 1;
-        indices[2] = 2;
+        clearIndices[0] = 0;
+        clearIndices[1] = 1;
+        clearIndices[2] = 2;
         return true;
     }
 
     bool SetVideoMode(int width, int height, bool) override
     {
         if (!ready)
-            ready = device.Init() && CreateClearProgram();
+            ready = device.Init() && memory.Init() && CreateClearProgram();
         return ready && device.SetMode(width, height);
     }
 
@@ -110,7 +110,7 @@ struct Executor : GfxExecutor {
         sceGxmReserveFragmentDefaultUniformBuffer(context, &uniforms);
         sceGxmSetUniformDataF(uniforms, clearColorParam, 0, 4, color);
         Check("sceGxmDraw", sceGxmDraw(context, SCE_GXM_PRIMITIVE_TRIANGLES, SCE_GXM_INDEX_FORMAT_U16,
-                                       clearIndices.data, 3));
+                                       clearIndices, 3));
     }
 
     void Execute(GfxFrame &, std::vector<GfxTexture *> &textures, GfxReadback &readback, bool present, bool vsync,

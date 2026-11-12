@@ -6,11 +6,29 @@
 
 namespace {
 
+constexpr unsigned kMB = 1024 * 1024;
+constexpr unsigned kKB = 1024;
 constexpr unsigned kPageSize = 4 * 1024;
 constexpr unsigned kCdramPageSize = 256 * 1024;
 
 // The process's live memblocks: a kernel resource, so one count.
 int s_liveBlocks;
+
+// The worst case of plans/vita/PLAN.md section 3 (the PC trace, VP-1.4).
+constexpr unsigned kFrameVertexBytesMax = 3419360;     // a load frame in France
+constexpr unsigned kFrameIndicesMax = 36852;
+constexpr unsigned kVertexBufferBytesMax = 11013 * kKB; // 103 live GfxVertexBuffers
+constexpr unsigned kTextureBytesMax = 78689 * kKB;      // all formats, the France race
+// A frame ring slot: the frame's vertices and indices, with half again of room.
+constexpr unsigned kRingSlotBytes =
+    ((kFrameVertexBytesMax + kFrameIndicesMax * 2) * 3 / 2 + kMB - 1) / kMB * kMB;
+constexpr unsigned kStaticArenaBytes = 4 * kMB;
+constexpr unsigned kTextureArenaBytes = 16 * kMB;
+constexpr unsigned kTextureReserveBytes = kTextureBytesMax / 4 * 5;   // 25 percent over
+
+const SceGxmMemoryAttribFlags kRead = SCE_GXM_MEMORY_ATTRIB_READ;
+const SceGxmMemoryAttribFlags kReadWrite =
+    (SceGxmMemoryAttribFlags)(SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE);
 
 unsigned RoundUp(unsigned size, unsigned step)
 {
@@ -109,4 +127,57 @@ void Gxm_FreeFragmentUsse(GxmBlock &block)
 int Gxm_LiveBlocks(void)
 {
     return s_liveBlocks;
+}
+
+// ---- pools ----
+
+unsigned char *GxmArenaSource::Alloc(unsigned bytes, int *handle)
+{
+    GxmBlock block;
+    if (!Gxm_AllocGpu(type, bytes, attribs, block) && !Gxm_AllocGpu(fallback, bytes, attribs, block))
+        return nullptr;
+    *handle = (int)blocks.size();
+    blocks.push_back(block);
+    return (unsigned char *)block.data;
+}
+
+void GxmArenaSource::Free(int handle)
+{
+    if (handle >= 0 && handle < (int)blocks.size())
+        Gxm_FreeGpu(blocks[handle]);
+}
+
+GxmMemory::GxmMemory()
+    : staticSource(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, kRead),
+      textureSource(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, kReadWrite),
+      staticPool(staticSource, kStaticArenaBytes), texturePool(textureSource, kTextureArenaBytes)
+{
+}
+
+bool GxmMemory::Init()
+{
+    if (!Gxm_AllocGpu(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, kRingSlotBytes * 3, kRead, ringMemory))
+        return false;
+    ring.base = (unsigned char *)ringMemory.data;
+    ring.slotBytes = kRingSlotBytes;
+    if (!staticPool.Reserve(kVertexBufferBytesMax) || !texturePool.Reserve(kTextureReserveBytes))
+        return false;
+    loggedGrowths = staticPool.Growths() + texturePool.Growths();
+    Log();
+    return true;
+}
+
+GxmMemory::~GxmMemory()
+{
+    Gxm_FreeGpu(ringMemory);
+}
+
+void GxmMemory::Log()
+{
+    const int growths = staticPool.Growths() + texturePool.Growths();
+    Sys_Log("gxm mem: blocks %d, frame ring %u MB, static %.1f/%.1f MB, textures %.1f/%.1f MB, growths %d",
+            Gxm_LiveBlocks(), ringMemory.size / kMB, staticPool.Used() / (double)kMB,
+            staticPool.Capacity() / (double)kMB, texturePool.Used() / (double)kMB,
+            texturePool.Capacity() / (double)kMB, growths - loggedGrowths);
+    loggedGrowths = growths;
 }
