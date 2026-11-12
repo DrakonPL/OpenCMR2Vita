@@ -315,6 +315,8 @@ if(VITA)
     target_sources(opencmr2_platform PRIVATE
         platform/sys_vita.cpp
         render/gfx_gxm.cpp
+        render/gxm_device.cpp
+        render/gxm_memory.cpp
         audio/audio_vita.cpp
         input/input_vita.cpp
         net/net_api_vita.cpp)
