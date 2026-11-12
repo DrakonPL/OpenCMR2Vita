@@ -18,20 +18,27 @@ target_compile_options(cmr2_game PRIVATE
     $<$<COMPILE_LANGUAGE:C>:-x c>
     "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/port/types.h"
     "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/port/msvcrt.h"
-    -fms-extensions
-    -Wno-everything
-    -ferror-limit=0)
-target_link_libraries(cmr2_game PUBLIC SDL3::SDL3)
+    -fms-extensions)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(cmr2_game PRIVATE -w)
+else()
+    target_compile_options(cmr2_game PRIVATE -Wno-everything -ferror-limit=0)
+endif()
+if(NOT VITA)
+    target_link_libraries(cmr2_game PUBLIC SDL3::SDL3)
+endif()
 
 # These units used to call variadic sprintf through fixed-argument casts,
 # which breaks the macOS ARM64 ABI. Reject incompatible function casts here
 # even though other warnings in the decompiled game are disabled. Game.cpp
 # still has legacy state callback casts, so it keeps the general warning policy.
-set_source_files_properties(
-    ${GAME_DIR}/InstallInfo.cpp ${GAME_DIR}/Graphics.cpp
-    ${GAME_DIR}/Input.cpp ${GAME_DIR}/Texture.cpp
-    TARGET_DIRECTORY cmr2_game
-    PROPERTIES COMPILE_OPTIONS "-Wcast-function-type-strict;-Werror=cast-function-type-strict")
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    set_source_files_properties(
+        ${GAME_DIR}/InstallInfo.cpp ${GAME_DIR}/Graphics.cpp
+        ${GAME_DIR}/Input.cpp ${GAME_DIR}/Texture.cpp
+        TARGET_DIRECTORY cmr2_game
+        PROPERTIES COMPILE_OPTIONS "-Wcast-function-type-strict;-Werror=cast-function-type-strict")
+endif()
 
 # The original builds these with /QIfist: their float-to-integer conversions
 # (FTOI, game/FloatToInt.h) round to nearest like x87 FISTP instead of
@@ -55,7 +62,9 @@ add_library(opencmr2_platform STATIC
     $<TARGET_OBJECTS:cmr2_game>)
 target_sources(opencmr2_platform PRIVATE diagnostics/observer.cpp diagnostics/timing.cpp)
 target_include_directories(opencmr2_platform PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${GAME_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/port/compat)
-target_link_libraries(opencmr2_platform PUBLIC SDL3::SDL3)
+if(NOT VITA)
+    target_link_libraries(opencmr2_platform PUBLIC SDL3::SDL3)
+endif()
 
 
 if(ANDROID)
@@ -91,90 +100,92 @@ endif()
 # The OpenGL 3.3 renderer (render/gfx_gl.cpp), for GPUs without Vulkan or
 # Direct3D 12, takes GLSL 330 from the same SPIR-V: drawn upside down, so
 # that images keep Direct3D's rows, with the depth range of OpenGL.
-option(OPENCMR2_SHADERS_MSL "Also build Metal (MSL) shaders" ${APPLE})
-if(APPLE OR ANDROID)
-    set(OPENCMR2_RENDERER_GL_DEFAULT OFF)
-else()
-    set(OPENCMR2_RENDERER_GL_DEFAULT ON)
-endif()
-option(OPENCMR2_RENDERER_GL "Build the OpenGL 3.3 renderer" ${OPENCMR2_RENDERER_GL_DEFAULT})
-# Recent glslang releases use glslang.exe; older packages keep glslangValidator.
-find_program(GLSLANG_VALIDATOR NAMES glslangValidator glslang REQUIRED)
-if(OPENCMR2_SHADERS_MSL OR OPENCMR2_RENDERER_GL)
-    find_program(SPIRV_CROSS_EXECUTABLE spirv-cross)
-    if(SPIRV_CROSS_EXECUTABLE)
-        set(SPIRV_CROSS ${SPIRV_CROSS_EXECUTABLE})
+if(NOT VITA)
+    option(OPENCMR2_SHADERS_MSL "Also build Metal (MSL) shaders" ${APPLE})
+    if(APPLE OR ANDROID)
+        set(OPENCMR2_RENDERER_GL_DEFAULT OFF)
     else()
-        message(STATUS "OpenCMR2: building spirv-cross from source")
-        include(FetchContent)
-        # The command-line tool needs the GLSL, HLSL, MSL, C++ and reflection back ends.
-        foreach(option SPIRV_CROSS_ENABLE_TESTS SPIRV_CROSS_ENABLE_C_API SPIRV_CROSS_SHARED)
-            set(${option} OFF CACHE BOOL "" FORCE)
-        endforeach()
-        set(SPIRV_CROSS_CLI ON CACHE BOOL "" FORCE)
-        set(SPIRV_CROSS_STATIC ON CACHE BOOL "" FORCE)
-        set(SPIRV_CROSS_SKIP_INSTALL ON CACHE BOOL "" FORCE)
-        FetchContent_Declare(SPIRV-Cross
-            GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Cross.git
-            GIT_TAG vulkan-sdk-1.4.363.0
-            GIT_SHALLOW TRUE)
-        FetchContent_MakeAvailable(SPIRV-Cross)
-        set(SPIRV_CROSS $<TARGET_FILE:spirv-cross>)
+        set(OPENCMR2_RENDERER_GL_DEFAULT ON)
     endif()
-endif()
-
-set(SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/render/shaders)
-set(SHADER_SOURCES fixed3d.vert fixedtl.vert fixed.frag clear.vert clear.frag)
-set(SHADER_FILES)
-foreach(shader IN LISTS SHADER_SOURCES)
-    set(output ${CMAKE_CURRENT_BINARY_DIR}/shaders/${shader}.spv)
-    add_custom_command(
-        OUTPUT ${output}
-        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/shaders
-        COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 -o ${output} ${SHADER_DIR}/${shader}
-        DEPENDS ${SHADER_DIR}/${shader} ${SHADER_DIR}/common.glsl
-        COMMENT "Compiling shader ${shader}")
-    list(APPEND SHADER_FILES ${output})
-    if(OPENCMR2_SHADERS_MSL)
-        set(msl ${CMAKE_CURRENT_BINARY_DIR}/shaders/${shader}.msl)
-        add_custom_command(
-            OUTPUT ${msl}
-            COMMAND ${SPIRV_CROSS} --msl --msl-version 20100 --msl-decoration-binding --output ${msl} ${output}
-            DEPENDS ${output}
-            COMMENT "Translating shader ${shader} to MSL")
-        list(APPEND SHADER_FILES ${msl})
-    endif()
-    # The clears of the OpenGL renderer need no shader. GLSL 330 links the
-    # vertex shader's outputs to the fragment shader's inputs by name: both
-    # are named after their location.
-    if(OPENCMR2_RENDERER_GL AND NOT shader MATCHES "^clear")
-        set(glsl ${CMAKE_CURRENT_BINARY_DIR}/shaders/${shader}.glsl)
-        if(shader MATCHES "\\.vert$")
-            set(interface out)
+    option(OPENCMR2_RENDERER_GL "Build the OpenGL 3.3 renderer" ${OPENCMR2_RENDERER_GL_DEFAULT})
+    # Recent glslang releases use glslang.exe; older packages keep glslangValidator.
+    find_program(GLSLANG_VALIDATOR NAMES glslangValidator glslang REQUIRED)
+    if(OPENCMR2_SHADERS_MSL OR OPENCMR2_RENDERER_GL)
+        find_program(SPIRV_CROSS_EXECUTABLE spirv-cross)
+        if(SPIRV_CROSS_EXECUTABLE)
+            set(SPIRV_CROSS ${SPIRV_CROSS_EXECUTABLE})
         else()
-            set(interface in)
+            message(STATUS "OpenCMR2: building spirv-cross from source")
+            include(FetchContent)
+            # The command-line tool needs the GLSL, HLSL, MSL, C++ and reflection back ends.
+            foreach(option SPIRV_CROSS_ENABLE_TESTS SPIRV_CROSS_ENABLE_C_API SPIRV_CROSS_SHARED)
+                set(${option} OFF CACHE BOOL "" FORCE)
+            endforeach()
+            set(SPIRV_CROSS_CLI ON CACHE BOOL "" FORCE)
+            set(SPIRV_CROSS_STATIC ON CACHE BOOL "" FORCE)
+            set(SPIRV_CROSS_SKIP_INSTALL ON CACHE BOOL "" FORCE)
+            FetchContent_Declare(SPIRV-Cross
+                GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Cross.git
+                GIT_TAG vulkan-sdk-1.4.363.0
+                GIT_SHALLOW TRUE)
+            FetchContent_MakeAvailable(SPIRV-Cross)
+            set(SPIRV_CROSS $<TARGET_FILE:spirv-cross>)
         endif()
-        set(renames)
-        foreach(location RANGE 5)
-            list(APPEND renames --rename-interface-variable ${interface} ${location} varying${location})
-        endforeach()
-        add_custom_command(
-            OUTPUT ${glsl}
-            COMMAND ${SPIRV_CROSS} --version 330 --no-es --no-420pack-extension --flip-vert-y --fixup-clipspace
-                ${renames} --output ${glsl} ${output}
-            DEPENDS ${output}
-            COMMENT "Translating shader ${shader} to GLSL 330")
-        list(APPEND SHADER_FILES ${glsl})
     endif()
-endforeach()
-set(SHADER_HEADER ${CMAKE_CURRENT_BINARY_DIR}/generated/shaders_spirv.h)
-string(REPLACE ";" "|" SHADER_LIST "${SHADER_FILES}")
-add_custom_command(
-    OUTPUT ${SHADER_HEADER}
-    COMMAND ${CMAKE_COMMAND} -DOUTPUT=${SHADER_HEADER} -DINPUTS=${SHADER_LIST} -P ${PROJECT_SOURCE_DIR}/cmake/embed_spirv.cmake
-    VERBATIM
-    DEPENDS ${SHADER_FILES} ${PROJECT_SOURCE_DIR}/cmake/embed_spirv.cmake
-    COMMENT "Embedding shaders")
+
+    set(SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/render/shaders)
+    set(SHADER_SOURCES fixed3d.vert fixedtl.vert fixed.frag clear.vert clear.frag)
+    set(SHADER_FILES)
+    foreach(shader IN LISTS SHADER_SOURCES)
+        set(output ${CMAKE_CURRENT_BINARY_DIR}/shaders/${shader}.spv)
+        add_custom_command(
+            OUTPUT ${output}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/shaders
+            COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 -o ${output} ${SHADER_DIR}/${shader}
+            DEPENDS ${SHADER_DIR}/${shader} ${SHADER_DIR}/common.glsl
+            COMMENT "Compiling shader ${shader}")
+        list(APPEND SHADER_FILES ${output})
+        if(OPENCMR2_SHADERS_MSL)
+            set(msl ${CMAKE_CURRENT_BINARY_DIR}/shaders/${shader}.msl)
+            add_custom_command(
+                OUTPUT ${msl}
+                COMMAND ${SPIRV_CROSS} --msl --msl-version 20100 --msl-decoration-binding --output ${msl} ${output}
+                DEPENDS ${output}
+                COMMENT "Translating shader ${shader} to MSL")
+            list(APPEND SHADER_FILES ${msl})
+        endif()
+        # The clears of the OpenGL renderer need no shader. GLSL 330 links the
+        # vertex shader's outputs to the fragment shader's inputs by name: both
+        # are named after their location.
+        if(OPENCMR2_RENDERER_GL AND NOT shader MATCHES "^clear")
+            set(glsl ${CMAKE_CURRENT_BINARY_DIR}/shaders/${shader}.glsl)
+            if(shader MATCHES "\\.vert$")
+                set(interface out)
+            else()
+                set(interface in)
+            endif()
+            set(renames)
+            foreach(location RANGE 5)
+                list(APPEND renames --rename-interface-variable ${interface} ${location} varying${location})
+            endforeach()
+            add_custom_command(
+                OUTPUT ${glsl}
+                COMMAND ${SPIRV_CROSS} --version 330 --no-es --no-420pack-extension --flip-vert-y --fixup-clipspace
+                    ${renames} --output ${glsl} ${output}
+                DEPENDS ${output}
+                COMMENT "Translating shader ${shader} to GLSL 330")
+            list(APPEND SHADER_FILES ${glsl})
+        endif()
+    endforeach()
+    set(SHADER_HEADER ${CMAKE_CURRENT_BINARY_DIR}/generated/shaders_spirv.h)
+    string(REPLACE ";" "|" SHADER_LIST "${SHADER_FILES}")
+    add_custom_command(
+        OUTPUT ${SHADER_HEADER}
+        COMMAND ${CMAKE_COMMAND} -DOUTPUT=${SHADER_HEADER} -DINPUTS=${SHADER_LIST} -P ${PROJECT_SOURCE_DIR}/cmake/embed_spirv.cmake
+        VERBATIM
+        DEPENDS ${SHADER_FILES} ${PROJECT_SOURCE_DIR}/cmake/embed_spirv.cmake
+        COMMENT "Embedding shaders")
+endif()
 
 # ---- window icon (embedded) ------------------------------------------------------
 # res/opencmr2.png is the source; the derived icons are regenerated with:
@@ -211,7 +222,9 @@ add_custom_command(
 # that port/compat replaces for the game.
 add_library(opencmr2_shortcut STATIC platform/menu_shortcut.cpp ${ICON_HEADER})
 target_include_directories(opencmr2_shortcut PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/generated)
-target_link_libraries(opencmr2_shortcut PUBLIC SDL3::SDL3)
+if(NOT VITA)
+    target_link_libraries(opencmr2_shortcut PUBLIC SDL3::SDL3)
+endif()
 if(WIN32)
     target_link_libraries(opencmr2_shortcut PRIVATE ole32 uuid shell32)
 endif()

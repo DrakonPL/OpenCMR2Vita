@@ -8,11 +8,15 @@ project(OpenCMR2 LANGUAGES C CXX)
 #    original-game parity checks are tracked in docs/64bit-raw-access.md.
 #  - Android: built by the Gradle project in android/, which passes the NDK
 #    toolchain and the SDL3 source it also takes SDLActivity from.
+#  - vita: PS Vita with the vitasdk GCC (cmake/vita.cmake), without SDL.
 
 # The game source needs Clang with GNU-style options: -fms-extensions for the
 # MSVC dialect it was written in, forced includes and the semantics below.
 # On Windows that is clang++ (not clang-cl) targeting the MSVC runtime.
-if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+# The PS Vita build uses the vitasdk GCC, which takes the same options.
+if(VITA AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    message(STATUS "OpenCMR2: PS Vita build with GCC ${CMAKE_CXX_COMPILER_VERSION}")
+elseif(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
     message(FATAL_ERROR "OpenCMR2 builds with Clang (found ${CMAKE_CXX_COMPILER_ID}); use one of the CMake presets")
 endif()
 if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
@@ -53,10 +57,10 @@ if(OPENCMR2_SANITIZE)
     add_link_options(-fsanitize=address,undefined)
 endif()
 
-if(NOT OPENCMR2_VENDORED_SDL)
+if(NOT OPENCMR2_VENDORED_SDL AND NOT VITA)
     find_package(SDL3 3.4 CONFIG COMPONENTS SDL3-shared)
 endif()
-if(NOT TARGET SDL3::SDL3)
+if(NOT TARGET SDL3::SDL3 AND NOT VITA)
     message(STATUS "OpenCMR2: building SDL3 from source")
     set(OPENCMR2_BUILT_SDL ON)
     include(FetchContent)
@@ -78,8 +82,8 @@ endif()
 
 add_subdirectory(src)
 
-# The tests run on the build machine; the Android build is the game alone.
-if(NOT ANDROID)
+# The tests run on the build machine; the Android and Vita builds are the game alone.
+if(NOT ANDROID AND NOT VITA)
     enable_testing()
     add_subdirectory(tests)
 endif()
