@@ -8,6 +8,10 @@
 #ifndef OPENCMR2_GXM_FRAME_RING_H
 #define OPENCMR2_GXM_FRAME_RING_H
 
+// Frames in flight: the CPU records one, the GPU draws one, the display
+// shows one. Per-frame data has a slot for each.
+constexpr int kGxmFrameSlots = 3;
+
 struct GxmFrameRing {
     static constexpr unsigned kFull = ~0u;
 

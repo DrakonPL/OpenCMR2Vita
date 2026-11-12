@@ -317,6 +317,7 @@ if(VITA)
         render/gfx_gxm.cpp
         render/gxm_device.cpp
         render/gxm_memory.cpp
+        render/gxm_textures.cpp
         audio/audio_vita.cpp
         input/input_vita.cpp
         net/net_api_vita.cpp)

@@ -1,11 +1,12 @@
 // The GXM executor (PS Vita): runs a recorded frame (gfx_core.cpp) on the
-// GXM device (gxm_device.cpp). For now it shows a probe: a clear colour that
-// changes each second, and draws nothing of the frame.
+// GXM device (gxm_device.cpp). For now it uploads the textures and shows a
+// probe: a clear colour that changes each second. It draws nothing of the frame.
 
 #include "platform/platform_vita.h"
 #include "port/sys.h"
 #include "render/gfx_internal.h"
 #include "render/gxm_device.h"
+#include "render/gxm_textures.h"
 
 #include <psp2/kernel/processmgr.h>
 
@@ -19,9 +20,13 @@ namespace {
 struct Executor : GfxExecutor {
     GxmDevice device;
     GxmMemory memory;   // after the device: freed before it
+    GxmTextures gpuTextures{ memory };
     bool ready = false;
     bool loggedInit = false;
-    unsigned presented = 0;
+    unsigned presented = 0;     // frames shown: the number of the frame being recorded
+    bool frameStarted = false;  // an Execute of the frame being recorded has run
+    // Textures made or destroyed in this frame; in an earlier one, not logged yet.
+    bool texturesChanged = false, texturesLogPending = false;
     SceGxmShaderPatcherId clearVertexId = nullptr, clearFragmentId = nullptr;
     SceGxmVertexProgram *clearVertex = nullptr;
     SceGxmFragmentProgram *clearFragment = nullptr;
@@ -113,12 +118,55 @@ struct Executor : GfxExecutor {
                                        clearIndices, 3));
     }
 
-    void Execute(GfxFrame &, std::vector<GfxTexture *> &textures, GfxReadback &readback, bool present, bool vsync,
-                 bool) override
+    // The textures the frame draws with or into are on the GPU before the upload.
+    void EnsureTextures(const GfxFrame &frame)
     {
-        for (GfxTexture *t : textures)
-            t->dirty = false;
-        if (!present || !ready)
+        for (const GfxDrawState &s : frame.states)
+            for (const GfxStageState &stage : s.stages) {
+                GfxTexture *t = Gfx_DrawnTexture(stage.texture);
+                if (t == nullptr)
+                    continue;
+                gpuTextures.Ensure(t);
+                // A vector icon also reads its original.
+                if (t->flags & GFX_TEXTURE_VECTOR_ICON)
+                    gpuTextures.Ensure(stage.texture);
+            }
+        for (const GfxCommand &c : frame.commands)
+            if (c.type == GFX_CMD_TARGET && c.target != nullptr)
+                gpuTextures.Ensure(c.target->cube != nullptr ? c.target->cube : c.target);
+    }
+
+    // One "gxm tex" and one "gxm mem" line when the textures stop changing
+    // (the end of a load), not one per frame of the load.
+    void LogTextures()
+    {
+        texturesChanged = gpuTextures.TakeChanged() || texturesChanged;
+        if (texturesChanged) {
+            texturesLogPending = true;
+        } else if (texturesLogPending) {
+            gpuTextures.Log();
+            memory.Log();
+            texturesLogPending = false;
+        }
+        texturesChanged = false;
+    }
+
+    void Execute(GfxFrame &frame, std::vector<GfxTexture *> &textures, GfxReadback &readback, bool present,
+                 bool vsync, bool) override
+    {
+        if (!ready) {
+            for (GfxTexture *t : textures)
+                t->dirty = false;
+            return;
+        }
+        if (!frameStarted) {
+            gpuTextures.Collect(presented);
+            frameStarted = true;
+        }
+        EnsureTextures(frame);
+        gpuTextures.Upload(textures);
+        texturesChanged = gpuTextures.TakeChanged() || texturesChanged;
+        if (!present)
             return;
         if (readback.requested) {
             readback.pixels.assign((size_t)readback.width * readback.height, 0xff000000);
@@ -146,10 +194,20 @@ struct Executor : GfxExecutor {
 #endif
         device.Present(vsync);
         presented++;
+        frameStarted = false;
+        LogTextures();
     }
 
-    void DestroyTexture(GfxTexture *) override {}
-    void ReadTexture(GfxTexture *) override {}
+    void DestroyTexture(GfxTexture *t) override
+    {
+        gpuTextures.Destroy(t, presented);
+    }
+
+    void ReadTexture(GfxTexture *t) override
+    {
+        device.Finish();
+        gpuTextures.Read(t);
+    }
 };
 
 } // namespace

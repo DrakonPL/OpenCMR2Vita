@@ -5,6 +5,7 @@
 #ifndef OPENCMR2_GXM_DEVICE_H
 #define OPENCMR2_GXM_DEVICE_H
 
+#include "render/gxm_frame_ring.h"
 #include "render/gxm_memory.h"
 
 #include <psp2/gxm.h>
@@ -16,9 +17,7 @@ public:
     // The display's size; a smaller back buffer is centred in it.
     static constexpr int kDisplayWidth = 960;
     static constexpr int kDisplayHeight = 544;
-    // Frames in flight: the CPU records one, the GPU draws one, the display
-    // shows one. Rings of per-frame data have one slot for each.
-    static constexpr int kFrameSlots = 3;
+    static constexpr int kFrameSlots = kGxmFrameSlots;
 
     GxmDevice() = default;
     GxmDevice(const GxmDevice &) = delete;
