@@ -1,0 +1,30 @@
+// Pre-transformed (screen space) vertices: a port of ../fixedtl.vert.
+// GXM clip space has y up and a depth range of 0 to 1, as Direct3D.
+
+void main(
+    float4 aPosition,   // screen x, y, z, 1/w
+    float4 aDiffuse,    // B, G, R, A bytes
+    float4 aSpecular,
+    float2 aTex,
+    uniform float4 target,  // render target width, height (in the game's screen pixels), -, -
+    out float4 vPosition : POSITION,
+    out float4 vDiffuse : TEXCOORD0,
+    out float4 vSpecular : TEXCOORD1,
+    out float4 vTex0 : TEXCOORD2,
+    out float4 vTex1 : TEXCOORD3,
+    out float4 vEye : TEXCOORD4)    // eye position (its z the eye depth); w: fog
+{
+    float w = aPosition.w != 0.0 ? 1.0 / aPosition.w : 1.0;
+    // Direct3D 7 puts pixel centres on integer coordinates: half a pixel
+    // to the right and down of where they are now.
+    float x = (aPosition.x + 0.5) / target.x * 2.0 - 1.0;
+    float y = 1.0 - (aPosition.y + 0.5) / target.y * 2.0;
+    vPosition = float4(x * w, y * w, aPosition.z * w, w);
+    vDiffuse = aDiffuse.zyxw;
+    vSpecular = aSpecular.zyxw;
+    vTex0 = float4(aTex, 1.0, 0.0);
+    vTex1 = float4(aTex, 1.0, 0.0);
+    // Pre-transformed vertices carry their fog factor in specular alpha,
+    // and have no distance fade (eye position 0, 0, w).
+    vEye = float4(0.0, 0.0, w, aSpecular.w);
+}

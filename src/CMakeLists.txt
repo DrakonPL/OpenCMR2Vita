@@ -193,6 +193,45 @@ if(NOT VITA)
         COMMENT "Embedding shaders")
 endif()
 
+# ---- GXM shaders (precompiled .gxp, embedded) -------------------------------------
+# psp2cgc runs on Windows only: tools/compile_gxm_shaders.bat compiles
+# render/shaders/cg into render/shaders/cg/gxp, and the .gxp files are
+# committed. The Vita build checks first that none is stale, then embeds each
+# as <name>_gxp_start and <name>_gxp_size, 16-byte aligned (sceGxmProgramCheck
+# refuses a misaligned program; objcopy -I binary cannot align it).
+if(VITA)
+    set(GXP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/render/shaders/cg/gxp)
+    file(GLOB GXP_FILES CONFIGURE_DEPENDS ${GXP_DIR}/*.gxp)
+    list(SORT GXP_FILES)
+    set(GXP_ASM "    .section .rodata
+")
+    foreach(gxp IN LISTS GXP_FILES)
+        get_filename_component(name ${gxp} NAME_WE)
+        string(APPEND GXP_ASM
+            "    .balign 16
+    .global ${name}_gxp_start
+${name}_gxp_start:
+    .incbin \"${gxp}\"
+"
+            "${name}_gxp_end:
+    .balign 4
+    .global ${name}_gxp_size
+"
+            "${name}_gxp_size:
+    .word ${name}_gxp_end - ${name}_gxp_start
+")
+    endforeach()
+    set(GXP_EMBED ${CMAKE_CURRENT_BINARY_DIR}/generated/gxm_shaders.S)
+    file(CONFIGURE OUTPUT ${GXP_EMBED} CONTENT "${GXP_ASM}" @ONLY)
+    set_source_files_properties(${GXP_EMBED} PROPERTIES OBJECT_DEPENDS "${GXP_FILES}")
+    target_sources(opencmr2 PRIVATE ${GXP_EMBED})
+    add_custom_target(check_gxp_stale
+        COMMAND python3 ${PROJECT_SOURCE_DIR}/tools/check_gxp_stale.py
+        COMMENT "Checking the precompiled GXM shaders"
+        VERBATIM)
+    add_dependencies(opencmr2_platform check_gxp_stale)
+endif()
+
 # ---- window icon (embedded) ------------------------------------------------------
 # res/opencmr2.png is the source; the derived icons are regenerated with:
 #   magick res/opencmr2.png -define icon:auto-resize=256,128,96,64,48,40,32,24,20,16 res/opencmr2.ico

@@ -1,0 +1,9 @@
+// The backdrop copy: the source pixel under this one (GXM cannot copy a
+// surface inside a scene). Drawn with clear_v and a point-filtered sampler.
+
+float4 main(float4 wpos : WPOS,
+            uniform float4 invSize,     // 1 / source width, 1 / height, -, -
+            uniform sampler2D source : TEXUNIT0) : COLOR
+{
+    return tex2D(source, (floor(wpos.xy) + 0.5) * invSize.xy);
+}
