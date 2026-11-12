@@ -300,12 +300,14 @@ struct HuffTables {
                 }
     }
 };
+// Made before main, not on first use: the guard of a function's static goes
+// through vitasdk's pthread, which fails when two kernel threads meet there.
+const HuffTables kHuffTables;
 
 uint8_t Huff(Bits *bits, const Tree &tree) {
     if (!tree.vlc_num)
         return tree.syms[bits->Read(4)];
-    static const HuffTables tables;
-    const uint8_t entry = tables.entry[tree.vlc_num][bits->Peek(7)];
+    const uint8_t entry = kHuffTables.entry[tree.vlc_num][bits->Peek(7)];
     Require(entry != 0, "invalid Bink Huffman code");
     bits->Skip(entry >> 4);
     return tree.syms[entry & 15];
