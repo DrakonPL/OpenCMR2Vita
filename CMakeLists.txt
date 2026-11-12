@@ -48,6 +48,9 @@ if(WIN32)
     # The MSVC runtime warns about its own POSIX names and "unsafe" functions.
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS NOMINMAX)
 endif()
+if(VITA)
+    add_compile_definitions(VITA)
+endif()
 
 if(OPENCMR2_SANITIZE)
     # The game calls its callback tables through generic function types, as
@@ -81,6 +84,32 @@ if(NOT TARGET SDL3::SDL3 AND NOT VITA)
 endif()
 
 add_subdirectory(src)
+
+if(VITA)
+    # The eboot and the .vpk (build/vita/opencmr2.vpk).
+    include(${VITASDK}/share/vita.cmake REQUIRED)
+    # The vitasdk linker can make a writable and executable segment, which the
+    # firmware refuses to start: fix_vita_rwe.py makes it read and execute only.
+    set(VITA_VELF ${CMAKE_CURRENT_BINARY_DIR}/opencmr2.velf)
+    set(VITA_EBOOT ${CMAKE_CURRENT_BINARY_DIR}/eboot.bin)
+    add_custom_command(
+        OUTPUT ${VITA_EBOOT}
+        COMMAND ${VITA_ELF_CREATE} $<TARGET_FILE:opencmr2> ${VITA_VELF}
+        COMMAND python3 ${PROJECT_SOURCE_DIR}/tools/fix_vita_rwe.py ${VITA_VELF}
+        COMMAND ${VITA_MAKE_FSELF} -c ${VITA_VELF} ${VITA_EBOOT}
+        DEPENDS opencmr2 ${PROJECT_SOURCE_DIR}/tools/fix_vita_rwe.py
+        VERBATIM
+        COMMENT "Making eboot.bin")
+
+    set(VITA_SCE_SYS ${PROJECT_SOURCE_DIR}/res/vita/sce_sys)
+    vita_create_vpk(opencmr2.vpk OCMR20001 ${VITA_EBOOT}
+        VERSION 01.00
+        NAME OpenCMR2
+        FILE ${VITA_SCE_SYS}/icon0.png sce_sys/icon0.png
+        FILE ${VITA_SCE_SYS}/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
+        FILE ${VITA_SCE_SYS}/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
+        FILE ${VITA_SCE_SYS}/livearea/contents/template.xml sce_sys/livearea/contents/template.xml)
+endif()
 
 # The tests run on the build machine; the Android and Vita builds are the game alone.
 if(NOT ANDROID AND NOT VITA)

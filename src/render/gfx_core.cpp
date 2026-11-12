@@ -1,7 +1,11 @@
 // The renderer's front end: the gfx.h state machine, CPU copies of textures
 // and vertex buffers, and the recording of each frame for the executor.
 
+#ifdef VITA
+#include "platform/platform_vita.h"
+#else
 #include "platform/platform.h"
+#endif
 #include "port/sys.h"
 #include "port/diagnostics.h"
 #include "render/gfx_internal.h"
@@ -289,7 +293,7 @@ extern "C" void Gfx_GetPixelFormat(int format, GfxPixelFormat *out)
 
 namespace {
 
-enum Backend { BACKEND_NONE, BACKEND_NULL, BACKEND_GPU, BACKEND_GL };
+enum Backend { BACKEND_NONE, BACKEND_NULL, BACKEND_GPU, BACKEND_GL, BACKEND_GXM };
 
 // SDL_GPU (Vulkan, Direct3D 12, Metal) where the system has a hardware
 // device for it, otherwise OpenGL 3.3, for GPUs older than Vulkan; [video] graphics_api
@@ -300,9 +304,16 @@ Backend ChooseBackend()
     static Backend backend = BACKEND_NONE;
     if (backend != BACKEND_NONE)
         return backend;
+#ifdef VITA
+    const char *headless = getenv("OPENCMR2_HEADLESS");
+#else
     const char *headless = SDL_getenv("OPENCMR2_HEADLESS");
+#endif
     if ((headless != NULL && *headless != '0') || Platform_GetSettingInt("video.headless", 0))
         return backend = BACKEND_NULL;
+#ifdef VITA
+    return backend = BACKEND_GXM;
+#else
     const char *wanted = Platform_GetSetting("video.graphics_api", "auto");
 #ifdef OPENCMR2_RENDERER_GL
     if (SDL_strcasecmp(wanted, "opengl") == 0)
@@ -321,6 +332,7 @@ Backend ChooseBackend()
     backend = BACKEND_GPU;
 #endif
     return backend;
+#endif
 }
 
 } // namespace
@@ -353,9 +365,15 @@ extern "C" BOOL Gfx_SetVideoMode(int width, int height, BOOL fullscreen)
             s_executor = Gfx_CreateGlExecutor();
             break;
 #endif
+#ifdef VITA
+        case BACKEND_GXM:
+            s_executor = Gfx_CreateGxmExecutor();
+            break;
+#else
         default:
             s_executor = Gfx_CreateGpuExecutor();
             break;
+#endif
         }
     }
     s_width = width;
@@ -1140,6 +1158,7 @@ GfxExecutor *Gfx_CreateNullExecutor(void)
 
 // ---- shared by the executors -----------------------------------------------------------
 
+#ifndef VITA
 void Gfx_SetWindowMode(SDL_Window *window, bool fullscreen, int width, int height)
 {
     if (window == NULL)
@@ -1158,6 +1177,7 @@ void Gfx_SetWindowMode(SDL_Window *window, bool fullscreen, int width, int heigh
     SDL_SetWindowSize(window, width * scale, height * scale);
     SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
 }
+#endif
 
 bool Gfx_FrameHashWanted(void)
 {
@@ -1177,6 +1197,7 @@ void Gfx_HashFrame(const uint8_t *bgra, int width, int height)
     for (size_t i = 0; i < bytes; i++)
         h = (h ^ bgra[i]) * 1099511628211ull;
     fprintf(file, "%u %dx%d %016llx\n", frame, width, height, (unsigned long long)h);
+#ifndef VITA
     if (dump != NULL && every > 0 && frame % every == 0) {
         char path[1024];
         snprintf(path, sizeof(path), "%s/frame-%06u.bmp", dump, frame);
@@ -1186,5 +1207,6 @@ void Gfx_HashFrame(const uint8_t *bgra, int width, int height)
             SDL_DestroySurface(s);
         }
     }
+#endif
     frame++;
 }

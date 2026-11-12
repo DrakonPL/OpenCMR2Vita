@@ -56,13 +56,11 @@ set_source_files_properties(${GAME_QIFIST_UNITS} TARGET_DIRECTORY cmr2_game
 
 # Platform layer plus the game objects; tests link this too.
 add_library(opencmr2_platform STATIC
-    platform/sys.cpp
-    platform/keys.cpp
     platform/msvcrt.cpp
     port/disk.cpp
     port/replay_disk.cpp
     $<TARGET_OBJECTS:cmr2_game>)
-target_sources(opencmr2_platform PRIVATE diagnostics/observer.cpp diagnostics/timing.cpp)
+target_sources(opencmr2_platform PRIVATE diagnostics/observer.cpp)
 target_include_directories(opencmr2_platform PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${GAME_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/port/compat)
 if(NOT VITA)
     target_link_libraries(opencmr2_platform PUBLIC SDL3::SDL3)
@@ -73,6 +71,8 @@ if(ANDROID)
     # SDLActivity loads libmain.so and calls its SDL_main.
     add_library(opencmr2 SHARED platform/main.cpp)
     set_target_properties(opencmr2 PROPERTIES OUTPUT_NAME main)
+elseif(VITA)
+    add_executable(opencmr2 platform/main_vita.cpp)
 else()
     add_executable(opencmr2 platform/main.cpp)
 endif()
@@ -222,34 +222,37 @@ add_custom_command(
 
 # Applications menu entry: on its own, as it includes the real <windows.h>
 # that port/compat replaces for the game.
-add_library(opencmr2_shortcut STATIC platform/menu_shortcut.cpp ${ICON_HEADER})
-target_include_directories(opencmr2_shortcut PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/generated)
 if(NOT VITA)
+    add_library(opencmr2_shortcut STATIC platform/menu_shortcut.cpp ${ICON_HEADER})
+    target_include_directories(opencmr2_shortcut PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/generated)
     target_link_libraries(opencmr2_shortcut PUBLIC SDL3::SDL3)
+    if(WIN32)
+        target_link_libraries(opencmr2_shortcut PRIVATE ole32 uuid shell32)
+    endif()
+    target_link_libraries(opencmr2_platform PUBLIC opencmr2_shortcut)
 endif()
-if(WIN32)
-    target_link_libraries(opencmr2_shortcut PRIVATE ole32 uuid shell32)
-endif()
-target_link_libraries(opencmr2_platform PUBLIC opencmr2_shortcut)
 
 # ---- network (UDP with ENet, third_party/enet) -------------------------------------
-set(ENET_DIR ${PROJECT_SOURCE_DIR}/third_party/enet)
-add_library(enet STATIC
-    ${ENET_DIR}/callbacks.c ${ENET_DIR}/compress.c ${ENET_DIR}/host.c ${ENET_DIR}/list.c
-    ${ENET_DIR}/packet.c ${ENET_DIR}/peer.c ${ENET_DIR}/protocol.c ${ENET_DIR}/unix.c ${ENET_DIR}/win32.c)
-target_include_directories(enet PUBLIC ${ENET_DIR}/include)
-if(WIN32)
-    target_link_libraries(enet PUBLIC ws2_32 winmm)
-else()
-    target_compile_definitions(enet PRIVATE HAS_FCNTL=1 HAS_POLL=1 HAS_GETADDRINFO=1 HAS_GETNAMEINFO=1
-        HAS_INET_PTON=1 HAS_INET_NTOP=1 HAS_MSGHDR_FLAGS=1 HAS_SOCKLEN_T=1)
-endif()
+# ENet's unix.c does not build on the vitasdk newlib yet.
+if(NOT VITA)
+    set(ENET_DIR ${PROJECT_SOURCE_DIR}/third_party/enet)
+    add_library(enet STATIC
+        ${ENET_DIR}/callbacks.c ${ENET_DIR}/compress.c ${ENET_DIR}/host.c ${ENET_DIR}/list.c
+        ${ENET_DIR}/packet.c ${ENET_DIR}/peer.c ${ENET_DIR}/protocol.c ${ENET_DIR}/unix.c ${ENET_DIR}/win32.c)
+    target_include_directories(enet PUBLIC ${ENET_DIR}/include)
+    if(WIN32)
+        target_link_libraries(enet PUBLIC ws2_32 winmm)
+    else()
+        target_compile_definitions(enet PRIVATE HAS_FCNTL=1 HAS_POLL=1 HAS_GETADDRINFO=1 HAS_GETNAMEINFO=1
+            HAS_INET_PTON=1 HAS_INET_NTOP=1 HAS_MSGHDR_FLAGS=1 HAS_SOCKLEN_T=1)
+    endif()
 
-# Sessions over ENet, without SDL: tests run hosts and clients in one process.
-add_library(opencmr2_net STATIC net/net_session.cpp)
-target_include_directories(opencmr2_net PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-find_package(Threads REQUIRED)
-target_link_libraries(opencmr2_net PUBLIC enet Threads::Threads)
+    # Sessions over ENet, without SDL: tests run hosts and clients in one process.
+    add_library(opencmr2_net STATIC net/net_session.cpp)
+    target_include_directories(opencmr2_net PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    find_package(Threads REQUIRED)
+    target_link_libraries(opencmr2_net PUBLIC enet Threads::Threads)
+endif()
 
 # ---- platform subsystems ---------------------------------------------------------
 set(POTRACE_DIR ${PROJECT_SOURCE_DIR}/third_party/potrace)
@@ -261,22 +264,43 @@ set_target_properties(opencmr2_potrace PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(opencmr2_platform PRIVATE opencmr2_potrace)
 target_sources(opencmr2_platform PRIVATE
     render/gfx_core.cpp
-    render/gfx_gpu.cpp
     render/outline_font.cpp
     render/distance_field.cpp
     render/vector_sprite.cpp
-    ${SHADER_HEADER}
     ${FONTS_HEADER}
-    ${ICON_HEADER}
-    audio/audio_sdl.cpp
-    input/bindings.cpp
-    input/input_sdl.cpp
-    video/movie.cpp
-    net/net_api.cpp)
+    video/movie.cpp)
+if(VITA)
+    target_sources(opencmr2_platform PRIVATE
+        platform/sys_vita.cpp
+        render/gfx_gxm.cpp
+        audio/audio_vita.cpp
+        input/input_vita.cpp
+        net/net_api_vita.cpp)
+else()
+    target_sources(opencmr2_platform PRIVATE
+        platform/sys.cpp
+        platform/keys.cpp
+        diagnostics/timing.cpp
+        render/gfx_gpu.cpp
+        ${SHADER_HEADER}
+        ${ICON_HEADER}
+        audio/audio_sdl.cpp
+        input/bindings.cpp
+        input/input_sdl.cpp
+        net/net_api.cpp)
+    target_link_libraries(opencmr2_platform PRIVATE opencmr2_net)
+endif()
 if(OPENCMR2_RENDERER_GL)
     target_sources(opencmr2_platform PRIVATE render/gfx_gl.cpp)
     target_compile_definitions(opencmr2_platform PRIVATE OPENCMR2_RENDERER_GL)
 endif()
 target_include_directories(opencmr2_platform PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated
     ${PROJECT_SOURCE_DIR}/third_party/stb)
-target_link_libraries(opencmr2_platform PRIVATE opencmr2_bink opencmr2_net)
+target_link_libraries(opencmr2_platform PRIVATE opencmr2_bink)
+
+# ---- PS Vita libraries ----------------------------------------------------------
+if(VITA)
+    target_link_libraries(opencmr2_platform PUBLIC
+        SceGxm_stub SceDisplay_stub SceCtrl_stub SceAudio_stub SceCommonDialog_stub SceSysmodule_stub
+        SceNet_stub SceNetCtl_stub SceAppUtil_stub SceIme_stub SceTouch_stub)
+endif()
