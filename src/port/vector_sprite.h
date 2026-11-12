@@ -8,7 +8,8 @@ extern "C" {
 
 // Traces the original co-driver/menu icons and arcade maps. Coordinates and
 // native pixels stay unchanged. Dotted selection maps retain their circular
-// points.
+// points. [video] vector_icons = 0 keeps the original's bitmaps: the trace
+// takes seconds for each image on a slow CPU.
 void VectorSprite_Replace(const char *name, GfxTexture *texture);
 
 #ifdef __cplusplus

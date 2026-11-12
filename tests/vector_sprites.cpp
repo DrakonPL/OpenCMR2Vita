@@ -1,4 +1,5 @@
 // Trace synthetic versions of the actual UI layouts, without game assets.
+#include "port/sys.h"
 #include "port/vector_sprite.h"
 #include "render/gfx_internal.h"
 #include <SDL3/SDL.h>
@@ -207,6 +208,19 @@ int main() {
     VectorSprite_Replace("arrows4.tga", wrong);
     Check(Gfx_DrawnTexture(wrong) == wrong, "unknown atlas layouts remain unchanged");
     Gfx_DestroyTexture(wrong);
+    // [video] vector_icons = 0: an icon that is traced otherwise stays the
+    // original's bitmap. No settings file here: the option is set in memory.
+    Sys_SetOption("video.vector_icons", 0);
+    auto *plain = Texture(16, 16);
+    for (int y = 3; y < 10; y++)
+        for (int x = 3; x < 10; x++)
+            Pixel(plain, x, y, 0xffffffff);
+    VectorSprite_Replace("tick.tga", plain);
+    Check(Gfx_DrawnTexture(plain) == plain, "vector_icons = 0 keeps the original bitmap");
+    Sys_SetOption("video.vector_icons", 1);
+    VectorSprite_Replace("tick.tga", plain);
+    Check(Gfx_DrawnTexture(plain) != plain, "vector_icons = 1 traces it again");
+    Gfx_DestroyTexture(plain);
     Gfx_Shutdown();
     Check(Gfx_SetVideoMode(1920, 1080, FALSE), "recreate renderer");
     Monochrome();
