@@ -1,6 +1,9 @@
 # GXM shader variants: the keys the PC runs drew with (tools/trace_stats.py).
-# fragment <key> (render/shader_key.h) and triple <key> <blend src/dst or off> <tl|3d>,
-# each with the run that first used it.
+# fragment <key> (render/shader_key.h), triple <key> <blend src/dst or off> <tl|3d>
+# and args <key> <arguments key>, each with the run that first used it. An args
+# line makes a short variant of the key with those stage arguments and that
+# alpha compare as constants. Other arguments draw with the key's general
+# variant, and the device log then names the line to add.
 fragment 000004442  # the intro movies (video/movie.cpp, not in a scenario)
 fragment 010000001  # preliminary-map
 fragment 010004424  # preliminary-map
@@ -23,6 +26,10 @@ fragment 130004424  # the fog form of a 3D key (a foggy stage on the device)
 fragment 130004484  # the fog form of a 3D key (a foggy stage on the device)
 fragment 11110c864  # the car reflection: a cube map (arcade Italy, environment mapping 3)
 fragment 13110c864  # the fog form of the car reflection
+fragment 01110c464  # italy-cube-maps
+fragment 11110c464  # italy-cube-maps
+fragment 03110c464  # the fog form of a car key with cube map reflections on
+fragment 13110c464  # the fog form of a car key with cube map reflections on
 triple 000004442 off tl  # the intro movies (video/movie.cpp, not in a scenario)
 triple 010000001 5/6 3d  # preliminary-map
 triple 010000001 5/6 tl  # preliminary-map
@@ -55,3 +62,33 @@ triple 130004484 5/6 3d  # a foggy stage on the device
 triple 130004484 off 3d  # a foggy stage on the device
 triple 11110c864 5/2 3d  # the car reflection: a cube map (arcade Italy, environment mapping 3)
 triple 13110c864 5/2 3d  # the fog form of the car reflection
+triple 010004484 5/2 3d  # italy-cube-maps
+triple 01110c464 5/2 3d  # italy-cube-maps
+triple 11110c464 5/2 3d  # italy-cube-maps
+triple 03110c464 5/2 3d  # the fog form of a car key with cube map reflections on
+triple 13110c464 5/2 3d  # the fog form of a car key with cube map reflections on
+args 010000001 10000000000  # arcade-single-race-australia
+args 030000001 10000000000  # the fog form: arcade-single-race-australia
+args 010004424 10000000002  # arcade-single-race-australia
+args 030004424 10000000002  # the fog form: arcade-single-race-australia
+args 010004464 10000000002  # arcade-single-race-australia
+args 010004484 10000000802  # arcade-single-race-australia
+args 030004484 10000000802  # the fog form: arcade-single-race-australia
+args 010005084 10000000802  # arcade-single-race-australia
+args 010005484 10000000802  # arcade-single-race-australia
+args 010005884 10000000802  # arcade-single-race-australia
+args 010006424 10000000002  # arcade-single-race-australia
+args 010006484 10000000802  # arcade-single-race-australia
+args 010007884 10000000802  # arcade-single-race-australia
+args 01110c464 10082000002  # italy-cube-maps
+args 110000001 10000000000  # arcade-single-race-australia
+args 130000001 10000000000  # the fog form: arcade-single-race-australia
+args 110004424 10000000002  # finland-results
+args 130004424 10000000002  # the fog form: finland-results
+args 110004484 10000000802  # arcade-single-race-australia
+args 130004484 10000000802  # the fog form: arcade-single-race-australia
+args 11110c464 10082000002  # italy-cube-maps
+args 11110c864 10082000002  # italy-cube-maps
+args 13110c864 10082000002  # the fog form: italy-cube-maps
+args 03110c464 10082000002  # the fog form: italy-cube-maps
+args 13110c464 10082000002  # the fog form: italy-cube-maps

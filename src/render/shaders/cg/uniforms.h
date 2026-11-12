@@ -43,7 +43,7 @@
 #define FU_STAGE1_COMPLEMENT 4
 #define FU_STAGE1_REPLICATE 5
 #define FU_TEXTURE_FACTOR 6
-#define FU_ALPHA_TEST 7         // compare function (GFX_CMP_*), reference 0..255, -, -
+#define FU_ALPHA_TEST 7         // compare function (GFX_CMP_*), reference 0..255, threshold 0..1 (compare forms 1 and 2), -
 #define FU_FOG_COLOR 8
 #define FU_FOG_PARAMS 9         // start, end, -, -
 #define FU_BUMP_MATRIX 10       // m00, m01, m10, m11 of the bump stage

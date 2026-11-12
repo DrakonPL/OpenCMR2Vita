@@ -21,9 +21,11 @@ constexpr int kPendingFlips = GxmDevice::kFrameSlots - 1;
 // The back buffer is one scene, or two around the backdrop copy, and more
 // when the game reads a render target in the middle of a frame.
 constexpr unsigned kScenesPerFrame = 4;
-// The sizes of the GXM samples.
-constexpr unsigned kPatcherBufferBytes = 64 * 1024;
-constexpr unsigned kPatcherUsseBytes = 64 * 1024;
+// The patcher's memory: its programs (one for each vertex program, and for
+// each fragment variant with each blend pair it draws with).
+constexpr unsigned kPatcherBufferBytes = 256 * 1024;
+constexpr unsigned kPatcherVertexUsseBytes = 64 * 1024;
+constexpr unsigned kPatcherFragmentUsseBytes = 512 * 1024;
 
 const SceGxmMemoryAttribFlags kRead = SCE_GXM_MEMORY_ATTRIB_READ;
 const SceGxmMemoryAttribFlags kReadWrite = (SceGxmMemoryAttribFlags)(SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE);
@@ -143,8 +145,8 @@ bool GxmDevice::CreateDisplay()
 bool GxmDevice::CreatePatcher()
 {
     if (!Gxm_AllocGpu(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, kPatcherBufferBytes, kReadWrite, patcherBuffer) ||
-        !Gxm_AllocVertexUsse(kPatcherUsseBytes, patcherVertexUsse) ||
-        !Gxm_AllocFragmentUsse(kPatcherUsseBytes, patcherFragmentUsse))
+        !Gxm_AllocVertexUsse(kPatcherVertexUsseBytes, patcherVertexUsse) ||
+        !Gxm_AllocFragmentUsse(kPatcherFragmentUsseBytes, patcherFragmentUsse))
         return false;
     SceGxmShaderPatcherParams params{};
     params.hostAllocCallback = PatcherAlloc;

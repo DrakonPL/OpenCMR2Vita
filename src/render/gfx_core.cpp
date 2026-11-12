@@ -174,10 +174,11 @@ void RecordDraw(int primitive, bool transformed, const void *vertices, DWORD ver
             h = TraceHash(h, size, sizeof(size));
         }
         const int drawn = primitive == GFX_TRIANGLEFAN ? GFX_TRIANGLELIST : primitive;
-        fprintf(trace, "%d %d %u %u %08x %p k=%09llx p=%06x\n", primitive, transformed ? 1 : 0, (unsigned)vertexCount,
+        fprintf(trace, "%d %d %u %u %08x %p k=%09llx p=%06x a=%011llx\n", primitive, transformed ? 1 : 0, (unsigned)vertexCount,
                 (unsigned)indexCount, h, s_traceCaller,
                 (unsigned long long)Gfx_FragmentKey(s_state, !transformed && s_target == NULL),
-                (unsigned)Gfx_PipelineKey(drawn, transformed, s_state));
+                (unsigned)Gfx_PipelineKey(drawn, transformed, s_state),
+                (unsigned long long)Gfx_FragmentArgsKey(s_state));
         static int dumpFrame = getenv("OPENCMR2_GFX_TRACE_FRAME") ? atoi(getenv("OPENCMR2_GFX_TRACE_FRAME")) : -1;
         if ((int)s_traceFrame == dumpFrame && transformed)
             for (DWORD v = 0; v < vertexCount; v++) {

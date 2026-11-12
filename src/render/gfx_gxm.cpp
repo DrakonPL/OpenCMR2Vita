@@ -24,6 +24,8 @@
 
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 extern "C" {
 extern const SceGxmProgram clear_v_gxp_start;
@@ -207,6 +209,7 @@ void FillFragmentUniforms(const GfxDrawState &s, int targetW, int targetH, bool 
     Color(s.textureFactor, u[FU_TEXTURE_FACTOR]);
     u[FU_ALPHA_TEST][0] = (float)s.alphaFunc;
     u[FU_ALPHA_TEST][1] = (float)(s.alphaRef & 0xff);
+    u[FU_ALPHA_TEST][2] = Gfx_AlphaThreshold(s);
     Color(s.fogColor, u[FU_FOG_COLOR]);
     u[FU_FOG_PARAMS][0] = s.fogStart;
     u[FU_FOG_PARAMS][1] = s.fogEnd;
@@ -231,6 +234,14 @@ struct Variant {
     SceGxmShaderPatcherId id = nullptr;
     const SceGxmProgramParameter *uniforms = nullptr;
     unsigned uniformRows = 0;
+};
+
+// The variants of a fragment key and alpha test form: the general one, which
+// reads the stage arguments from uniforms, and those made for one arguments
+// key (shader_key.h), which are much shorter.
+struct VariantSet {
+    int general = -1;
+    std::vector<std::pair<uint64_t, int>> made;     // arguments key, variant
 };
 
 // What the context has set: a draw sets only what differs. A scene starts
@@ -262,8 +273,12 @@ struct Stats {
 //   no 3D             no draw of 3D vertices: the game, the recorder and the
 //                     2D draws
 //   no depth pass     normal, without the depth pass of blended draws
-enum ProbeMode { PROBE_OFF, PROBE_NORMAL, PROBE_QUARTER, PROBE_TILE, PROBE_NO_3D, PROBE_NO_DEPTH_PASS, PROBE_END };
-const char *const kProbeNames[PROBE_END] = { "off", "normal", "quarter", "tile", "no 3D", "no depth pass" };
+//   general           normal, with the general variants only: what the
+//                     variants made for the arguments keys save
+enum ProbeMode {
+    PROBE_OFF, PROBE_NORMAL, PROBE_QUARTER, PROBE_TILE, PROBE_NO_3D, PROBE_NO_DEPTH_PASS, PROBE_GENERAL, PROBE_END
+};
+const char *const kProbeNames[PROBE_END] = { "off", "normal", "quarter", "tile", "no 3D", "no depth pass", "general" };
 constexpr uint64_t kProbeModeMicros = 3000000;
 constexpr uint64_t kProbeSettleMicros = 500000;     // at the start of a mode: not counted
 
@@ -300,11 +315,12 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     const SceGxmProgramParameter *vertexUniformsParam = nullptr, *targetParam = nullptr;
     unsigned vertexUniformRows = 0;
     Variant variants[kVariantCount];
-    std::unordered_map<uint64_t, int> variantIndex;     // fragment key and alpha test form -> variant
+    std::unordered_map<uint64_t, VariantSet> variantIndex;  // by fragment key << 2 | alpha test form
     std::unordered_map<uint32_t, SceGxmFragmentProgram *> fragmentPrograms;
     std::unordered_set<uint64_t> loggedUnknownKeys;     // FindVariant's lookups, with the vertex program
     bool programsMade = false;      // the listed triples are made: a new program is a patch in a frame
     size_t loggedUnlisted = 0;
+    std::unordered_set<uint64_t> loggedGeneral;     // (fragment key, arguments key) drawn with the general variant
 
     uint16_t *identityIndices = nullptr;
     GxmTexture white;   // for a slot a program reads but the draw has no texture for
@@ -488,14 +504,33 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             if (variants[i].uniforms != nullptr)
                 variants[i].uniformRows =
                     std::min<unsigned>(FU_ROWS, sceGxmProgramParameterGetArraySize(variants[i].uniforms));
-            variantIndex[v.key << 2 | (uint64_t)v.alphaTest] = i;
+            VariantSet &set = variantIndex[v.key << 2 | (uint64_t)v.alphaTest];
+            if (v.args == GXM_ARGS_GENERAL)
+                set.general = i;
+            else
+                set.made.push_back({ v.args, i });
         }
         // The pipelines the game draws with (variants.txt), made now: a
-        // patch costs a few ms. A program that can discard never blends.
+        // patch costs a few ms. Each triple with the general variant of its
+        // key and with the variants of the key's arguments keys. A blended
+        // 3D triple with the alpha test also gets its depth pass programs.
+        // A program that can discard never blends.
         for (const GxmPipelineTriple &t : kGxmPipelineTriples) {
-            if (t.srcBlend != 0 && kGxmFragmentVariants[t.variant].alphaTest == 1)
-                Sys_Log("gxm: %s discards and draws with blending", kGxmFragmentVariants[t.variant].name);
-            FragmentProgram(t.variant, t.srcBlend != 0, t.srcBlend, t.destBlend, t.transformed);
+            const GxmFragmentVariant &v = kGxmFragmentVariants[t.variant];
+            const bool blend = t.srcBlend != 0;
+            if (blend && v.alphaTest == 1)
+                Sys_Log("gxm: %s discards and draws with blending", v.name);
+            const VariantSet &set = variantIndex[v.key << 2 | (uint64_t)v.alphaTest];
+            FragmentProgram(t.variant, blend, t.srcBlend, t.destBlend, t.transformed);
+            for (const auto &made : set.made)
+                FragmentProgram(made.second, blend, t.srcBlend, t.destBlend, t.transformed);
+            if (!blend || v.alphaTest != 2 || t.transformed)
+                continue;
+            const VariantSet &depth = variantIndex[v.key << 2 | 1];
+            if (depth.general >= 0)
+                FragmentProgram(depth.general, false, 0, 0, false, true);
+            for (const auto &made : depth.made)
+                FragmentProgram(made.second, false, 0, 0, false, true);
         }
         Sys_Log("gxm: %d fragment variants, %d pipelines made", kVariantCount, (int)fragmentPrograms.size());
         stats.misses = 0;
@@ -600,9 +635,9 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     SceGxmFragmentProgram *FragmentProgram(int variant, bool blend, int srcBlend, int destBlend, bool transformed,
                                            bool depthOnly = false)
     {
-        const uint32_t key = (uint32_t)variant | (uint32_t)(blend ? srcBlend & 15 : 0) << 8 |
-                             (uint32_t)(blend ? destBlend & 15 : 0) << 12 | (blend ? 1u : 0u) << 16 |
-                             (transformed ? 1u : 0u) << 17 | (depthOnly ? 1u : 0u) << 18;
+        const uint32_t key = (uint32_t)variant | (uint32_t)(blend ? srcBlend & 15 : 0) << 16 |
+                             (uint32_t)(blend ? destBlend & 15 : 0) << 20 | (blend ? 1u : 0u) << 24 |
+                             (transformed ? 1u : 0u) << 25 | (depthOnly ? 1u : 0u) << 26;
         auto it = fragmentPrograms.find(key);
         if (it != fragmentPrograms.end())
             return it->second;
@@ -610,7 +645,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         const GxmFragmentVariant &v = kGxmFragmentVariants[variant];
         // A patch in the middle of a frame costs a few ms: variants.txt lists
         // the triples that are made at the start.
-        if (programsMade && !depthOnly && loggedUnlisted < kLoggedUnknownKeys) {
+        if (programsMade && loggedUnlisted < kLoggedUnknownKeys) {
             char pair[8] = "off";
             if (blend)
                 snprintf(pair, sizeof(pair), "%d/%d", srcBlend & 15, destBlend & 15);
@@ -641,13 +676,32 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     // The variant of a fragment key drawn with or without blending, or -1.
     // A missing one is logged once for each blend pair and vertex program,
     // as its triple line in variants.txt.
-    int FindVariant(uint64_t key, const GfxDrawState &s, bool transformed)
+    // The variant of a key, form and arguments key: the one made for the
+    // arguments, else the general one, else -1.
+    int LookupVariant(uint64_t key, uint64_t form, uint64_t args)
+    {
+        auto it = variantIndex.find(key << 2 | form);
+        if (it == variantIndex.end())
+            return -1;
+        if (probe.mode != PROBE_GENERAL)
+            for (const auto &made : it->second.made)
+                if (made.first == args)
+                    return made.second;
+        // The general variant is several times slower for each pixel.
+        if (programsMade && probe.mode == PROBE_OFF && loggedGeneral.size() < kLoggedUnknownKeys &&
+            loggedGeneral.insert(key << 24 ^ args).second)
+            Sys_Log("gxm: the general variant draws: add \"args %09llx %011llx\" to variants.txt",
+                    (unsigned long long)key, (unsigned long long)args);
+        return it->second.general;
+    }
+
+    int FindVariant(uint64_t key, uint64_t args, const GfxDrawState &s, bool transformed)
     {
         const bool blend = s.alphaBlend;
         const uint64_t form = (key & 1ull << 28) == 0 ? 0 : blend ? 2 : 1;
-        auto it = variantIndex.find(key << 2 | form);
-        if (it != variantIndex.end())
-            return it->second;
+        const int variant = LookupVariant(key, form, args);
+        if (variant >= 0)
+            return variant;
         const unsigned src = blend ? s.srcBlend & 15 : 0, dst = blend ? s.destBlend & 15 : 0;
         const uint64_t logged = key << 10 | src << 6 | dst << 2 | (blend ? 2u : 0u) | (transformed ? 1u : 0u);
         if (loggedUnknownKeys.size() < kLoggedUnknownKeys && loggedUnknownKeys.insert(logged).second) {
@@ -940,7 +994,8 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             return;
         const GfxDrawState &s = frame.states[c.state];
         const uint64_t key = Gfx_FragmentKey(s, backBuffer && !c.transformed);
-        const int variant = FindVariant(key, s, c.transformed);
+        const uint64_t args = Gfx_FragmentArgsKey(s);
+        const int variant = FindVariant(key, args, s, c.transformed);
         if (variant < 0)
             return;
         SceGxmFragmentProgram *fragment = FragmentProgram(variant, s.alphaBlend, s.srcBlend, s.destBlend,
@@ -956,11 +1011,9 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         SceGxmFragmentProgram *depthProgram = nullptr;
         if (s.alphaBlend && kGxmFragmentVariants[variant].alphaTest == 2 && s.depthTest && s.depthWrite &&
             probe.mode != PROBE_NO_DEPTH_PASS) {
-            auto it = variantIndex.find(key << 2 | 1);
-            if (it != variantIndex.end()) {
-                depthVariant = it->second;
+            depthVariant = LookupVariant(key, 1, args);
+            if (depthVariant >= 0)
                 depthProgram = FragmentProgram(depthVariant, false, 0, 0, c.transformed, true);
-            }
         }
         // Where the vertices and the indices are.
         const unsigned char *vertices = nullptr;
