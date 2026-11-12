@@ -72,6 +72,8 @@ typedef struct tagPOINT {
 #define __cdecl
 #endif
 #if defined(__GNUC__) && !defined(__clang__)
+/* newlib's sys/cdefs.h makes it an attribute that GCC ignores on ARM, with a warning. */
+#undef __fastcall
 #define __fastcall
 #define __forceinline inline __attribute__((always_inline))
 #endif

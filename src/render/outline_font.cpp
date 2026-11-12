@@ -17,7 +17,11 @@
 // the cubic outlines of the OpenType fonts are followed exactly.
 
 #include "port/outline_font.h"
+#ifdef VITA
+#include "platform/platform_vita.h"
+#else
 #include "platform/platform.h"
+#endif
 #include "port/sys.h"
 #include "fonts_embedded.h"
 #include "distance_field.h"
