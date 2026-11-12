@@ -35,9 +35,12 @@ using namespace GfxShared;
 constexpr int kVariantCount = (int)(sizeof(kGxmFragmentVariants) / sizeof(kGxmFragmentVariants[0]));
 constexpr unsigned kIdentityIndices = 65536;    // a non-indexed draw indexes through these
 constexpr int kLoggedUnknownKeys = 16;
-// The distance fade waits for the backdrop copy (VP-2.6): its range is beyond
-// any eye distance, so no pixel fades.
-constexpr float kNoFade = 1e30f;
+// The distance fade waits for the backdrop copy (VP-2.6). Until then its range
+// starts beyond any eye distance, so no pixel fades. The start and the end
+// are different: smoothstep with equal edges divides by zero, and on the
+// device each faded pixel then showed the backdrop (a white texture).
+constexpr float kNoFadeStart = 1e18f;
+constexpr float kNoFadeEnd = 2e18f;
 constexpr uint64_t kStatsMicros = 1000000;
 
 SceGxmBlendFactor BlendFactor(int d3d)
@@ -201,8 +204,8 @@ void FillFragmentUniforms(const GfxDrawState &s, int targetW, int targetH, float
     memcpy(u[FU_BUMP_MATRIX], s.stages[0].bumpMat, sizeof(float) * 4);
     u[FU_BUMP_LUMINANCE][0] = s.stages[0].bumpLumScale;
     u[FU_BUMP_LUMINANCE][1] = s.stages[0].bumpLumOffset;
-    u[FU_DISTANCE_FADE][0] = kNoFade;
-    u[FU_DISTANCE_FADE][1] = kNoFade;
+    u[FU_DISTANCE_FADE][0] = kNoFadeStart;
+    u[FU_DISTANCE_FADE][1] = kNoFadeEnd;
     u[FU_TARGET][0] = targetW ? 1.0f / targetW : 0.0f;
     u[FU_TARGET][1] = targetH ? 1.0f / targetH : 0.0f;
 }
