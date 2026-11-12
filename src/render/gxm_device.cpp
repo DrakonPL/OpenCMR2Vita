@@ -1,0 +1,260 @@
+// The GXM device of the renderer on the PS Vita (gxm_device.h).
+
+#include "render/gxm_device.h"
+
+#include "port/sys.h"
+
+#include <psp2/display.h>
+
+#include <stdlib.h>
+#include <string.h>
+
+namespace {
+
+constexpr int kDisplayStride = 1024;    // pixels: a multiple of 64, as the display needs
+constexpr unsigned kDisplayBytes = kDisplayStride * GxmDevice::kDisplayHeight * 4;
+constexpr int kPendingFlips = GxmDevice::kFrameSlots - 1;
+// The back buffer is one scene, or two around the backdrop copy (VP-2.6).
+constexpr unsigned kScenesPerFrame = 4;
+// The sizes of the GXM samples.
+constexpr unsigned kPatcherBufferBytes = 64 * 1024;
+constexpr unsigned kPatcherUsseBytes = 64 * 1024;
+
+const SceGxmMemoryAttribFlags kRead = SCE_GXM_MEMORY_ATTRIB_READ;
+const SceGxmMemoryAttribFlags kReadWrite = (SceGxmMemoryAttribFlags)(SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE);
+
+// What the display queue hands the callback for a flip.
+struct FlipData {
+    void *address;
+    int vsync;
+};
+
+// Runs on the display queue's thread: no log here.
+void Flip(const void *callbackData)
+{
+    const FlipData *flip = (const FlipData *)callbackData;
+    SceDisplayFrameBuf frame{};
+    frame.size = sizeof(frame);
+    frame.base = flip->address;
+    frame.pitch = kDisplayStride;
+    frame.pixelformat = SCE_DISPLAY_PIXELFORMAT_A8B8G8R8;
+    frame.width = GxmDevice::kDisplayWidth;
+    frame.height = GxmDevice::kDisplayHeight;
+    if (flip->vsync) {
+        sceDisplaySetFrameBuf(&frame, SCE_DISPLAY_SETBUF_NEXTFRAME);
+        sceDisplayWaitVblankStart();
+    } else if (sceDisplaySetFrameBuf(&frame, SCE_DISPLAY_SETBUF_IMMEDIATE) < 0) {
+        // The display refuses the line timing until it had a vsync flip.
+        sceDisplaySetFrameBuf(&frame, SCE_DISPLAY_SETBUF_NEXTFRAME);
+    }
+}
+
+void *PatcherAlloc(void *, unsigned int size)
+{
+    return malloc(size);
+}
+
+void PatcherFree(void *, void *memory)
+{
+    free(memory);
+}
+
+bool Check(const char *call, int err)
+{
+    if (err < 0)
+        Sys_Log("gxm: %s: 0x%08x", call, (unsigned)err);
+    return err >= 0;
+}
+
+unsigned Align(unsigned value, unsigned step)
+{
+    return (value + step - 1) & ~(step - 1);
+}
+
+} // namespace
+
+GxmDevice::~GxmDevice()
+{
+    Shutdown();
+}
+
+bool GxmDevice::Init()
+{
+    SceGxmInitializeParams params{};
+    params.displayQueueMaxPendingCount = kPendingFlips;
+    params.displayQueueCallback = Flip;
+    params.displayQueueCallbackDataSize = sizeof(FlipData);
+    params.parameterBufferSize = SCE_GXM_DEFAULT_PARAMETER_BUFFER_SIZE;
+    if (!Check("sceGxmInitialize", sceGxmInitialize(&params)))
+        return false;
+    initialized = true;
+    return CreateContext() && CreateDisplay() && CreatePatcher() && SetMode(kDisplayWidth, kDisplayHeight);
+}
+
+bool GxmDevice::CreateContext()
+{
+    if (!Gxm_AllocGpu(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, SCE_GXM_DEFAULT_VDM_RING_BUFFER_SIZE, kRead, vdmRing) ||
+        !Gxm_AllocGpu(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, SCE_GXM_DEFAULT_VERTEX_RING_BUFFER_SIZE, kRead,
+                      vertexRing) ||
+        !Gxm_AllocGpu(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, SCE_GXM_DEFAULT_FRAGMENT_RING_BUFFER_SIZE, kRead,
+                      fragmentRing) ||
+        !Gxm_AllocFragmentUsse(SCE_GXM_DEFAULT_FRAGMENT_USSE_RING_BUFFER_SIZE, fragmentUsseRing))
+        return false;
+    contextHost.reset(new unsigned char[SCE_GXM_MINIMUM_CONTEXT_HOST_MEM_SIZE]);
+    SceGxmContextParams params{};
+    params.hostMem = contextHost.get();
+    params.hostMemSize = SCE_GXM_MINIMUM_CONTEXT_HOST_MEM_SIZE;
+    params.vdmRingBufferMem = vdmRing.data;
+    params.vdmRingBufferMemSize = SCE_GXM_DEFAULT_VDM_RING_BUFFER_SIZE;
+    params.vertexRingBufferMem = vertexRing.data;
+    params.vertexRingBufferMemSize = SCE_GXM_DEFAULT_VERTEX_RING_BUFFER_SIZE;
+    params.fragmentRingBufferMem = fragmentRing.data;
+    params.fragmentRingBufferMemSize = SCE_GXM_DEFAULT_FRAGMENT_RING_BUFFER_SIZE;
+    params.fragmentUsseRingBufferMem = fragmentUsseRing.data;
+    params.fragmentUsseRingBufferMemSize = SCE_GXM_DEFAULT_FRAGMENT_USSE_RING_BUFFER_SIZE;
+    params.fragmentUsseRingBufferOffset = fragmentUsseRing.usseOffset;
+    return Check("sceGxmCreateContext", sceGxmCreateContext(&params, &context));
+}
+
+bool GxmDevice::CreateDisplay()
+{
+    for (DisplayBuffer &d : display) {
+        if (!Gxm_AllocGpu(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, kDisplayBytes, kReadWrite, d.memory) ||
+            !Check("sceGxmSyncObjectCreate", sceGxmSyncObjectCreate(&d.sync)))
+            return false;
+        memset(d.memory.data, 0, kDisplayBytes);
+    }
+    // The display refuses a flip without vsync until it had one with: show
+    // the first (black) buffer so.
+    FlipData first = { display[front].memory.data, 1 };
+    Flip(&first);
+    sceDisplayWaitSetFrameBuf();
+    back = 1;
+    // The largest back buffer's depth; smaller ones use the start of it.
+    const unsigned samples = Align(kDisplayWidth, SCE_GXM_TILE_SIZEX) * Align(kDisplayHeight, SCE_GXM_TILE_SIZEY);
+    return Gxm_AllocGpu(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, samples * 4, kReadWrite, depthMemory);
+}
+
+bool GxmDevice::CreatePatcher()
+{
+    if (!Gxm_AllocGpu(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, kPatcherBufferBytes, kReadWrite, patcherBuffer) ||
+        !Gxm_AllocVertexUsse(kPatcherUsseBytes, patcherVertexUsse) ||
+        !Gxm_AllocFragmentUsse(kPatcherUsseBytes, patcherFragmentUsse))
+        return false;
+    SceGxmShaderPatcherParams params{};
+    params.hostAllocCallback = PatcherAlloc;
+    params.hostFreeCallback = PatcherFree;
+    params.bufferMem = patcherBuffer.data;
+    params.bufferMemSize = patcherBuffer.size;
+    params.vertexUsseMem = patcherVertexUsse.data;
+    params.vertexUsseMemSize = patcherVertexUsse.size;
+    params.vertexUsseOffset = patcherVertexUsse.usseOffset;
+    params.fragmentUsseMem = patcherFragmentUsse.data;
+    params.fragmentUsseMemSize = patcherFragmentUsse.size;
+    params.fragmentUsseOffset = patcherFragmentUsse.usseOffset;
+    return Check("sceGxmShaderPatcherCreate", sceGxmShaderPatcherCreate(&params, &patcher));
+}
+
+bool GxmDevice::CreateRenderTarget(int w, int h)
+{
+    SceGxmRenderTargetParams params{};
+    params.width = w;
+    params.height = h;
+    params.scenesPerFrame = kScenesPerFrame;
+    params.multisampleMode = SCE_GXM_MULTISAMPLE_NONE;
+    params.driverMemBlock = -1;
+    return Check("sceGxmCreateRenderTarget", sceGxmCreateRenderTarget(&params, &renderTarget));
+}
+
+bool GxmDevice::SetMode(int w, int h)
+{
+    if (w <= 0 || h <= 0 || w > kDisplayWidth || h > kDisplayHeight) {
+        Sys_Log("gxm: mode %dx%d is larger than the display", w, h);
+        return false;
+    }
+    if (renderTarget != nullptr && w == width && h == height)
+        return true;
+    Finish();
+    if (renderTarget != nullptr) {
+        sceGxmDestroyRenderTarget(renderTarget);
+        renderTarget = nullptr;
+    }
+    if (!CreateRenderTarget(w, h))
+        return false;
+    // A smaller back buffer is the centre of the display, with a black border.
+    const int x = (kDisplayWidth - w) / 2, y = (kDisplayHeight - h) / 2;
+    for (DisplayBuffer &d : display) {
+        memset(d.memory.data, 0, kDisplayBytes);
+        unsigned char *origin = (unsigned char *)d.memory.data + ((size_t)y * kDisplayStride + x) * 4;
+        if (!Check("sceGxmColorSurfaceInit",
+                   sceGxmColorSurfaceInit(&d.surface, SCE_GXM_COLOR_FORMAT_A8B8G8R8, SCE_GXM_COLOR_SURFACE_LINEAR,
+                                          SCE_GXM_COLOR_SURFACE_SCALE_NONE, SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, w, h,
+                                          kDisplayStride, origin)))
+            return false;
+    }
+    if (!Check("sceGxmDepthStencilSurfaceInit",
+               sceGxmDepthStencilSurfaceInit(&depth, SCE_GXM_DEPTH_STENCIL_FORMAT_S8D24,
+                                             SCE_GXM_DEPTH_STENCIL_SURFACE_TILED, Align(w, SCE_GXM_TILE_SIZEX),
+                                             depthMemory.data, nullptr)))
+        return false;
+    width = w;
+    height = h;
+    Sys_Log("gxm: mode %dx%d in the %dx%d display", w, h, kDisplayWidth, kDisplayHeight);
+    return true;
+}
+
+bool GxmDevice::BeginBackBufferScene()
+{
+    DisplayBuffer &d = display[back];
+    return Check("sceGxmBeginScene",
+                 sceGxmBeginScene(context, 0, renderTarget, nullptr, nullptr, d.sync, &d.surface, &depth));
+}
+
+void GxmDevice::EndScene()
+{
+    Check("sceGxmEndScene", sceGxmEndScene(context, nullptr, nullptr));
+}
+
+void GxmDevice::Present(bool vsync)
+{
+    FlipData flip = { display[back].memory.data, vsync ? 1 : 0 };
+    Check("sceGxmDisplayQueueAddEntry", sceGxmDisplayQueueAddEntry(display[front].sync, display[back].sync, &flip));
+    front = back;
+    back = (back + 1) % kFrameSlots;
+    frameSlot = (frameSlot + 1) % kFrameSlots;
+}
+
+void GxmDevice::Finish()
+{
+    if (context != nullptr)
+        sceGxmFinish(context);
+}
+
+void GxmDevice::Shutdown()
+{
+    if (!initialized)
+        return;
+    Finish();
+    sceGxmDisplayQueueFinish();
+    if (patcher != nullptr)
+        sceGxmShaderPatcherDestroy(patcher);
+    Gxm_FreeFragmentUsse(patcherFragmentUsse);
+    Gxm_FreeVertexUsse(patcherVertexUsse);
+    Gxm_FreeGpu(patcherBuffer);
+    if (renderTarget != nullptr)
+        sceGxmDestroyRenderTarget(renderTarget);
+    Gxm_FreeGpu(depthMemory);
+    for (DisplayBuffer &d : display) {
+        if (d.sync != nullptr)
+            sceGxmSyncObjectDestroy(d.sync);
+        Gxm_FreeGpu(d.memory);
+    }
+    if (context != nullptr)
+        sceGxmDestroyContext(context);
+    Gxm_FreeFragmentUsse(fragmentUsseRing);
+    Gxm_FreeGpu(fragmentRing);
+    Gxm_FreeGpu(vertexRing);
+    Gxm_FreeGpu(vdmRing);
+    sceGxmTerminate();
+    initialized = false;
+}
