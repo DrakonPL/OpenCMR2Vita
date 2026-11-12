@@ -15,6 +15,12 @@ fragment 010007884  # preliminary-map
 fragment 110000001  # preliminary-map
 fragment 110004424  # preliminary-map
 fragment 110004484  # preliminary-map
+fragment 030000001  # the fog form of a 3D key (a foggy stage on the device)
+fragment 030004424  # the fog form of a 3D key (a foggy stage on the device)
+fragment 030004484  # the fog form of a 3D key (a foggy stage on the device)
+fragment 130000001  # the fog form of a 3D key (a foggy stage on the device)
+fragment 130004424  # the fog form of a 3D key (a foggy stage on the device)
+fragment 130004484  # the fog form of a 3D key (a foggy stage on the device)
 triple 000004442 off tl  # the intro movies (video/movie.cpp, not in a scenario)
 triple 010000001 5/6 3d  # preliminary-map
 triple 010000001 5/6 tl  # preliminary-map
@@ -36,3 +42,12 @@ triple 110004424 2/2 3d  # preliminary-map
 triple 110004484 5/2 3d  # preliminary-map
 triple 110004484 5/6 3d  # preliminary-map
 triple 110004484 off 3d  # preliminary-map
+triple 030000001 5/6 3d  # the fog form of a 3D triple (no run drew it yet)
+triple 030004424 2/2 3d  # the fog form of a 3D triple (no run drew it yet)
+triple 030004484 5/6 3d  # a foggy stage on the device
+triple 030004484 off 3d  # the fog form of a 3D triple (no run drew it yet)
+triple 130000001 5/6 3d  # a foggy stage on the device
+triple 130004424 2/2 3d  # the fog form of a 3D triple (no run drew it yet)
+triple 130004484 5/2 3d  # a foggy stage on the device
+triple 130004484 5/6 3d  # a foggy stage on the device
+triple 130004484 off 3d  # a foggy stage on the device
