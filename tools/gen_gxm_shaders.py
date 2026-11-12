@@ -14,7 +14,10 @@ A variant is a fragment key and the form of its alpha test: 0 off, 1 discard
 both with and without blending gets two variants. A discard in a program that
 draws with blending breaks the pass on the SGX543, so blending always takes
 form 2. Form 2 leaves the pixel as it was only when the blend's destination
-factor is 1 at a source of 0: the script refuses other blend pairs.
+factor is 1 at a source of 0: the script refuses other blend pairs. A key
+with form 2 also gets form 1: the executor draws the depth of a blended draw
+with it, without colour, so that the depth is written only where the alpha
+test passes.
 
 Files are written only when their text changes, so a second run changes
 nothing (and leaves the .gxp files current). --check writes nothing and
@@ -188,6 +191,13 @@ def header_source(variants, triples):
         "    int8_t units[GXM_TEXTURE_UNITS];",
         "};",
         "",
+        "// Whether alpha test form 2 leaves a pixel as it was with this destination",
+        "// factor (GFX_BLEND_*): the factor is 1 for a source of colour and alpha 0.",
+        "inline bool Gxm_Form2Keeps(int destBlend)",
+        "{",
+        "    return " + " || ".join(f"destBlend == {factor}" for factor in FORM2_DEST_FACTORS) + ";",
+        "}",
+        "",
         "// A fragment variant drawn with a blend pair (srcBlend 0: blending off),",
         "// after the vertex program of pre-transformed or 3D vertices.",
         "struct GxmPipelineTriple {",
@@ -236,6 +246,10 @@ def outputs():
         forms = {alpha_form(key, blend) for k, blend, _ in triples if k == key}
         if not forms:
             raise SystemExit(f"{VARIANTS.name}: fragment key {key:09x} has no triple (its blending is unknown)")
+        # A blended draw that writes depth draws its depth first with the
+        # discard form (the executor's depth pass).
+        if 2 in forms:
+            forms.add(1)
         variants |= {(key, form) for form in forms}
     variants = sorted(variants)
     files = {GXP_DIR / f"{variant_name(*v)}.cg": variant_source(*v, template) for v in variants}

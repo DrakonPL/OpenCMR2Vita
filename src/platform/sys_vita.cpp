@@ -6,6 +6,7 @@
 #include "platform/sys_event_ring.h"
 #include "platform/sys_paths.h"
 #include "port/sys.h"
+#include "render/gxm_dialog.h"
 #include "render/gxm_memory.h"
 
 #include <psp2/apputil.h>
@@ -167,7 +168,9 @@ void AppendLog(const char *line)
 
 // ---- message dialog -------------------------------------------------------------
 // A system dialog draws only while the app calls sceCommonDialogUpdate with a
-// display buffer before each flip, so it gets its own GXM display while open.
+// display buffer before each flip. Before the renderer starts GXM, the dialog
+// gets its own GXM display while open. After that it draws through the
+// renderer's display (render/gxm_dialog.h): GXM starts once in a process.
 
 constexpr int kDisplayWidth = 960;
 constexpr int kDisplayHeight = 544;
@@ -238,7 +241,10 @@ int RunMessageDialog(const char *text, int buttonType)
         configured = true;
     }
     DialogBuffer buffers[kDisplayBuffers];
-    if (!OpenDialogDisplay(buffers))
+    GxmDialogPresenter *renderer = Gxm_DialogPresenter();
+    if (renderer != nullptr)
+        renderer->BeginDialog();
+    else if (!OpenDialogDisplay(buffers))
         return SCE_MSG_DIALOG_BUTTON_ID_INVALID;
 
     SceMsgDialogUserMessageParam message{};
@@ -252,6 +258,10 @@ int RunMessageDialog(const char *text, int buttonType)
     if (sceMsgDialogInit(&param) >= 0) {
         int back = 0, front = 0;
         while (sceMsgDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_RUNNING) {
+            if (renderer != nullptr) {
+                renderer->DialogFrame();
+                continue;
+            }
             SceCommonDialogUpdateParam update{};
             update.renderTarget.colorFormat = SCE_GXM_COLOR_FORMAT_A8B8G8R8;
             update.renderTarget.surfaceType = SCE_GXM_COLOR_SURFACE_LINEAR;
@@ -271,7 +281,8 @@ int RunMessageDialog(const char *text, int buttonType)
         button = result.buttonId;
         sceMsgDialogTerm();
     }
-    CloseDialogDisplay(buffers);
+    if (renderer == nullptr)
+        CloseDialogDisplay(buffers);
     return button;
 }
 

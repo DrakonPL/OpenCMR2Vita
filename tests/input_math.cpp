@@ -30,6 +30,11 @@ int main()
     REQUIRE(AxisValue(-32768, AXIS_RISING) == 0 && AxisValue(32767, AXIS_RISING) == INPUT_FULL);
     REQUIRE(AxisValue(32767, AXIS_FALLING) == 0 && AxisValue(-32768, AXIS_FALLING) == INPUT_FULL);
 
+    // A stick byte: at rest nothing, the ends the full axis.
+    REQUIRE(StickByteAxis(kStickRest) == 0);
+    REQUIRE(StickByteAxis(0) == -32768 && StickByteAxis(255) == 32512);
+    REQUIRE(AxisValue(StickByteAxis(kStickRest), AXIS_NEGATIVE) == 0 && AxisValue(StickByteAxis(0), AXIS_NEGATIVE) == INPUT_FULL);
+
     // Deadzone 10 and saturation 95 (the Vita's): nothing inside 10%, full
     // from 95%, linear between.
     REQUIRE(Scale(INPUT_FULL / 10, 10, 95) == 0);

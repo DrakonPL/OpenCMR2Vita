@@ -806,6 +806,9 @@ void CheckVitaSection()
           is(vita->actions[INPUT_MENU_BACK], 0, SOURCE_VITA_BUTTON, VITA_CIRCLE, 0), "Cross confirms, Circle goes back");
     Check(vita->deadzone == 10 && vita->saturation == 95 && vita->steeringCurve == 30 && vita->rumble == 0,
           "the Vita's settings");
+    // The stick is an axis (smooth steering, the steering curve), a button is not.
+    Check(IsAnalog(vita->actions[INPUT_STEER_LEFT][0]) && !IsAnalog(vita->actions[INPUT_THROTTLE][0]),
+          "the Vita's stick is analog, its buttons are not");
 
     Bindings_MarkChanged();
     Input_SaveBindings();

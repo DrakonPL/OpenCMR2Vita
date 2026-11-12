@@ -429,7 +429,7 @@ std::string Write(void)
 
 bool IsAnalog(const Source &source)
 {
-    return source.kind == SOURCE_AXIS || source.kind == SOURCE_JOY_AXIS;
+    return source.kind == SOURCE_AXIS || source.kind == SOURCE_JOY_AXIS || source.kind == SOURCE_VITA_AXIS;
 }
 
 std::string FormatSource(const Profile &profile, const Source &source)

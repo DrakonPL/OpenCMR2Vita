@@ -3,6 +3,7 @@
 // per fragment key and alpha test form, every key and triple covered, and
 // no program that can discard drawn with blending. No GXM: the table only.
 
+#include "port/gfx.h"
 #include "render/shader_variants_gen.h"
 
 #include <cstdio>
@@ -104,6 +105,19 @@ int main(int argc, char **argv)
         }
         REQUIRE(HasSlot(v, GXM_SLOT_BACKDROP) == ((v.key & kFadeBit) != 0));
     }
+
+    // Each key with a blended form also has the discard form: the depth pass
+    // of a blended draw that writes depth.
+    for (const GxmFragmentVariant &v : kGxmFragmentVariants)
+        if (v.alphaTest == 2)
+            REQUIRE(rows.count({ v.key, 1 }) == 1);
+
+    // Form 2 leaves a pixel as it was with a destination factor of one,
+    // 1 - source colour or 1 - source alpha, and with no other.
+    REQUIRE(Gxm_Form2Keeps(GFX_BLEND_ONE) && Gxm_Form2Keeps(GFX_BLEND_INVSRCCOLOR) &&
+            Gxm_Form2Keeps(GFX_BLEND_INVSRCALPHA));
+    REQUIRE(!Gxm_Form2Keeps(GFX_BLEND_ZERO) && !Gxm_Form2Keeps(GFX_BLEND_SRCALPHA) &&
+            !Gxm_Form2Keeps(GFX_BLEND_DESTCOLOR));
 
     // Every listed key has a row.
     for (uint64_t key : keys) {
