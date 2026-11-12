@@ -4,8 +4,13 @@
 #ifndef OPENCMR2_GXM_MEMORY_H
 #define OPENCMR2_GXM_MEMORY_H
 
+#include "render/gpu_pool.h"
+#include "render/gxm_frame_ring.h"
+
 #include <psp2/gxm.h>
 #include <psp2/kernel/sysmem.h>
+
+#include <vector>
 
 struct GxmBlock {
     SceUID uid = -1;
@@ -25,5 +30,47 @@ void Gxm_FreeVertexUsse(GxmBlock &block);
 void Gxm_FreeFragmentUsse(GxmBlock &block);
 
 int Gxm_LiveBlocks(void);
+
+// Arenas for a GpuPool: memblocks of one type, or of the fallback type when
+// that one has no room (CDRAM is 128 MB).
+class GxmArenaSource : public GpuArenaSource {
+public:
+    GxmArenaSource(SceKernelMemBlockType type, SceKernelMemBlockType fallback, SceGxmMemoryAttribFlags attribs)
+        : type(type), fallback(fallback), attribs(attribs)
+    {
+    }
+    unsigned char *Alloc(unsigned bytes, int *handle) override;
+    void Free(int handle) override;
+
+private:
+    SceKernelMemBlockType type, fallback;
+    SceGxmMemoryAttribFlags attribs;
+    std::vector<GxmBlock> blocks;   // a handle is an index; a freed one is empty
+};
+
+// The executor's GPU memory, made at init from the worst case of
+// plans/vita/PLAN.md section 3: the frame ring, the static vertex pool (the
+// GfxVertexBuffer copies, small fixed buffers) and the texture pool.
+class GxmMemory {
+public:
+    GxmMemory();
+    bool Init();
+    ~GxmMemory();
+
+    GxmFrameRing &FrameRing() { return ring; }
+    GpuPool &Static() { return staticPool; }
+    GpuPool &Textures() { return texturePool; }
+
+    // "gxm mem: blocks N, frame ring X MB, static Y/Z MB, textures A/B MB",
+    // and the arena growths since the last line.
+    void Log();
+
+private:
+    GxmBlock ringMemory;
+    GxmFrameRing ring;
+    GxmArenaSource staticSource, textureSource;
+    GpuPool staticPool, texturePool;
+    int loggedGrowths = 0;
+};
 
 #endif
