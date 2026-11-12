@@ -71,6 +71,10 @@ typedef struct tagPOINT {
 #define __stdcall
 #define __cdecl
 #endif
+#if defined(__GNUC__) && !defined(__clang__)
+#define __fastcall
+#define __forceinline inline __attribute__((always_inline))
+#endif
 #define WINAPI
 #define CALLBACK
 
