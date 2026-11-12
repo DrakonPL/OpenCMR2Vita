@@ -120,10 +120,13 @@ GxmTexture *GxmTextures::Ensure(GfxTexture *t)
     g->layout = layout;
     g->memory = memory.Textures().Alloc(g->layout.bytes);
     if (g->memory == nullptr) {
+        // Kept as failed: each new try would ask the system for a memory
+        // block again, for each draw.
         if (!loggedFull)
             Sys_Log("gxm tex: no room for %dx%d (%u KB)", t->width, t->height, g->layout.bytes / 1024);
         loggedFull = true;
-        delete g;
+        g->failed = true;
+        t->gpu = g;
         return nullptr;
     }
     const int err = InitTexture(*g, t);
@@ -137,7 +140,7 @@ GxmTexture *GxmTextures::Ensure(GfxTexture *t)
         if (g->target != nullptr)
             sceGxmDestroyRenderTarget(g->target);
         g->target = nullptr;
-        memory.Static().Free(g->depthMemory);
+        memory.Textures().Free(g->depthMemory);
         memory.Textures().Free(g->memory);
         g->depthMemory = g->memory = nullptr;
         g->failed = true;
@@ -160,8 +163,10 @@ bool GxmTextures::CreateTarget(const GfxTexture *t, GxmTexture &g)
                                       SCE_GXM_COLOR_SURFACE_SCALE_NONE, SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, t->width,
                                       t->height, stride, g.memory)))
         return false;
+    // The GPU writes the depth: from the texture pool, which it may write
+    // (it only reads the static pool).
     const unsigned depthWidth = Align(t->width, kTile);
-    g.depthMemory = memory.Static().Alloc(depthWidth * Align(t->height, kTile) * 4);
+    g.depthMemory = memory.Textures().Alloc(depthWidth * Align(t->height, kTile) * 4);
     if (g.depthMemory == nullptr ||
         !Check("sceGxmDepthStencilSurfaceInit",
                sceGxmDepthStencilSurfaceInit(&g.depth, SCE_GXM_DEPTH_STENCIL_FORMAT_S8D24,
@@ -190,7 +195,7 @@ bool GxmTextures::CreateCubeTarget(const GfxTexture *t, GxmTexture &g)
                                           (uint8_t *)g.memory + (size_t)face * g.layout.faceBytes)))
             return false;
     const unsigned depthWidth = Align(t->width, kTile);
-    g.depthMemory = memory.Static().Alloc(depthWidth * Align(t->height, kTile) * 4);
+    g.depthMemory = memory.Textures().Alloc(depthWidth * Align(t->height, kTile) * 4);
     if (g.depthMemory == nullptr ||
         !Check("sceGxmDepthStencilSurfaceInit(cube)",
                sceGxmDepthStencilSurfaceInit(&g.depth, SCE_GXM_DEPTH_STENCIL_FORMAT_S8D24,
@@ -223,6 +228,7 @@ void GxmTextures::Upload(std::vector<GfxTexture *> &textures, unsigned frame)
                 deferredMemory.Add(g->memory, frame);
                 g->memory = fresh;
                 sceGxmTextureSetData(&g->texture, fresh);
+                g->generation++;
             }
         }
         const int faces = g->layout.faceBytes != 0 ? 6 : 1;
@@ -263,7 +269,7 @@ void GxmTextures::Release(GxmTexture *g)
 {
     if (g->target != nullptr)
         sceGxmDestroyRenderTarget(g->target);
-    memory.Static().Free(g->depthMemory);
+    memory.Textures().Free(g->depthMemory);
     memory.Textures().Free(g->memory);
     delete g;
 }

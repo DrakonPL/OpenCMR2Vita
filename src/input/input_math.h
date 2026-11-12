@@ -17,6 +17,9 @@ namespace InputMath {
 
 // An axis (-32768..32767) as an action value, 0..INPUT_FULL, by its AxisRange.
 int AxisValue(int16_t raw, int range);
+// A stick byte of the PS Vita's pad (0..255) as an axis.
+constexpr unsigned char kStickRest = 128;
+int16_t StickByteAxis(unsigned char raw);
 // An action value with the deadzone left out and the saturation the full
 // value (both in percent of INPUT_FULL).
 int Scale(int value, int deadzone, int saturation);

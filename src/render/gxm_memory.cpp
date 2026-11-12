@@ -14,7 +14,7 @@ constexpr unsigned kCdramPageSize = 256 * 1024;
 // The process's live memblocks: a kernel resource, so one count.
 int s_liveBlocks;
 
-// The worst case of plans/vita/PLAN.md section 3 (the PC trace, VP-1.4).
+// The worst case of plans/vita/PLAN.md section 3 (the PC trace).
 constexpr unsigned kFrameVertexBytesMax = 3419360;     // a load frame in France
 constexpr unsigned kFrameIndicesMax = 36852;
 constexpr unsigned kVertexBufferBytesMax = 11013 * kKB; // 103 live GfxVertexBuffers

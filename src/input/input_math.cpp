@@ -20,6 +20,11 @@ int AxisValue(int16_t raw, int range)
     }
 }
 
+int16_t StickByteAxis(unsigned char raw)
+{
+    return (int16_t)std::clamp((raw - kStickRest) * 256, -32768, 32767);
+}
+
 int Scale(int value, int deadzone, int saturation)
 {
     const int low = deadzone * INPUT_FULL / 100;

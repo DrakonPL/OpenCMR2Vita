@@ -38,11 +38,18 @@ Profile &VitaProfile()
     return *Bindings_Find("vita");
 }
 
-// A stick axis, 0..255 with its rest at 128, as an SDL axis (-32768..32767).
+// A stick axis as an SDL axis (-32768..32767).
 int16_t StickAxis(int axis)
 {
     const unsigned char raw[VITA_AXIS_COUNT] = { s_pad.lx, s_pad.ly, s_pad.rx, s_pad.ry };
-    return (int16_t)std::clamp((raw[axis] - 128) * 256, -32768, 32767);
+    return InputMath::StickByteAxis(raw[axis]);
+}
+
+// No button down and the sticks at rest: the pad when it cannot be read.
+void ReleasePad()
+{
+    memset(&s_pad, 0, sizeof(s_pad));
+    s_pad.lx = s_pad.ly = s_pad.rx = s_pad.ry = InputMath::kStickRest;
 }
 
 int SourceValue(const Profile &profile, const Source &source)
@@ -93,13 +100,14 @@ extern "C" void Input_Update(void)
         sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
         s_ready = true;
     }
-    if (sceCtrlPeekBufferPositive(0, &s_pad, 1) < 0)
-        memset(&s_pad, 0, sizeof(s_pad));
+    // An error, or no sample yet.
+    if (sceCtrlPeekBufferPositive(0, &s_pad, 1) < 1)
+        ReleasePad();
     UpdateActions(VitaProfile());
 }
 
-// The pad is player 1's. Two local players are accepted; player 2 has no
-// device (one pad, PLAN.md D6).
+// The pad is player 1's. Two local players are accepted. Player 2 has no
+// device: the console has one pad.
 extern "C" void Input_SetLocalPlayers(int) {}
 
 extern "C" void Input_SetTextEntryOpen(BOOL open)
@@ -198,8 +206,7 @@ extern "C" void Input_RestoreDefaults(int index)
     Bindings_MarkChanged();
 }
 
-// Binding a button from the controls page: VP-3.2. Until then the capture
-// gives up at once.
+// The controls page cannot bind a button yet: the capture gives up at once.
 extern "C" void Input_BeginCapture(int, int) {}
 extern "C" int Input_UpdateCapture(void) { return -1; }
 

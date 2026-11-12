@@ -8,6 +8,7 @@
 #include "render/gfx_executor_shared.h"
 #include "render/gfx_internal.h"
 #include "render/gxm_device.h"
+#include "render/gxm_dialog.h"
 #include "render/gxm_readback.h"
 #include "render/gxm_textures.h"
 #include "render/gxm_viewport.h"
@@ -16,6 +17,7 @@
 #include "render/shaders/cg/uniforms.h"
 
 #include <psp2/kernel/processmgr.h>
+#include <psp2/touch.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -221,6 +223,7 @@ void FillFragmentUniforms(const GfxDrawState &s, int targetW, int targetH, bool 
 struct GxmVertexBuffer {
     void *memory = nullptr;     // from the static pool
     uint32_t version = 0;
+    uint32_t noRoomVersion = 0; // the version the pool had no room for (0: none)
 };
 
 // A fragment program variant: its patcher id and its fu[] parameter.
@@ -241,10 +244,35 @@ struct Bound {
     int depthFunc = -1, depthWrite = -1, cull = -1;
     const GxmTexture *textures[GXM_TEXTURE_UNITS] = {};
     uint32_t samplers[GXM_TEXTURE_UNITS] = {};
+    unsigned generations[GXM_TEXTURE_UNITS] = {};
 };
 
 struct Stats {
-    unsigned draws = 0, misses = 0, vertexFills = 0, textureBinds = 0, dropped = 0;
+    unsigned draws = 0, misses = 0, vertexFills = 0, textureBinds = 0, dropped = 0, depthPasses = 0;
+};
+
+// The frame time probe of dev builds. A tap on the front touch screen starts
+// it: each mode runs for kProbeModeMicros without vsync, and the log gets its
+// frame time. The modes split a frame into its parts:
+//   normal            the frame as the game draws it
+//   quarter           the back buffer's draws clipped to about a quarter of
+//                     its pixels: the fragment cost goes down with them
+//   tile              clipped to one 32x32 tile: almost no fragment cost, the
+//                     vertex cost and the CPU cost of the draws stay
+//   no 3D             no draw of 3D vertices: the game, the recorder and the
+//                     2D draws
+//   no depth pass     normal, without the depth pass of blended draws
+enum ProbeMode { PROBE_OFF, PROBE_NORMAL, PROBE_QUARTER, PROBE_TILE, PROBE_NO_3D, PROBE_NO_DEPTH_PASS, PROBE_END };
+const char *const kProbeNames[PROBE_END] = { "off", "normal", "quarter", "tile", "no 3D", "no depth pass" };
+constexpr uint64_t kProbeModeMicros = 3000000;
+constexpr uint64_t kProbeSettleMicros = 500000;     // at the start of a mode: not counted
+
+struct Probe {
+    int mode = PROBE_OFF;
+    uint64_t modeStart = 0, lastPresent = 0;
+    uint64_t frameMicros = 0, frameMax = 0;
+    unsigned frames = 0, draws = 0;
+    bool touchStarted = false, touchDown = false;
 };
 
 // A back buffer readback the GPU has not finished: a rectangle of a display
@@ -256,7 +284,7 @@ struct PendingRead {
     uint32_t value = 0;
 };
 
-struct Executor : GfxExecutor {
+struct Executor : GfxExecutor, GxmDialogPresenter {
     GxmDevice device;
     GxmMemory memory;   // after the device: freed before it
     GxmTextures gpuTextures{ memory };
@@ -275,6 +303,8 @@ struct Executor : GfxExecutor {
     std::unordered_map<uint64_t, int> variantIndex;     // fragment key and alpha test form -> variant
     std::unordered_map<uint32_t, SceGxmFragmentProgram *> fragmentPrograms;
     std::unordered_set<uint64_t> loggedUnknownKeys;     // FindVariant's lookups, with the vertex program
+    bool programsMade = false;      // the listed triples are made: a new program is a patch in a frame
+    size_t loggedUnlisted = 0;
 
     uint16_t *identityIndices = nullptr;
     GxmTexture white;   // for a slot a program reads but the draw has no texture for
@@ -298,6 +328,8 @@ struct Executor : GfxExecutor {
     bool backdropCopied = false;    // this frame has its backdrop copy
     bool backSceneStoresDepth = false;  // the open back buffer scene stores its depth
     bool depthStored = false;       // the next back buffer scene loads the depth the last one stored
+    unsigned backScenes = 0;        // back buffer scenes begun in this frame
+    unsigned lastBackScenes = 0;    // and in the frame before
     bool inScene = false;
     const GxmTexture *sceneTarget = nullptr;    // nullptr: the back buffer
     int sceneFace = 0;                          // a cube target: its face
@@ -312,11 +344,13 @@ struct Executor : GfxExecutor {
     bool texturesChanged = false, texturesLogPending = false;
     Stats stats;
     uint64_t statsStart = 0;
+    Probe probe;
 
     ~Executor() override
     {
         if (!ready)
             return;
+        Gxm_SetDialogPresenter(nullptr);
         device.Finish();
         SceGxmShaderPatcher *patcher = device.Patcher();
         for (auto &p : fragmentPrograms)
@@ -465,6 +499,7 @@ struct Executor : GfxExecutor {
         }
         Sys_Log("gxm: %d fragment variants, %d pipelines made", kVariantCount, (int)fragmentPrograms.size());
         stats.misses = 0;
+        programsMade = true;
         return true;
     }
 
@@ -494,8 +529,12 @@ struct Executor : GfxExecutor {
 
     bool SetVideoMode(int width, int height, bool) override
     {
-        if (!ready)
+        if (!ready) {
             ready = device.Init() && memory.Init() && CreatePrograms() && CreateBuffers();
+            // GXM runs from here: a message box draws through this display.
+            if (ready)
+                Gxm_SetDialogPresenter(this);
+        }
         if (!ready || !device.SetMode(width, height))
             return false;
         // Without it the scenery does not fade, and the game still runs.
@@ -556,27 +595,45 @@ struct Executor : GfxExecutor {
 
     // ---- programs ----
 
-    SceGxmFragmentProgram *FragmentProgram(int variant, bool blend, int srcBlend, int destBlend, bool transformed)
+    // depthOnly: the program writes no colour (the depth pass of a blended
+    // draw with the alpha test). Then blend is false.
+    SceGxmFragmentProgram *FragmentProgram(int variant, bool blend, int srcBlend, int destBlend, bool transformed,
+                                           bool depthOnly = false)
     {
         const uint32_t key = (uint32_t)variant | (uint32_t)(blend ? srcBlend & 15 : 0) << 8 |
                              (uint32_t)(blend ? destBlend & 15 : 0) << 12 | (blend ? 1u : 0u) << 16 |
-                             (transformed ? 1u : 0u) << 17;
+                             (transformed ? 1u : 0u) << 17 | (depthOnly ? 1u : 0u) << 18;
         auto it = fragmentPrograms.find(key);
         if (it != fragmentPrograms.end())
             return it->second;
         stats.misses++;
+        const GxmFragmentVariant &v = kGxmFragmentVariants[variant];
+        // A patch in the middle of a frame costs a few ms: variants.txt lists
+        // the triples that are made at the start.
+        if (programsMade && !depthOnly && loggedUnlisted < kLoggedUnknownKeys) {
+            char pair[8] = "off";
+            if (blend)
+                snprintf(pair, sizeof(pair), "%d/%d", srcBlend & 15, destBlend & 15);
+            Sys_Log("gxm: a program was made in a frame: add \"triple %09llx %s %s\" to variants.txt",
+                    (unsigned long long)v.key, pair, transformed ? "tl" : "3d");
+            loggedUnlisted++;
+        }
+        // Form 2 gives colour and alpha 0 where the alpha test fails. Only
+        // some destination factors then leave the pixel as it was.
+        if (blend && v.alphaTest == 2 && !Gxm_Form2Keeps(destBlend & 15))
+            Sys_Log("gxm: %s with blend %d/%d: the pixels that fail the alpha test are not left as they were",
+                    v.name, srcBlend & 15, destBlend & 15);
         SceGxmBlendInfo info{};
-        info.colorMask = SCE_GXM_COLOR_MASK_ALL;
-        info.colorFunc = SCE_GXM_BLEND_FUNC_ADD;
-        info.alphaFunc = SCE_GXM_BLEND_FUNC_ADD;
+        info.colorMask = depthOnly ? SCE_GXM_COLOR_MASK_NONE : SCE_GXM_COLOR_MASK_ALL;
+        info.colorFunc = depthOnly ? SCE_GXM_BLEND_FUNC_NONE : SCE_GXM_BLEND_FUNC_ADD;
+        info.alphaFunc = info.colorFunc;
         info.colorSrc = info.alphaSrc = BlendFactor(srcBlend);
         info.colorDst = info.alphaDst = BlendFactor(destBlend);
         SceGxmFragmentProgram *program = nullptr;
-        Check(kGxmFragmentVariants[variant].name,
-              sceGxmShaderPatcherCreateFragmentProgram(
-                  device.Patcher(), variants[variant].id, SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
-                  SCE_GXM_MULTISAMPLE_NONE, blend ? &info : nullptr,
-                  transformed ? &fixedtl_v_gxp_start : &fixed3d_v_gxp_start, &program));
+        Check(v.name, sceGxmShaderPatcherCreateFragmentProgram(
+                          device.Patcher(), variants[variant].id, SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
+                          SCE_GXM_MULTISAMPLE_NONE, blend || depthOnly ? &info : nullptr,
+                          transformed ? &fixedtl_v_gxp_start : &fixed3d_v_gxp_start, &program));
         fragmentPrograms[key] = program;
         return program;
     }
@@ -629,8 +686,18 @@ struct Executor : GfxExecutor {
             sceGxmSetViewport(context, v.xOffset, v.xScale, v.yOffset, v.yScale, v.zOffset, v.zScale);
             memcpy(bound.viewport, viewport, sizeof(viewport));
         }
-        const int region[4] = { (int)scissor.x, (int)scissor.y, (int)(scissor.x + scissor.width) - 1,
-                                (int)(scissor.y + scissor.height) - 1 };
+        int region[4] = { (int)scissor.x, (int)scissor.y, (int)(scissor.x + scissor.width) - 1,
+                          (int)(scissor.y + scissor.height) - 1 };
+        // The probe clips the back buffer's draws (240..719 x 136..407 is a
+        // quarter of 960x544).
+        if (sceneTarget == nullptr && probe.mode == PROBE_QUARTER) {
+            const int quarter[4] = { device.Width() / 4, device.Height() / 4, device.Width() * 3 / 4 - 1,
+                                     device.Height() * 3 / 4 - 1 };
+            memcpy(region, quarter, sizeof(region));
+        } else if (sceneTarget == nullptr && probe.mode == PROBE_TILE) {
+            const int tile[4] = { 0, 0, 31, 31 };
+            memcpy(region, tile, sizeof(region));
+        }
         if (!bound.viewportSet || memcmp(region, bound.region, sizeof(region)) != 0) {
             sceGxmSetRegionClip(context, SCE_GXM_REGION_CLIP_OUTSIDE, region[0], region[1], region[2], region[3]);
             memcpy(bound.region, region, sizeof(region));
@@ -659,17 +726,18 @@ struct Executor : GfxExecutor {
     }
 
     // The context copies the texture's state when it is set: a sampler
-    // change sets it again.
+    // change or a move to other memory sets it again.
     void BindTexture(int unit, GxmTexture *g)
     {
         if (g == nullptr)
             g = &white;
         g->lastDrawn = presented;
-        if (bound.textures[unit] == g && bound.samplers[unit] == g->sampler)
+        if (bound.textures[unit] == g && bound.samplers[unit] == g->sampler && bound.generations[unit] == g->generation)
             return;
         sceGxmSetFragmentTexture(device.Context(), unit, &g->texture);
         bound.textures[unit] = g;
         bound.samplers[unit] = g->sampler;
+        bound.generations[unit] = g->generation;
         stats.textureBinds++;
     }
 
@@ -714,10 +782,12 @@ struct Executor : GfxExecutor {
     {
         if (!inScene)
             return;
-        if (sceneTarget == nullptr)
+        if (sceneTarget == nullptr) {
             device.EndScene(fragment);
-        else
+            depthStored = backSceneStoresDepth;
+        } else {
             Check("sceGxmEndScene", sceGxmEndScene(device.Context(), nullptr, nullptr));
+        }
         inScene = false;
     }
 
@@ -729,15 +799,20 @@ struct Executor : GfxExecutor {
         EndScene();
         bool ok;
         if (target == nullptr) {
-            // The back buffer's depth is kept across a second scene only
-            // around the backdrop copy.
+            // A scene stores its depth when another back buffer scene comes
+            // after it, and that one loads it. The executor knows that around
+            // the backdrop copy of this Execute. For the other splits (an
+            // Execute before the one with the copy, a render target or a
+            // texture read in the middle of a frame) it takes the frame
+            // before: a scene stores where that frame had one more scene.
             if (backBufferBegun && !depthStored && !loggedSplit) {
-                Sys_Log("gxm: the back buffer's scene was split in a frame");
+                Sys_Log("gxm: the back buffer's scene was split in a frame, its depth not kept");
                 loggedSplit = true;
             }
-            backSceneStoresDepth = backdropAhead && !backdropCopied;
+            backSceneStoresDepth = (backdropAhead && !backdropCopied) || backScenes + 1 < lastBackScenes;
             ok = device.BeginBackBufferScene(depthStored, backSceneStoresDepth);
             depthStored = false;
+            backScenes += ok ? 1 : 0;
             backBufferBegun = backBufferBegun || ok;
         } else {
             const SceGxmColorSurface *color = target->faces != nullptr ? &target->faces[face] : &target->color;
@@ -760,7 +835,7 @@ struct Executor : GfxExecutor {
             if (g == nullptr)
                 b->gpu = g = new GxmVertexBuffer;
             const uint32_t bytes = (uint32_t)(b->vertices.size() * sizeof(GfxVertex));
-            if ((g->memory != nullptr && g->version == b->version) || bytes == 0)
+            if ((g->memory != nullptr && g->version == b->version) || bytes == 0 || g->noRoomVersion == b->version)
                 continue;
             // Frames still on the GPU may draw from the old copy.
             if (g->memory != nullptr)
@@ -770,6 +845,7 @@ struct Executor : GfxExecutor {
                 if (!loggedStaticFull)
                     Sys_Log("gxm: no room for a vertex buffer of %u KB", bytes / 1024);
                 loggedStaticFull = true;
+                g->noRoomVersion = b->version;
                 continue;
             }
             memcpy(g->memory, b->vertices.data(), bytes);
@@ -818,6 +894,8 @@ struct Executor : GfxExecutor {
         backBufferBegun = false;
         backdropCopied = false;
         depthStored = false;
+        lastBackScenes = backScenes;
+        backScenes = 0;
         frameStarted = true;
     }
 
@@ -858,14 +936,32 @@ struct Executor : GfxExecutor {
             loggedPrimitive = true;
             return;
         }
+        if (probe.mode == PROBE_NO_3D && !c.transformed)
+            return;
         const GfxDrawState &s = frame.states[c.state];
-        const int variant = FindVariant(Gfx_FragmentKey(s, backBuffer && !c.transformed), s, c.transformed);
+        const uint64_t key = Gfx_FragmentKey(s, backBuffer && !c.transformed);
+        const int variant = FindVariant(key, s, c.transformed);
         if (variant < 0)
             return;
         SceGxmFragmentProgram *fragment = FragmentProgram(variant, s.alphaBlend, s.srcBlend, s.destBlend,
                                                           c.transformed);
         if (fragment == nullptr)
             return;
+        // A blended draw with the alpha test cannot discard (the SGX543), so
+        // its program writes each pixel. Its depth must be written only where
+        // the alpha test passes, as in Direct3D. Thus a pass without colour
+        // and with the discard writes the depth first, and the blended pass
+        // writes none.
+        int depthVariant = -1;
+        SceGxmFragmentProgram *depthProgram = nullptr;
+        if (s.alphaBlend && kGxmFragmentVariants[variant].alphaTest == 2 && s.depthTest && s.depthWrite &&
+            probe.mode != PROBE_NO_DEPTH_PASS) {
+            auto it = variantIndex.find(key << 2 | 1);
+            if (it != variantIndex.end()) {
+                depthVariant = it->second;
+                depthProgram = FragmentProgram(depthVariant, false, 0, 0, c.transformed, true);
+            }
+        }
         // Where the vertices and the indices are.
         const unsigned char *vertices = nullptr;
         if (c.buffer != nullptr) {
@@ -884,12 +980,11 @@ struct Executor : GfxExecutor {
                 indices = (const uint16_t *)memory.FrameRing().At(indexOffset) + c.firstIndex;
             count = c.indexCount;
         }
-        if (vertices == nullptr || count == 0 || count > kIdentityIndices) {
+        if (vertices == nullptr || count == 0 || (c.firstIndex == ~0u && count > kIdentityIndices)) {
             stats.dropped++;
             return;
         }
 
-        SetPrograms(c.transformed ? vertexTL : vertex3d, fragment);
         const bool scaled = backBuffer && s.screenW > 0 && s.screenH > 0;
         const GfxViewport viewport = ToTarget(s.viewport, s.screenW, s.screenH, backBuffer, targetW, targetH);
         if (c.transformed)
@@ -897,41 +992,69 @@ struct Executor : GfxExecutor {
         else
             SetViewport((float)viewport.x, (float)viewport.y, (float)viewport.width, (float)viewport.height,
                         viewport.minZ, viewport.maxZ, viewport);
-        SetDepthAndCull(s.depthTest ? DepthFunc(s.depthFunc) : SCE_GXM_DEPTH_FUNC_ALWAYS, s.depthTest && s.depthWrite,
-                        CullMode(s.cull));
-
-        // The default uniform buffers last one draw: reserved and filled each
-        // time, after the programs are set.
         SceGxmContext *context = device.Context();
-        void *buffer;
-        sceGxmReserveVertexDefaultUniformBuffer(context, &buffer);
-        if (c.transformed) {
-            // Pre-transformed vertices are in pixels of the game's screen.
-            const float target[4] = { (float)(scaled ? s.screenW : targetW), (float)(scaled ? s.screenH : targetH),
-                                      0.0f, 0.0f };
-            sceGxmSetUniformDataF(buffer, targetParam, 0, 4, target);
-        } else {
-            if (vertexUniformState == nullptr || vertexUniformW != targetW || vertexUniformH != targetH ||
-                (vertexUniformState != &s && !SameVertexUniforms(*vertexUniformState, s))) {
-                FillVertexUniforms(s, viewport, vertexUniforms);
-                vertexUniformState = &s;
-                vertexUniformW = targetW;
-                vertexUniformH = targetH;
-                stats.vertexFills++;
+        if (!c.transformed && (vertexUniformState == nullptr || vertexUniformW != targetW || vertexUniformH != targetH ||
+                               (vertexUniformState != &s && !SameVertexUniforms(*vertexUniformState, s)))) {
+            FillVertexUniforms(s, viewport, vertexUniforms);
+            vertexUniformState = &s;
+            vertexUniformW = targetW;
+            vertexUniformH = targetH;
+            stats.vertexFills++;
+        }
+
+        // One pass of the draw with a variant's program.
+        auto pass = [&](int index, SceGxmFragmentProgram *program, SceGxmDepthFunc func, bool depthWrite) {
+            SetPrograms(c.transformed ? vertexTL : vertex3d, program);
+            SetDepthAndCull(func, depthWrite, CullMode(s.cull));
+            // The default uniform buffers last one draw: reserved and filled
+            // each time, after the programs are set.
+            void *buffer;
+            sceGxmReserveVertexDefaultUniformBuffer(context, &buffer);
+            if (c.transformed) {
+                // Pre-transformed vertices are in pixels of the game's screen.
+                const float target[4] = { (float)(scaled ? s.screenW : targetW),
+                                          (float)(scaled ? s.screenH : targetH), 0.0f, 0.0f };
+                sceGxmSetUniformDataF(buffer, targetParam, 0, 4, target);
+            } else {
+                sceGxmSetUniformDataF(buffer, vertexUniformsParam, 0, vertexUniformRows * 4, vertexUniforms[0]);
             }
-            sceGxmSetUniformDataF(buffer, vertexUniformsParam, 0, vertexUniformRows * 4, vertexUniforms[0]);
+            const Variant &v = variants[index];
+            if (v.uniforms != nullptr) {
+                float fragmentUniforms[FU_ROWS][4];
+                FillFragmentUniforms(s, targetW, targetH, backdropCopied, fragmentUniforms);
+                sceGxmReserveFragmentDefaultUniformBuffer(context, &buffer);
+                sceGxmSetUniformDataF(buffer, v.uniforms, 0, v.uniformRows * 4, fragmentUniforms[0]);
+            }
+            BindTextures(s, kGxmFragmentVariants[index]);
+            sceGxmSetVertexStream(context, 0, vertices + c.firstVertexByte);
+            Check("sceGxmDraw", sceGxmDraw(context, primitive, SCE_GXM_INDEX_FORMAT_U16, indices, count));
+            stats.draws++;
+            probe.draws++;
+        };
+        SceGxmDepthFunc func = s.depthTest ? DepthFunc(s.depthFunc) : SCE_GXM_DEPTH_FUNC_ALWAYS;
+        bool depthWrite = s.depthTest && s.depthWrite;
+        if (depthProgram != nullptr) {
+            pass(depthVariant, depthProgram, func, true);
+            stats.depthPasses++;
+            // The blended pass meets the depth its depth pass wrote.
+            if (func == SCE_GXM_DEPTH_FUNC_LESS)
+                func = SCE_GXM_DEPTH_FUNC_LESS_EQUAL;
+            depthWrite = false;
         }
-        const Variant &v = variants[variant];
-        if (v.uniforms != nullptr) {
-            float fragmentUniforms[FU_ROWS][4];
-            FillFragmentUniforms(s, targetW, targetH, backdropCopied, fragmentUniforms);
-            sceGxmReserveFragmentDefaultUniformBuffer(context, &buffer);
-            sceGxmSetUniformDataF(buffer, v.uniforms, 0, v.uniformRows * 4, fragmentUniforms[0]);
-        }
-        BindTextures(s, kGxmFragmentVariants[variant]);
-        sceGxmSetVertexStream(context, 0, vertices + c.firstVertexByte);
-        Check("sceGxmDraw", sceGxmDraw(context, primitive, SCE_GXM_INDEX_FORMAT_U16, indices, count));
-        stats.draws++;
+        pass(variant, fragment, func, depthWrite);
+    }
+
+    // ---- a system dialog (GxmDialogPresenter) ----
+
+    void BeginDialog() override
+    {
+        EndScene();
+        device.Finish();
+    }
+
+    void DialogFrame() override
+    {
+        device.DialogFrame();
     }
 
     // ---- the backdrop and the readback ----
@@ -958,7 +1081,6 @@ struct Executor : GfxExecutor {
     {
         if (backdrop.target == nullptr || backdropCopied || !BeginScene(nullptr))
             return;
-        depthStored = backSceneStoresDepth;
         EndScene();
         SceGxmTexture source;
         if (!device.BackBufferTexture(&source))
@@ -1141,11 +1263,63 @@ struct Executor : GfxExecutor {
         }
         EndScene(fragment);
         backdropAhead = false;
-        device.Present(vsync);
+        device.Present(vsync && probe.mode == PROBE_OFF);
+        ProbeTick();
         presented++;
         frameStarted = false;
         LogTextures();
         LogStats();
+    }
+
+    // The frame time probe, after each present (dev builds).
+    void ProbeTick()
+    {
+#ifdef OPENCMR2_DEV
+        const uint64_t now = sceKernelGetProcessTimeWide();
+        if (probe.mode == PROBE_OFF) {
+            if (!probe.touchStarted) {
+                sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
+                probe.touchStarted = true;
+            }
+            SceTouchData touch{};
+            const bool down = sceTouchPeek(SCE_TOUCH_PORT_FRONT, &touch, 1) >= 1 && touch.reportNum > 0;
+            const bool tapped = down && !probe.touchDown;
+            probe.touchDown = down;
+            if (!tapped)
+                return;
+            Sys_Log("gxm probe: start, %u ms for each mode, no vsync", (unsigned)(kProbeModeMicros / 1000));
+            probe.mode = PROBE_NORMAL;
+            probe.modeStart = now;
+            probe.lastPresent = 0;
+            return;
+        }
+        if (now - probe.modeStart >= kProbeSettleMicros) {
+            if (probe.lastPresent != 0) {
+                const uint64_t frame = now - probe.lastPresent;
+                probe.frameMicros += frame;
+                probe.frameMax = frame > probe.frameMax ? frame : probe.frameMax;
+                probe.frames++;
+            } else {
+                probe.draws = 0;
+            }
+            probe.lastPresent = now;
+        }
+        if (now - probe.modeStart < kProbeModeMicros)
+            return;
+        const unsigned frames = probe.frames > 0 ? probe.frames : 1;
+        Sys_Log("gxm probe: %s: frame ms avg %.2f max %.2f over %u frames, %u draws per frame",
+                kProbeNames[probe.mode], probe.frameMicros / 1000.0 / frames, probe.frameMax / 1000.0, probe.frames,
+                probe.draws / frames);
+        const bool touchDown = probe.touchDown;
+        const int next = probe.mode + 1;
+        probe = Probe();
+        probe.touchStarted = true;
+        probe.touchDown = touchDown;
+        probe.modeStart = now;
+        probe.mode = next == PROBE_END ? PROBE_OFF : next;
+        if (probe.mode == PROBE_OFF)
+            Sys_Log("gxm probe: done");
+#endif
     }
 
     // One "gxm tex" and one "gxm mem" line when the textures stop changing
@@ -1170,8 +1344,8 @@ struct Executor : GfxExecutor {
             statsStart = now;
         if (now - statsStart < kStatsMicros)
             return;
-        Sys_Log("gxm: per s draws %u, patcher misses %u, vertex fills %u, texture binds %u, dropped %u", stats.draws,
-                stats.misses, stats.vertexFills, stats.textureBinds, stats.dropped);
+        Sys_Log("gxm: per s draws %u (depth passes %u), patcher misses %u, vertex fills %u, texture binds %u, dropped %u",
+                stats.draws, stats.depthPasses, stats.misses, stats.vertexFills, stats.textureBinds, stats.dropped);
         stats = Stats();
         statsStart = now;
 #endif

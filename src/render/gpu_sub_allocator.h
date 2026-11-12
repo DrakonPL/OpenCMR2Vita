@@ -8,7 +8,7 @@
 // Sub-allocates byte ranges out of arenas that the owner provides.
 //
 // WHY THIS EXISTS. The Vita dies when a process holds more than about
-// two thousand GPU-mapped memblocks. Measured on device 2026-09-04: a
+// two thousand GPU-mapped memblocks. Measured on the device: a
 // probe that allocated and mapped 4 KB blocks one at a time killed the
 // console between block 1,024 and block 2,048, and no call returned an
 // error first. One memblock per vertex buffer put a radius-8 VitaCraft

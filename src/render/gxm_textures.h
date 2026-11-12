@@ -20,6 +20,7 @@ struct GxmTexture {
     void *memory = nullptr;         // from the texture pool
     GxmTextureLayout layout;
     uint32_t sampler = ~0u;         // the sampler state last set on texture (SamplerKey)
+    unsigned generation = 0;        // counts the moves of the texture to other memory
     unsigned lastDrawn = ~0u;       // the last frame that drew with it (~0u: none)
     bool failed = false;            // GXM refused it: never drawn, never tried again
     // A render target: its colour surface is the texture's memory.
@@ -27,7 +28,7 @@ struct GxmTexture {
     SceGxmColorSurface color;
     // A cube's render target: a colour surface for each face (color unused).
     std::unique_ptr<SceGxmColorSurface[]> faces;
-    void *depthMemory = nullptr;    // from the static pool
+    void *depthMemory = nullptr;    // from the texture pool: the GPU writes it
     SceGxmDepthStencilSurface depth;
 };
 

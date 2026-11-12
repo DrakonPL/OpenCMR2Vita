@@ -3,7 +3,10 @@
 #include "render/gxm_device.h"
 
 #include "port/sys.h"
+#include "render/gxm_dialog.h"
 #include "render/gxm_readback.h"
+
+#include <psp2/common_dialog.h>
 
 #include <psp2/display.h>
 
@@ -253,6 +256,38 @@ void GxmDevice::Finish()
 {
     if (context != nullptr)
         sceGxmFinish(context);
+}
+
+void GxmDevice::DialogFrame()
+{
+    // The flips before are done: the buffer is not on the display.
+    sceGxmDisplayQueueFinish();
+    DisplayBuffer &d = display[back];
+    memset(d.memory.data, 0, kDisplayBytes);
+    SceCommonDialogUpdateParam update{};
+    update.renderTarget.colorFormat = SCE_GXM_COLOR_FORMAT_A8B8G8R8;
+    update.renderTarget.surfaceType = SCE_GXM_COLOR_SURFACE_LINEAR;
+    update.renderTarget.width = kDisplayWidth;
+    update.renderTarget.height = kDisplayHeight;
+    update.renderTarget.strideInPixels = kDisplayStride;
+    update.renderTarget.colorSurfaceData = d.memory.data;
+    update.displaySyncObject = d.sync;
+    sceCommonDialogUpdate(&update);
+    Present(true);
+}
+
+namespace {
+GxmDialogPresenter *s_dialogPresenter;
+}
+
+GxmDialogPresenter *Gxm_DialogPresenter(void)
+{
+    return s_dialogPresenter;
+}
+
+void Gxm_SetDialogPresenter(GxmDialogPresenter *presenter)
+{
+    s_dialogPresenter = presenter;
 }
 
 void GxmDevice::Shutdown()

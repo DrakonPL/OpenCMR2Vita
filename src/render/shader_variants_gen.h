@@ -29,6 +29,13 @@ struct GxmFragmentVariant {
     int8_t units[GXM_TEXTURE_UNITS];
 };
 
+// Whether alpha test form 2 leaves a pixel as it was with this destination
+// factor (GFX_BLEND_*): the factor is 1 for a source of colour and alpha 0.
+inline bool Gxm_Form2Keeps(int destBlend)
+{
+    return destBlend == 2 || destBlend == 4 || destBlend == 6;
+}
+
 // A fragment variant drawn with a blend pair (srcBlend 0: blending off),
 // after the vertex program of pre-transformed or 3D vertices.
 struct GxmPipelineTriple {
@@ -40,30 +47,47 @@ struct GxmPipelineTriple {
 #ifdef VITA
 extern "C" {
 extern const unsigned char fixed_f_000004442_t0_gxp_start[];
+extern const unsigned char fixed_f_010000001_t1_gxp_start[];
 extern const unsigned char fixed_f_010000001_t2_gxp_start[];
+extern const unsigned char fixed_f_010004424_t1_gxp_start[];
 extern const unsigned char fixed_f_010004424_t2_gxp_start[];
+extern const unsigned char fixed_f_010004464_t1_gxp_start[];
 extern const unsigned char fixed_f_010004464_t2_gxp_start[];
 extern const unsigned char fixed_f_010004484_t1_gxp_start[];
 extern const unsigned char fixed_f_010004484_t2_gxp_start[];
+extern const unsigned char fixed_f_010005084_t1_gxp_start[];
 extern const unsigned char fixed_f_010005084_t2_gxp_start[];
+extern const unsigned char fixed_f_010005484_t1_gxp_start[];
 extern const unsigned char fixed_f_010005484_t2_gxp_start[];
+extern const unsigned char fixed_f_010005884_t1_gxp_start[];
 extern const unsigned char fixed_f_010005884_t2_gxp_start[];
+extern const unsigned char fixed_f_010006424_t1_gxp_start[];
 extern const unsigned char fixed_f_010006424_t2_gxp_start[];
+extern const unsigned char fixed_f_010006484_t1_gxp_start[];
 extern const unsigned char fixed_f_010006484_t2_gxp_start[];
+extern const unsigned char fixed_f_010007884_t1_gxp_start[];
 extern const unsigned char fixed_f_010007884_t2_gxp_start[];
+extern const unsigned char fixed_f_030000001_t1_gxp_start[];
 extern const unsigned char fixed_f_030000001_t2_gxp_start[];
+extern const unsigned char fixed_f_030004424_t1_gxp_start[];
 extern const unsigned char fixed_f_030004424_t2_gxp_start[];
 extern const unsigned char fixed_f_030004484_t1_gxp_start[];
 extern const unsigned char fixed_f_030004484_t2_gxp_start[];
+extern const unsigned char fixed_f_110000001_t1_gxp_start[];
 extern const unsigned char fixed_f_110000001_t2_gxp_start[];
+extern const unsigned char fixed_f_110004424_t1_gxp_start[];
 extern const unsigned char fixed_f_110004424_t2_gxp_start[];
 extern const unsigned char fixed_f_110004484_t1_gxp_start[];
 extern const unsigned char fixed_f_110004484_t2_gxp_start[];
+extern const unsigned char fixed_f_11110c864_t1_gxp_start[];
 extern const unsigned char fixed_f_11110c864_t2_gxp_start[];
+extern const unsigned char fixed_f_130000001_t1_gxp_start[];
 extern const unsigned char fixed_f_130000001_t2_gxp_start[];
+extern const unsigned char fixed_f_130004424_t1_gxp_start[];
 extern const unsigned char fixed_f_130004424_t2_gxp_start[];
 extern const unsigned char fixed_f_130004484_t1_gxp_start[];
 extern const unsigned char fixed_f_130004484_t2_gxp_start[];
+extern const unsigned char fixed_f_13110c864_t1_gxp_start[];
 extern const unsigned char fixed_f_13110c864_t2_gxp_start[];
 }
 #define GXM_GXP(name) name##_gxp_start
@@ -73,66 +97,83 @@ extern const unsigned char fixed_f_13110c864_t2_gxp_start[];
 
 static const GxmFragmentVariant kGxmFragmentVariants[] = {
     { 0x000004442ull, 0, "fixed_f_000004442_t0", GXM_GXP(fixed_f_000004442_t0), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x010000001ull, 1, "fixed_f_010000001_t1", GXM_GXP(fixed_f_010000001_t1), { GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010000001ull, 2, "fixed_f_010000001_t2", GXM_GXP(fixed_f_010000001_t2), { GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x010004424ull, 1, "fixed_f_010004424_t1", GXM_GXP(fixed_f_010004424_t1), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010004424ull, 2, "fixed_f_010004424_t2", GXM_GXP(fixed_f_010004424_t2), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x010004464ull, 1, "fixed_f_010004464_t1", GXM_GXP(fixed_f_010004464_t1), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010004464ull, 2, "fixed_f_010004464_t2", GXM_GXP(fixed_f_010004464_t2), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010004484ull, 1, "fixed_f_010004484_t1", GXM_GXP(fixed_f_010004484_t1), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010004484ull, 2, "fixed_f_010004484_t2", GXM_GXP(fixed_f_010004484_t2), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x010005084ull, 1, "fixed_f_010005084_t1", GXM_GXP(fixed_f_010005084_t1), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010005084ull, 2, "fixed_f_010005084_t2", GXM_GXP(fixed_f_010005084_t2), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x010005484ull, 1, "fixed_f_010005484_t1", GXM_GXP(fixed_f_010005484_t1), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010005484ull, 2, "fixed_f_010005484_t2", GXM_GXP(fixed_f_010005484_t2), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x010005884ull, 1, "fixed_f_010005884_t1", GXM_GXP(fixed_f_010005884_t1), { GXM_SLOT_TEX0, GXM_SLOT_NATIVE0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010005884ull, 2, "fixed_f_010005884_t2", GXM_GXP(fixed_f_010005884_t2), { GXM_SLOT_TEX0, GXM_SLOT_NATIVE0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x010006424ull, 1, "fixed_f_010006424_t1", GXM_GXP(fixed_f_010006424_t1), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010006424ull, 2, "fixed_f_010006424_t2", GXM_GXP(fixed_f_010006424_t2), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x010006484ull, 1, "fixed_f_010006484_t1", GXM_GXP(fixed_f_010006484_t1), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010006484ull, 2, "fixed_f_010006484_t2", GXM_GXP(fixed_f_010006484_t2), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x010007884ull, 1, "fixed_f_010007884_t1", GXM_GXP(fixed_f_010007884_t1), { GXM_SLOT_TEX0, GXM_SLOT_NATIVE0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010007884ull, 2, "fixed_f_010007884_t2", GXM_GXP(fixed_f_010007884_t2), { GXM_SLOT_TEX0, GXM_SLOT_NATIVE0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x030000001ull, 1, "fixed_f_030000001_t1", GXM_GXP(fixed_f_030000001_t1), { GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x030000001ull, 2, "fixed_f_030000001_t2", GXM_GXP(fixed_f_030000001_t2), { GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x030004424ull, 1, "fixed_f_030004424_t1", GXM_GXP(fixed_f_030004424_t1), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x030004424ull, 2, "fixed_f_030004424_t2", GXM_GXP(fixed_f_030004424_t2), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x030004484ull, 1, "fixed_f_030004484_t1", GXM_GXP(fixed_f_030004484_t1), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x030004484ull, 2, "fixed_f_030004484_t2", GXM_GXP(fixed_f_030004484_t2), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x110000001ull, 1, "fixed_f_110000001_t1", GXM_GXP(fixed_f_110000001_t1), { GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x110000001ull, 2, "fixed_f_110000001_t2", GXM_GXP(fixed_f_110000001_t2), { GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x110004424ull, 1, "fixed_f_110004424_t1", GXM_GXP(fixed_f_110004424_t1), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x110004424ull, 2, "fixed_f_110004424_t2", GXM_GXP(fixed_f_110004424_t2), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x110004484ull, 1, "fixed_f_110004484_t1", GXM_GXP(fixed_f_110004484_t1), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x110004484ull, 2, "fixed_f_110004484_t2", GXM_GXP(fixed_f_110004484_t2), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x11110c864ull, 1, "fixed_f_11110c864_t1", GXM_GXP(fixed_f_11110c864_t1), { GXM_SLOT_CUBE0, GXM_SLOT_TEX1, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x11110c864ull, 2, "fixed_f_11110c864_t2", GXM_GXP(fixed_f_11110c864_t2), { GXM_SLOT_CUBE0, GXM_SLOT_TEX1, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x130000001ull, 1, "fixed_f_130000001_t1", GXM_GXP(fixed_f_130000001_t1), { GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x130000001ull, 2, "fixed_f_130000001_t2", GXM_GXP(fixed_f_130000001_t2), { GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x130004424ull, 1, "fixed_f_130004424_t1", GXM_GXP(fixed_f_130004424_t1), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x130004424ull, 2, "fixed_f_130004424_t2", GXM_GXP(fixed_f_130004424_t2), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x130004484ull, 1, "fixed_f_130004484_t1", GXM_GXP(fixed_f_130004484_t1), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x130004484ull, 2, "fixed_f_130004484_t2", GXM_GXP(fixed_f_130004484_t2), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x13110c864ull, 1, "fixed_f_13110c864_t1", GXM_GXP(fixed_f_13110c864_t1), { GXM_SLOT_CUBE0, GXM_SLOT_TEX1, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x13110c864ull, 2, "fixed_f_13110c864_t2", GXM_GXP(fixed_f_13110c864_t2), { GXM_SLOT_CUBE0, GXM_SLOT_TEX1, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
 };
 
 static const GxmPipelineTriple kGxmPipelineTriples[] = {
     { 0, 0, 0, true },
-    { 1, 5, 6, false },
-    { 1, 5, 6, true },
-    { 2, 2, 2, false },
-    { 2, 2, 2, true },
-    { 3, 5, 6, true },
-    { 4, 0, 0, false },
-    { 5, 5, 2, true },
-    { 5, 5, 6, false },
-    { 5, 5, 6, true },
+    { 2, 5, 6, false },
+    { 2, 5, 6, true },
+    { 4, 2, 2, false },
+    { 4, 2, 2, true },
     { 6, 5, 6, true },
-    { 7, 5, 6, true },
+    { 7, 0, 0, false },
+    { 8, 5, 2, true },
+    { 8, 5, 6, false },
     { 8, 5, 6, true },
-    { 9, 2, 2, true },
     { 10, 5, 6, true },
-    { 11, 5, 6, true },
-    { 12, 5, 6, false },
-    { 13, 2, 2, false },
-    { 14, 0, 0, false },
-    { 15, 5, 6, false },
-    { 16, 5, 6, false },
-    { 17, 2, 2, false },
-    { 18, 0, 0, false },
-    { 19, 5, 2, false },
-    { 19, 5, 6, false },
-    { 20, 5, 2, false },
-    { 21, 5, 6, false },
-    { 22, 2, 2, false },
-    { 23, 0, 0, false },
-    { 24, 5, 2, false },
-    { 24, 5, 6, false },
-    { 25, 5, 2, false },
+    { 12, 5, 6, true },
+    { 14, 5, 6, true },
+    { 16, 2, 2, true },
+    { 18, 5, 6, true },
+    { 20, 5, 6, true },
+    { 22, 5, 6, false },
+    { 24, 2, 2, false },
+    { 25, 0, 0, false },
+    { 26, 5, 6, false },
+    { 28, 5, 6, false },
+    { 30, 2, 2, false },
+    { 31, 0, 0, false },
+    { 32, 5, 2, false },
+    { 32, 5, 6, false },
+    { 34, 5, 2, false },
+    { 36, 5, 6, false },
+    { 38, 2, 2, false },
+    { 39, 0, 0, false },
+    { 40, 5, 2, false },
+    { 40, 5, 6, false },
+    { 42, 5, 2, false },
 };
 
 #endif

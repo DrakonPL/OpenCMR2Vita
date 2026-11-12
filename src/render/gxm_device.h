@@ -54,6 +54,9 @@ public:
     int FrameSlot() const { return frameSlot; }
     // Waits until the GPU has done all queued work.
     void Finish();
+    // One frame of a system dialog: the dialog over black in the back buffer's
+    // display buffer, then shown. No scene is open and the GPU is done.
+    void DialogFrame();
 
 private:
     struct DisplayBuffer {
