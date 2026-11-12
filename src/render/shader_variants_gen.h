@@ -43,6 +43,7 @@ extern const unsigned char fixed_f_000004442_t0_gxp_start[];
 extern const unsigned char fixed_f_010000001_t2_gxp_start[];
 extern const unsigned char fixed_f_010004424_t2_gxp_start[];
 extern const unsigned char fixed_f_010004464_t2_gxp_start[];
+extern const unsigned char fixed_f_010004484_t1_gxp_start[];
 extern const unsigned char fixed_f_010004484_t2_gxp_start[];
 extern const unsigned char fixed_f_010005084_t2_gxp_start[];
 extern const unsigned char fixed_f_010005484_t2_gxp_start[];
@@ -50,10 +51,18 @@ extern const unsigned char fixed_f_010005884_t2_gxp_start[];
 extern const unsigned char fixed_f_010006424_t2_gxp_start[];
 extern const unsigned char fixed_f_010006484_t2_gxp_start[];
 extern const unsigned char fixed_f_010007884_t2_gxp_start[];
+extern const unsigned char fixed_f_030000001_t2_gxp_start[];
+extern const unsigned char fixed_f_030004424_t2_gxp_start[];
+extern const unsigned char fixed_f_030004484_t1_gxp_start[];
+extern const unsigned char fixed_f_030004484_t2_gxp_start[];
 extern const unsigned char fixed_f_110000001_t2_gxp_start[];
 extern const unsigned char fixed_f_110004424_t2_gxp_start[];
 extern const unsigned char fixed_f_110004484_t1_gxp_start[];
 extern const unsigned char fixed_f_110004484_t2_gxp_start[];
+extern const unsigned char fixed_f_130000001_t2_gxp_start[];
+extern const unsigned char fixed_f_130004424_t2_gxp_start[];
+extern const unsigned char fixed_f_130004484_t1_gxp_start[];
+extern const unsigned char fixed_f_130004484_t2_gxp_start[];
 }
 #define GXM_GXP(name) name##_gxp_start
 #else
@@ -65,6 +74,7 @@ static const GxmFragmentVariant kGxmFragmentVariants[] = {
     { 0x010000001ull, 2, "fixed_f_010000001_t2", GXM_GXP(fixed_f_010000001_t2), { GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010004424ull, 2, "fixed_f_010004424_t2", GXM_GXP(fixed_f_010004424_t2), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010004464ull, 2, "fixed_f_010004464_t2", GXM_GXP(fixed_f_010004464_t2), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x010004484ull, 1, "fixed_f_010004484_t1", GXM_GXP(fixed_f_010004484_t1), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010004484ull, 2, "fixed_f_010004484_t2", GXM_GXP(fixed_f_010004484_t2), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010005084ull, 2, "fixed_f_010005084_t2", GXM_GXP(fixed_f_010005084_t2), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010005484ull, 2, "fixed_f_010005484_t2", GXM_GXP(fixed_f_010005484_t2), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
@@ -72,10 +82,18 @@ static const GxmFragmentVariant kGxmFragmentVariants[] = {
     { 0x010006424ull, 2, "fixed_f_010006424_t2", GXM_GXP(fixed_f_010006424_t2), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010006484ull, 2, "fixed_f_010006484_t2", GXM_GXP(fixed_f_010006484_t2), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010007884ull, 2, "fixed_f_010007884_t2", GXM_GXP(fixed_f_010007884_t2), { GXM_SLOT_TEX0, GXM_SLOT_NATIVE0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x030000001ull, 2, "fixed_f_030000001_t2", GXM_GXP(fixed_f_030000001_t2), { GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x030004424ull, 2, "fixed_f_030004424_t2", GXM_GXP(fixed_f_030004424_t2), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x030004484ull, 1, "fixed_f_030004484_t1", GXM_GXP(fixed_f_030004484_t1), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x030004484ull, 2, "fixed_f_030004484_t2", GXM_GXP(fixed_f_030004484_t2), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x110000001ull, 2, "fixed_f_110000001_t2", GXM_GXP(fixed_f_110000001_t2), { GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x110004424ull, 2, "fixed_f_110004424_t2", GXM_GXP(fixed_f_110004424_t2), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x110004484ull, 1, "fixed_f_110004484_t1", GXM_GXP(fixed_f_110004484_t1), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x110004484ull, 2, "fixed_f_110004484_t2", GXM_GXP(fixed_f_110004484_t2), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x130000001ull, 2, "fixed_f_130000001_t2", GXM_GXP(fixed_f_130000001_t2), { GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x130004424ull, 2, "fixed_f_130004424_t2", GXM_GXP(fixed_f_130004424_t2), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x130004484ull, 1, "fixed_f_130004484_t1", GXM_GXP(fixed_f_130004484_t1), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x130004484ull, 2, "fixed_f_130004484_t2", GXM_GXP(fixed_f_130004484_t2), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
 };
 
 static const GxmPipelineTriple kGxmPipelineTriples[] = {
@@ -85,20 +103,30 @@ static const GxmPipelineTriple kGxmPipelineTriples[] = {
     { 2, 2, 2, false },
     { 2, 2, 2, true },
     { 3, 5, 6, true },
-    { 4, 5, 2, true },
-    { 4, 5, 6, false },
-    { 4, 5, 6, true },
+    { 4, 0, 0, false },
+    { 5, 5, 2, true },
+    { 5, 5, 6, false },
     { 5, 5, 6, true },
     { 6, 5, 6, true },
     { 7, 5, 6, true },
-    { 8, 2, 2, true },
-    { 9, 5, 6, true },
+    { 8, 5, 6, true },
+    { 9, 2, 2, true },
     { 10, 5, 6, true },
-    { 11, 5, 6, false },
-    { 12, 2, 2, false },
-    { 13, 0, 0, false },
-    { 14, 5, 2, false },
-    { 14, 5, 6, false },
+    { 11, 5, 6, true },
+    { 12, 5, 6, false },
+    { 13, 2, 2, false },
+    { 14, 0, 0, false },
+    { 15, 5, 6, false },
+    { 16, 5, 6, false },
+    { 17, 2, 2, false },
+    { 18, 0, 0, false },
+    { 19, 5, 2, false },
+    { 19, 5, 6, false },
+    { 20, 5, 6, false },
+    { 21, 2, 2, false },
+    { 22, 0, 0, false },
+    { 23, 5, 2, false },
+    { 23, 5, 6, false },
 };
 
 #endif
