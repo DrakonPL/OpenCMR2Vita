@@ -1,7 +1,8 @@
 @echo off
 REM Compiles the GXM shaders on Windows: runs the variant generator, psp2cgc on
 REM every .cg in src\render\shaders\cg and cg\gxp (the .gxp goes to cg\gxp),
-REM then the stale check. Run it before a Vita build that changed a shader.
+REM then records the source of each .gxp for the stale check (the Vita build
+REM runs it). Run it before a Vita build that changed a shader.
 setlocal
 set "ROOT=%~dp0.."
 set "CG=%ROOT%\src\render\shaders\cg"
@@ -18,7 +19,7 @@ if %FAILED% neq 0 (
     echo compile_gxm_shaders: a shader did not compile
     exit /b 1
 )
-python "%ROOT%\tools\check_gxp_stale.py"
+python "%ROOT%\tools\check_gxp_stale.py" --record
 exit /b %errorlevel%
 
 REM A name that ends in _v is a vertex program, any other a fragment program.
