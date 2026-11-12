@@ -60,7 +60,7 @@
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "toolchainFile": "${sourceDir}/cmake/vita.cmake",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" },
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "OPENCMR2_DEV": "ON" },
       "condition": { "type": "notEquals", "lhs": "$env{VITASDK}", "rhs": "" }
     }
   ],
