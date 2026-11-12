@@ -23,4 +23,9 @@ void SysVita_PushEvent(const SysEvent &event);
 // display queue must be idle before the next draw.
 bool Platform_TakeResumed(void);
 
+#ifdef OPENCMR2_DEV
+// Called once per presented frame: every 5 seconds a heartbeat line in the log.
+void SysVita_FramePresented(void);
+#endif
+
 #endif

@@ -21,6 +21,7 @@
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/message_dialog.h>
 
+#include <malloc.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -38,6 +39,7 @@ SysSettings::Values s_settings;
 SysEventRing s_events;
 bool s_resumed;
 std::string s_lastMissingFile;  // game path of the last file that could not be read
+int s_openFiles;
 
 // ---- host files -----------------------------------------------------------------
 
@@ -308,6 +310,40 @@ void LogFileProbe()
 
 } // namespace
 
+#ifdef OPENCMR2_DEV
+void SysVita_FramePresented(void)
+{
+    constexpr uint64_t kPeriodMicros = 5000000;
+    static uint64_t last, periodStart;
+    static unsigned frames, periodFrames;
+    static double sumMs, maxMs;
+    static bool first = true;
+    const uint64_t now = sceKernelGetProcessTimeWide();
+    if (last != 0) {
+        const double ms = (double)(now - last) / 1000.0;
+        sumMs += ms;
+        maxMs = ms > maxMs ? ms : maxMs;
+        periodFrames++;
+    } else {
+        periodStart = now;
+    }
+    last = now;
+    frames++;
+    if (now - periodStart < kPeriodMicros)
+        return;
+    if (first)
+        Sys_Log("heartbeat: first after %.1f s", (double)now / 1e6);
+    first = false;
+    const struct mallinfo heap = mallinfo();
+    Sys_Log("heartbeat: %.1f s, frames %u, frame ms avg %.2f max %.2f, heap used %d KB of %d KB, files open %d",
+            (double)now / 1e6, frames, periodFrames ? sumMs / periodFrames : 0.0, maxMs, heap.uordblks / 1024,
+            heap.arena / 1024, s_openFiles);
+    periodStart = now;
+    periodFrames = 0;
+    sumMs = maxMs = 0.0;
+}
+#endif
+
 // ---- platform -------------------------------------------------------------------
 
 bool Platform_Init(int, char **)
@@ -517,6 +553,7 @@ extern "C" SysFile *Sys_OpenFile(const char *path, int mode)
     }
     SysFile *file = new SysFile;
     file->fd = fd;
+    s_openFiles++;
     return file;
 }
 
@@ -525,6 +562,7 @@ extern "C" void Sys_CloseFile(SysFile *file)
     if (file != NULL) {
         sceIoClose(file->fd);
         delete file;
+        s_openFiles--;
     }
 }
 
