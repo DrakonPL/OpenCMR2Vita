@@ -442,6 +442,9 @@ static void Present(BOOL vsync, bool stretch)
     s_frame.Reset();
     s_record++;
     s_presentedFrames++;
+#if defined(VITA) && defined(OPENCMR2_DEV)
+    SysVita_FramePresented();
+#endif
     s_stateDirty = true;
     // A frame always starts on the back buffer.
     s_target = NULL;
