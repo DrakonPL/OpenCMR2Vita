@@ -17,6 +17,7 @@
 #include "render/shaders/cg/uniforms.h"
 
 #include <psp2/kernel/processmgr.h>
+#include <psp2/touch.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -250,6 +251,30 @@ struct Stats {
     unsigned draws = 0, misses = 0, vertexFills = 0, textureBinds = 0, dropped = 0, depthPasses = 0;
 };
 
+// The frame time probe of dev builds. A tap on the front touch screen starts
+// it: each mode runs for kProbeModeMicros without vsync, and the log gets its
+// frame time. The modes split a frame into its parts:
+//   normal            the frame as the game draws it
+//   quarter           the back buffer's draws clipped to about a quarter of
+//                     its pixels: the fragment cost goes down with them
+//   tile              clipped to one 32x32 tile: almost no fragment cost, the
+//                     vertex cost and the CPU cost of the draws stay
+//   no 3D             no draw of 3D vertices: the game, the recorder and the
+//                     2D draws
+//   no depth pass     normal, without the depth pass of blended draws
+enum ProbeMode { PROBE_OFF, PROBE_NORMAL, PROBE_QUARTER, PROBE_TILE, PROBE_NO_3D, PROBE_NO_DEPTH_PASS, PROBE_END };
+const char *const kProbeNames[PROBE_END] = { "off", "normal", "quarter", "tile", "no 3D", "no depth pass" };
+constexpr uint64_t kProbeModeMicros = 3000000;
+constexpr uint64_t kProbeSettleMicros = 500000;     // at the start of a mode: not counted
+
+struct Probe {
+    int mode = PROBE_OFF;
+    uint64_t modeStart = 0, lastPresent = 0;
+    uint64_t frameMicros = 0, frameMax = 0;
+    unsigned frames = 0, draws = 0;
+    bool touchStarted = false, touchDown = false;
+};
+
 // A back buffer readback the GPU has not finished: a rectangle of a display
 // buffer, ready when the notification word reaches value.
 struct PendingRead {
@@ -319,6 +344,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     bool texturesChanged = false, texturesLogPending = false;
     Stats stats;
     uint64_t statsStart = 0;
+    Probe probe;
 
     ~Executor() override
     {
@@ -660,8 +686,18 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             sceGxmSetViewport(context, v.xOffset, v.xScale, v.yOffset, v.yScale, v.zOffset, v.zScale);
             memcpy(bound.viewport, viewport, sizeof(viewport));
         }
-        const int region[4] = { (int)scissor.x, (int)scissor.y, (int)(scissor.x + scissor.width) - 1,
-                                (int)(scissor.y + scissor.height) - 1 };
+        int region[4] = { (int)scissor.x, (int)scissor.y, (int)(scissor.x + scissor.width) - 1,
+                          (int)(scissor.y + scissor.height) - 1 };
+        // The probe clips the back buffer's draws (240..719 x 136..407 is a
+        // quarter of 960x544).
+        if (sceneTarget == nullptr && probe.mode == PROBE_QUARTER) {
+            const int quarter[4] = { device.Width() / 4, device.Height() / 4, device.Width() * 3 / 4 - 1,
+                                     device.Height() * 3 / 4 - 1 };
+            memcpy(region, quarter, sizeof(region));
+        } else if (sceneTarget == nullptr && probe.mode == PROBE_TILE) {
+            const int tile[4] = { 0, 0, 31, 31 };
+            memcpy(region, tile, sizeof(region));
+        }
         if (!bound.viewportSet || memcmp(region, bound.region, sizeof(region)) != 0) {
             sceGxmSetRegionClip(context, SCE_GXM_REGION_CLIP_OUTSIDE, region[0], region[1], region[2], region[3]);
             memcpy(bound.region, region, sizeof(region));
@@ -900,6 +936,8 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             loggedPrimitive = true;
             return;
         }
+        if (probe.mode == PROBE_NO_3D && !c.transformed)
+            return;
         const GfxDrawState &s = frame.states[c.state];
         const uint64_t key = Gfx_FragmentKey(s, backBuffer && !c.transformed);
         const int variant = FindVariant(key, s, c.transformed);
@@ -916,7 +954,8 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         // writes none.
         int depthVariant = -1;
         SceGxmFragmentProgram *depthProgram = nullptr;
-        if (s.alphaBlend && kGxmFragmentVariants[variant].alphaTest == 2 && s.depthTest && s.depthWrite) {
+        if (s.alphaBlend && kGxmFragmentVariants[variant].alphaTest == 2 && s.depthTest && s.depthWrite &&
+            probe.mode != PROBE_NO_DEPTH_PASS) {
             auto it = variantIndex.find(key << 2 | 1);
             if (it != variantIndex.end()) {
                 depthVariant = it->second;
@@ -990,6 +1029,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             sceGxmSetVertexStream(context, 0, vertices + c.firstVertexByte);
             Check("sceGxmDraw", sceGxmDraw(context, primitive, SCE_GXM_INDEX_FORMAT_U16, indices, count));
             stats.draws++;
+            probe.draws++;
         };
         SceGxmDepthFunc func = s.depthTest ? DepthFunc(s.depthFunc) : SCE_GXM_DEPTH_FUNC_ALWAYS;
         bool depthWrite = s.depthTest && s.depthWrite;
@@ -1223,11 +1263,63 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         }
         EndScene(fragment);
         backdropAhead = false;
-        device.Present(vsync);
+        device.Present(vsync && probe.mode == PROBE_OFF);
+        ProbeTick();
         presented++;
         frameStarted = false;
         LogTextures();
         LogStats();
+    }
+
+    // The frame time probe, after each present (dev builds).
+    void ProbeTick()
+    {
+#ifdef OPENCMR2_DEV
+        const uint64_t now = sceKernelGetProcessTimeWide();
+        if (probe.mode == PROBE_OFF) {
+            if (!probe.touchStarted) {
+                sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
+                probe.touchStarted = true;
+            }
+            SceTouchData touch{};
+            const bool down = sceTouchPeek(SCE_TOUCH_PORT_FRONT, &touch, 1) >= 1 && touch.reportNum > 0;
+            const bool tapped = down && !probe.touchDown;
+            probe.touchDown = down;
+            if (!tapped)
+                return;
+            Sys_Log("gxm probe: start, %u ms for each mode, no vsync", (unsigned)(kProbeModeMicros / 1000));
+            probe.mode = PROBE_NORMAL;
+            probe.modeStart = now;
+            probe.lastPresent = 0;
+            return;
+        }
+        if (now - probe.modeStart >= kProbeSettleMicros) {
+            if (probe.lastPresent != 0) {
+                const uint64_t frame = now - probe.lastPresent;
+                probe.frameMicros += frame;
+                probe.frameMax = frame > probe.frameMax ? frame : probe.frameMax;
+                probe.frames++;
+            } else {
+                probe.draws = 0;
+            }
+            probe.lastPresent = now;
+        }
+        if (now - probe.modeStart < kProbeModeMicros)
+            return;
+        const unsigned frames = probe.frames > 0 ? probe.frames : 1;
+        Sys_Log("gxm probe: %s: frame ms avg %.2f max %.2f over %u frames, %u draws per frame",
+                kProbeNames[probe.mode], probe.frameMicros / 1000.0 / frames, probe.frameMax / 1000.0, probe.frames,
+                probe.draws / frames);
+        const bool touchDown = probe.touchDown;
+        const int next = probe.mode + 1;
+        probe = Probe();
+        probe.touchStarted = true;
+        probe.touchDown = touchDown;
+        probe.modeStart = now;
+        probe.mode = next == PROBE_END ? PROBE_OFF : next;
+        if (probe.mode == PROBE_OFF)
+            Sys_Log("gxm probe: done");
+#endif
     }
 
     // One "gxm tex" and one "gxm mem" line when the textures stop changing
