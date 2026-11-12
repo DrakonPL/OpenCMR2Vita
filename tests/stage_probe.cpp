@@ -32,6 +32,9 @@
 #include "LightZone.h"
 #define SDL_MAIN_HANDLED
 #include <SDL3/SDL_main.h>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -453,6 +456,16 @@ static void LightingDigest(unsigned *zonesOut, unsigned long long out[5])
     }
 }
 
+#ifdef __GLIBC__
+// The heap the game holds: small blocks and the large mmap'd ones, where the
+// texture copies live (sizes the Vita's heap).
+static size_t HeapInUseKB()
+{
+    const struct mallinfo2 heap = mallinfo2();
+    return (heap.uordblks + heap.hblkhd) / 1024;
+}
+#endif
+
 int main(int argc, char **argv) {
     // Keep probe arguments out of the legacy command-line parser.
     if (argc != 5 && argc != 6) { fprintf(stderr, "usage: stage_probe DATA TRACE.jsonl FPS|variable TICKS [INPUTS.csv]\n"); return 2; }
@@ -553,7 +566,13 @@ int main(int argc, char **argv) {
             CMain::UpdateFrameTime();
             raceOrigin = virtualTime;
         }
-        if (mode != lastMode) { fprintf(stderr, "probe: resource mode %d at %u ms\n", mode, virtualTime); lastMode = mode; }
+        if (mode != lastMode) {
+            fprintf(stderr, "probe: resource mode %d at %u ms\n", mode, virtualTime);
+#ifdef __GLIBC__
+            fprintf(stderr, "probe: heap in use %zu KB in mode %d\n", HeapInUseKB(), mode);
+#endif
+            lastMode = mode;
+        }
         if (getenv("OPENCMR2_PROBE_HEADLIGHT_CHEAT") && CGameInfo::GetConfiguredGameMode() == 5) {
             GameInfo_SetConfiguredCheat(0, 1);
             GameInfo_ApplyCheatsForGameMode();
@@ -693,6 +712,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "probe: results menu data overwritten (ghost name %zu bytes)\n", strlen(g_ghostName));
     if (probe.finishInjected) fprintf(stderr, "probe: Finland stage 2 driving ticks=%u\n", probe.nextStageDrivingTicks);
     fprintf(stderr, "probe: RNG changed in %u race frames without a simulation step\n", probe.renderOnlyRngChanges);
+#ifdef __GLIBC__
+    fprintf(stderr, "probe: heap in use %zu KB at the end\n", HeapInUseKB());
+#endif
     fprintf(stderr, "probe: %u ticks, %u driving ticks, %u ms; %s\n", probe.tick, probe.drivingTick, virtualTime, ok ? "complete" : "FAILED");
     CMain::UnwindGameCallbacks();
     Platform_SetTestKeyboard(nullptr);
