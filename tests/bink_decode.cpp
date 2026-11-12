@@ -1,6 +1,7 @@
 // Optional real-file check/dump tool. Original game data is never bundled.
 #include "video/bink_decoder.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -46,8 +47,14 @@ int main(int argc, char **argv)
     uint64_t hash = 14695981039346656037ull, samples = 0;
     float peak = 0;
     bool ok = true;
+    double decodeMs = 0, maxDecodeMs = 0;
     for (unsigned i = 0; i < count; ++i) {
-        if (!decoder.Decode(frame)) {
+        const auto start = std::chrono::steady_clock::now();
+        const bool decoded = decoder.Decode(frame);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        decodeMs += ms;
+        maxDecodeMs = std::max(maxDecodeMs, ms);
+        if (!decoded) {
             std::fprintf(stderr, "frame %u: %s\n", i + 1, decoder.Error().c_str());
             ok = false;
             break;
@@ -62,6 +69,7 @@ int main(int argc, char **argv)
     std::printf("%ux%u, %u frames, %u/%u fps, %u Hz/%u channels: %llu samples, peak %.6f, BGRX FNV64 %016llx\n",
                 info.width, info.height, count, info.fpsNumerator, info.fpsDenominator,
                 info.sampleRate, info.channels, (unsigned long long)samples, peak, (unsigned long long)hash);
+    std::printf("decode ms per frame: average %.3f, max %.3f\n", count ? decodeMs / count : 0.0, maxDecodeMs);
     if (video && std::fclose(video)) ok = false;
     if (audio && std::fclose(audio)) ok = false;
     std::fclose(file);

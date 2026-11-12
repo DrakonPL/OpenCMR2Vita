@@ -12,6 +12,7 @@
 #include "port/sys.h"
 #include "render/presentation.h"
 #include "render/gfx_internal.h"
+#include "render/shader_key.h"
 
 #include "shaders_spirv.h"
 
@@ -654,32 +655,6 @@ struct Executor : GfxExecutor {
         return s;
     }
 
-    int TextureKind(const GfxStageState &stage)
-    {
-        GfxTexture *t = Gfx_DrawnTexture(stage.texture);
-        if (t == NULL)
-            return 0;
-        if (t->flags & GFX_TEXTURE_CUBE)
-            return 2;
-        if (t->format == GFX_FORMAT_BUMP_DUDVL)
-            return 3;
-        if (t->flags & GFX_TEXTURE_DISTANCE_FIELD)
-            return 4;
-        if (t->flags & GFX_TEXTURE_MENU_DOT)
-            return 5;
-        if (t->flags & GFX_TEXTURE_VECTOR_ICON)
-            return 6;
-        return 1;
-    }
-
-    // As in gfx_gpu.cpp: point-filtered sprites and text, read through a
-    // linear sampler by the shader.
-    bool ScaledPoint(const GfxStageState &stage)
-    {
-        int kind = TextureKind(stage);
-        return (kind == 1 || kind == 6) && stage.magFilter == GFX_FILTER_POINT && stage.mipFilter == GFX_MIPFILTER_NONE;
-    }
-
     // The two stages' textures and samplers: units 0 and 2 for 2D textures,
     // 1 and 3 for cubes.
     void BindTextures(const GfxDrawState &s)
@@ -689,9 +664,9 @@ struct Executor : GfxExecutor {
             GfxTexture *t = Gfx_DrawnTexture(stage.texture);
             GlTexture *g = t != NULL ? Ensure(t) : NULL;
             GfxStageState sampled = stage;
-            if (ScaledPoint(stage) || TextureKind(stage) == 5 || TextureKind(stage) == 6)
+            if (Gfx_ScaledPoint(stage) || Gfx_TextureKind(stage) == 5 || Gfx_TextureKind(stage) == 6)
                 sampled.minFilter = sampled.magFilter = GFX_FILTER_LINEAR;
-            if (TextureKind(stage) == 4) {
+            if (Gfx_TextureKind(stage) == 4) {
                 sampled.minFilter = sampled.magFilter = GFX_FILTER_LINEAR;
                 sampled.mipFilter = GFX_MIPFILTER_LINEAR;
             }
@@ -712,7 +687,7 @@ struct Executor : GfxExecutor {
             }
             GlTexture *native = t != NULL && (t->flags & GFX_TEXTURE_VECTOR_ICON) ? Ensure(stage.texture) : NULL;
             GfxStageState source = stage;
-            if (ScaledPoint(stage)) source.minFilter = source.magFilter = GFX_FILTER_LINEAR;
+            if (Gfx_ScaledPoint(stage)) source.minFilter = source.magFilter = GFX_FILTER_LINEAR;
             GLuint original = native != NULL ? native->texture : white2D;
             GLuint sourceSampler = Sampler(source);
             int unit = 5 + i;
@@ -851,16 +826,16 @@ struct Executor : GfxExecutor {
         u.stage0[3] = a.alphaOp;
         u.stage0b[0] = a.alphaArg1;
         u.stage0b[1] = a.alphaArg2;
-        u.stage0b[2] = TextureKind(a);
-        u.stage0b[3] = ScaledPoint(a);
+        u.stage0b[2] = Gfx_TextureKind(a);
+        u.stage0b[3] = Gfx_ScaledPoint(a);
         u.stage1[0] = b.colorOp;
         u.stage1[1] = b.colorArg1;
         u.stage1[2] = b.colorArg2;
         u.stage1[3] = b.alphaOp;
         u.stage1b[0] = b.alphaArg1;
         u.stage1b[1] = b.alphaArg2;
-        u.stage1b[2] = TextureKind(b);
-        u.stage1b[3] = ScaledPoint(b);
+        u.stage1b[2] = Gfx_TextureKind(b);
+        u.stage1b[3] = Gfx_ScaledPoint(b);
         Color(s.textureFactor, u.textureFactor);
         u.alphaTest[0] = s.alphaTest;
         u.alphaTest[1] = s.alphaFunc;

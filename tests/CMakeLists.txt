@@ -150,6 +150,11 @@ add_executable(sys_paths_test sys_paths.cpp ${PROJECT_SOURCE_DIR}/src/platform/s
 target_include_directories(sys_paths_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME sys_paths COMMAND sys_paths_test)
 
+# The keys of a draw's fragment program and pipeline, without SDL.
+add_executable(shader_key_test shader_key.cpp)
+target_include_directories(shader_key_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME shader_key COMMAND shader_key_test)
+
 # The Vita backend's event queue, without SDL.
 add_executable(sys_events_test sys_events.cpp)
 target_include_directories(sys_events_test PRIVATE ${PROJECT_SOURCE_DIR}/src)

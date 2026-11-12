@@ -1,0 +1,35 @@
+# GXM shader variants: the keys the PC runs drew with (tools/trace_stats.py).
+# fragment <key> (render/shader_key.h) and triple <key> <blend src/dst or off> <tl|3d>,
+# each with the run that first used it.
+fragment 010000001  # preliminary-map
+fragment 010004424  # preliminary-map
+fragment 010004464  # preliminary-map
+fragment 010004484  # preliminary-map
+fragment 010005084  # preliminary-map
+fragment 010005484  # preliminary-map
+fragment 010005884  # preliminary-map
+fragment 010006424  # preliminary-map
+fragment 010006484  # preliminary-map
+fragment 010007884  # preliminary-map
+fragment 110000001  # preliminary-map
+fragment 110004424  # preliminary-map
+fragment 110004484  # preliminary-map
+triple 010000001 5/6 3d  # preliminary-map
+triple 010000001 5/6 tl  # preliminary-map
+triple 010004424 2/2 3d  # preliminary-map
+triple 010004424 2/2 tl  # preliminary-map
+triple 010004464 5/6 tl  # preliminary-map
+triple 010004484 5/2 tl  # preliminary-map
+triple 010004484 5/6 3d  # preliminary-map
+triple 010004484 5/6 tl  # preliminary-map
+triple 010005084 5/6 tl  # preliminary-map
+triple 010005484 5/6 tl  # preliminary-map
+triple 010005884 5/6 tl  # preliminary-map
+triple 010006424 2/2 tl  # preliminary-map
+triple 010006484 5/6 tl  # preliminary-map
+triple 010007884 5/6 tl  # preliminary-map
+triple 110000001 5/6 3d  # preliminary-map
+triple 110004424 2/2 3d  # preliminary-map
+triple 110004484 5/2 3d  # preliminary-map
+triple 110004484 5/6 3d  # preliminary-map
+triple 110004484 off 3d  # preliminary-map

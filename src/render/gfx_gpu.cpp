@@ -5,6 +5,7 @@
 #include "port/sys.h"
 #include "render/presentation.h"
 #include "render/gfx_internal.h"
+#include "render/shader_key.h"
 
 #include "shaders_spirv.h"
 
@@ -354,7 +355,7 @@ struct Executor : GfxExecutor {
         SDL_SubmitGPUCommandBuffer(cmd);
         SDL_ReleaseGPUTransferBuffer(device, tb);
 
-        // The pipelines the game draws with (keys of PipelineKey: menus,
+        // The pipelines the game draws with (keys of Gfx_PipelineKey: menus,
         // stages, replays, results), made now: the first use of each could
         // take a frame's time to compile when the driver has not cached it.
         static const uint32_t common[] = {
@@ -604,16 +605,6 @@ struct Executor : GfxExecutor {
 
     // ---- pipelines and samplers ----
 
-    // A draw's pipeline: everything of it the state can change.
-    static uint32_t PipelineKey(const GfxCommand &cmd, const GfxDrawState &s)
-    {
-        bool depthTest = s.depthTest;
-        return (cmd.transformed ? 1u : 0u) | (uint32_t)(cmd.primitive & 7) << 1 | (s.alphaBlend ? 1u : 0u) << 4 |
-               (uint32_t)(s.srcBlend & 15) << 5 | (uint32_t)(s.destBlend & 15) << 9 | (depthTest ? 1u : 0u) << 13 |
-               ((depthTest && s.depthWrite) ? 1u : 0u) << 14 | (uint32_t)(s.depthFunc & 15) << 15 |
-               (uint32_t)(s.cull & 3) << 19;
-    }
-
     SDL_GPUGraphicsPipeline *Pipeline(uint32_t key)
     {
         auto it = pipelines.find(key);
@@ -854,35 +845,6 @@ struct Executor : GfxExecutor {
         (void)cmd;
     }
 
-    int TextureKind(const GfxStageState &stage)
-    {
-        GfxTexture *t = Gfx_DrawnTexture(stage.texture);
-        if (t == NULL)
-            return 0;
-        if (t->flags & GFX_TEXTURE_CUBE)
-            return 2;
-        if (t->format == GFX_FORMAT_BUMP_DUDVL)
-            return 3;
-        if (t->flags & GFX_TEXTURE_DISTANCE_FIELD)
-            return 4;
-        if (t->flags & GFX_TEXTURE_MENU_DOT)
-            return 5;
-        if (t->flags & GFX_TEXTURE_VECTOR_ICON)
-            return 6;
-        return 1;
-    }
-
-    // A 2D texture drawn with point filtering and no mipmaps (the game's
-    // sprites, text and HUD). Scaled, nearest texels would come out one or
-    // two pixels wide, or be skipped; the shader filters them smoothly
-    // through a linear sampler. At their size it reads them as the point
-    // filter does.
-    bool ScaledPoint(const GfxStageState &stage)
-    {
-        int kind = TextureKind(stage);
-        return (kind == 1 || kind == 6) && stage.magFilter == GFX_FILTER_POINT && stage.mipFilter == GFX_MIPFILTER_NONE;
-    }
-
     // fade: the draw is a 3D one into the back buffer, which the distance
     // fade applies to.
     void FillFragmentUniforms(const GfxDrawState &s, bool fade, FragmentUniforms &u)
@@ -895,16 +857,16 @@ struct Executor : GfxExecutor {
         u.stage0[3] = a.alphaOp;
         u.stage0b[0] = a.alphaArg1;
         u.stage0b[1] = a.alphaArg2;
-        u.stage0b[2] = TextureKind(a);
-        u.stage0b[3] = ScaledPoint(a);
+        u.stage0b[2] = Gfx_TextureKind(a);
+        u.stage0b[3] = Gfx_ScaledPoint(a);
         u.stage1[0] = b.colorOp;
         u.stage1[1] = b.colorArg1;
         u.stage1[2] = b.colorArg2;
         u.stage1[3] = b.alphaOp;
         u.stage1b[0] = b.alphaArg1;
         u.stage1b[1] = b.alphaArg2;
-        u.stage1b[2] = TextureKind(b);
-        u.stage1b[3] = ScaledPoint(b);
+        u.stage1b[2] = Gfx_TextureKind(b);
+        u.stage1b[3] = Gfx_ScaledPoint(b);
         Color(s.textureFactor, u.textureFactor);
         u.alphaTest[0] = s.alphaTest;
         u.alphaTest[1] = s.alphaFunc;
@@ -933,11 +895,11 @@ struct Executor : GfxExecutor {
             GfxTexture *t = Gfx_DrawnTexture(stage.texture);
             GpuTexture *g = t != NULL ? Ensure(t) : NULL;
             GfxStageState sampled = stage;
-            if (ScaledPoint(stage) || TextureKind(stage) == 5 || TextureKind(stage) == 6)
+            if (Gfx_ScaledPoint(stage) || Gfx_TextureKind(stage) == 5 || Gfx_TextureKind(stage) == 6)
                 sampled.minFilter = sampled.magFilter = GFX_FILTER_LINEAR;
             // A distance field is read between its texels, and from its mip
             // levels where it is drawn smaller.
-            if (TextureKind(stage) == 4) {
+            if (Gfx_TextureKind(stage) == 4) {
                 sampled.minFilter = sampled.magFilter = GFX_FILTER_LINEAR;
                 sampled.mipFilter = GFX_MIPFILTER_LINEAR;
             }
@@ -948,7 +910,7 @@ struct Executor : GfxExecutor {
             bindings[i * 2 + 1] = { (texture != NULL && cube) ? texture : whiteCube, sampler };
             GpuTexture *native = t != NULL && (t->flags & GFX_TEXTURE_VECTOR_ICON) ? Ensure(stage.texture) : NULL;
             GfxStageState source = stage;
-            if (ScaledPoint(stage)) source.minFilter = source.magFilter = GFX_FILTER_LINEAR;
+            if (Gfx_ScaledPoint(stage)) source.minFilter = source.magFilter = GFX_FILTER_LINEAR;
             bindings[5 + i] = { native != NULL ? native->texture : white2D, Sampler(source) };
         }
         bindings[4] = { backdrop, Sampler(GfxStageState()) };
@@ -1263,7 +1225,7 @@ struct Executor : GfxExecutor {
                     continue;
                 }
                 const GfxDrawState &s = frame.states[c.state];
-                SDL_GPUGraphicsPipeline *pipeline = Pipeline(PipelineKey(c, s));
+                SDL_GPUGraphicsPipeline *pipeline = Pipeline(Gfx_PipelineKey(c.primitive, c.transformed, s));
                 if (pipeline == NULL)
                     continue;
                 if (pipeline != bound.pipeline) {

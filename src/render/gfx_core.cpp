@@ -9,6 +9,7 @@
 #include "port/sys.h"
 #include "port/diagnostics.h"
 #include "render/gfx_internal.h"
+#include "render/shader_key.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -87,9 +88,12 @@ uint32_t AppendVertices(const void *data, size_t bytes, size_t stride)
 }
 
 // OPENCMR2_GFX_TRACE=file: one line per draw (primitive, counts, a hash of the
-// vertices, indices and bound texture sizes, and the calling game function),
-// "F n" per presented frame. Builds for different targets must write the same
-// lines; diffing them finds drawing that differs (tools: addr2line on caller).
+// vertices, indices and bound texture sizes, the calling game function, and
+// k= the fragment key, p= the pipeline key), "F n" per presented frame with
+// the frame's sizes, and "T" with the live textures and vertex buffers when
+// they change. Builds for different targets must write the same lines;
+// diffing them finds drawing that differs (tools: addr2line on caller).
+// tools/trace_stats.py sums a trace up.
 static FILE *TraceFile()
 {
     static FILE *file = getenv("OPENCMR2_GFX_TRACE") ? fopen(getenv("OPENCMR2_GFX_TRACE"), "w") : NULL;
@@ -97,6 +101,55 @@ static FILE *TraceFile()
 }
 static const void *s_traceCaller;
 static unsigned s_traceFrame;
+
+// Sizes of the frame being traced, summed over its flushes.
+struct TraceFrameSizes {
+    size_t vertexBytes, indices, commands, states, buffers, bufferBytes;
+};
+static TraceFrameSizes s_traceSizes;
+
+static void TraceAddFrameSizes(const GfxFrame &frame)
+{
+    s_traceSizes.vertexBytes += frame.vertices.size();
+    s_traceSizes.indices += frame.indices.size();
+    s_traceSizes.commands += frame.commands.size();
+    s_traceSizes.states += frame.states.size();
+    s_traceSizes.buffers += frame.buffers.size();
+    for (const GfxVertexBuffer *buffer : frame.buffers)
+        s_traceSizes.bufferBytes += buffer->vertices.size() * sizeof(GfxVertex);
+}
+
+// Live textures per format (GFX_FORMAT_*), count and bytes, and vertex buffers.
+static size_t s_traceTextureCount[5], s_traceTextureBytes[5];
+static size_t s_traceVertexBuffers, s_traceVertexBufferBytes;
+static bool s_traceLiveChanged;
+
+static size_t TextureBytes(const GfxTexture *t)
+{
+    size_t bytes = 0;
+    for (const auto &face : t->levels)
+        for (const auto &level : face)
+            bytes += level.size();
+    return bytes;
+}
+
+static void TraceTexture(const GfxTexture *t, int sign)
+{
+    if (TraceFile() == NULL || t->format < 0 || t->format >= 5)
+        return;
+    s_traceTextureCount[t->format] += sign;
+    s_traceTextureBytes[t->format] += sign * TextureBytes(t);
+    s_traceLiveChanged = true;
+}
+
+static void TraceVertexBuffer(const GfxVertexBuffer *buffer, int sign)
+{
+    if (TraceFile() == NULL)
+        return;
+    s_traceVertexBuffers += sign;
+    s_traceVertexBufferBytes += sign * buffer->vertices.size() * sizeof(GfxVertex);
+    s_traceLiveChanged = true;
+}
 
 static uint32_t TraceHash(uint32_t h, const void *data, size_t size)
 {
@@ -120,8 +173,11 @@ void RecordDraw(int primitive, bool transformed, const void *vertices, DWORD ver
             int size[2] = {t ? t->width : 0, t ? t->height : 0};
             h = TraceHash(h, size, sizeof(size));
         }
-        fprintf(trace, "%d %d %u %u %08x %p\n", primitive, transformed ? 1 : 0, (unsigned)vertexCount,
-                (unsigned)indexCount, h, s_traceCaller);
+        const int drawn = primitive == GFX_TRIANGLEFAN ? GFX_TRIANGLELIST : primitive;
+        fprintf(trace, "%d %d %u %u %08x %p k=%09llx p=%06x\n", primitive, transformed ? 1 : 0, (unsigned)vertexCount,
+                (unsigned)indexCount, h, s_traceCaller,
+                (unsigned long long)Gfx_FragmentKey(s_state, !transformed && s_target == NULL),
+                (unsigned)Gfx_PipelineKey(drawn, transformed, s_state));
         static int dumpFrame = getenv("OPENCMR2_GFX_TRACE_FRAME") ? atoi(getenv("OPENCMR2_GFX_TRACE_FRAME")) : -1;
         if ((int)s_traceFrame == dumpFrame && transformed)
             for (DWORD v = 0; v < vertexCount; v++) {
@@ -433,8 +489,20 @@ extern "C" void Gfx_EndScene(void)
 
 static void Present(BOOL vsync, bool stretch)
 {
-    if (FILE *trace = TraceFile())
-        fprintf(trace, "F %u\n", s_traceFrame++);
+    if (FILE *trace = TraceFile()) {
+        TraceAddFrameSizes(s_frame);
+        const TraceFrameSizes &f = s_traceSizes;
+        fprintf(trace, "F %u v=%zu i=%zu c=%zu s=%zu b=%zu/%zu\n", s_traceFrame++, f.vertexBytes, f.indices, f.commands,
+                f.states, f.buffers, f.bufferBytes);
+        s_traceSizes = TraceFrameSizes();
+        if (s_traceLiveChanged) {
+            fprintf(trace, "T");
+            for (int format = 0; format < 5; format++)
+                fprintf(trace, " %d:%zu/%zu", format, s_traceTextureCount[format], s_traceTextureBytes[format]);
+            fprintf(trace, " vb:%zu/%zu\n", s_traceVertexBuffers, s_traceVertexBufferBytes);
+            s_traceLiveChanged = false;
+        }
+    }
     if (Diagnostics::observer)
         Diagnostics::observer->BeginPresent();
     if (s_executor != NULL)
@@ -458,6 +526,8 @@ extern "C" void Gfx_PresentStretched(BOOL vsync) { Present(vsync, true); }
 // Runs what is recorded so far without ending the frame.
 static void Flush(void)
 {
+    if (TraceFile() != NULL)
+        TraceAddFrameSizes(s_frame);
     if (s_executor != NULL)
         s_executor->Execute(s_frame, s_textures, s_readback, false, false);
     s_frame.Reset();
@@ -686,6 +756,7 @@ extern "C" GfxVertexBuffer *Gfx_CreateVertexBuffer(DWORD vertexCount)
     GfxVertexBuffer *buffer = new GfxVertexBuffer;
     buffer->vertices.resize(vertexCount);
     memset(buffer->vertices.data(), 0, vertexCount * sizeof(GfxVertex));
+    TraceVertexBuffer(buffer, 1);
     return buffer;
 }
 
@@ -698,6 +769,7 @@ extern "C" void Gfx_DestroyVertexBuffer(GfxVertexBuffer *buffer)
         Flush();
     if (s_executor != NULL)
         s_executor->DestroyVertexBuffer(buffer);
+    TraceVertexBuffer(buffer, -1);
     delete buffer;
 }
 
@@ -816,6 +888,7 @@ extern "C" GfxTexture *Gfx_CreateTexture(int width, int height, int format, int 
         }
     }
     s_textures.push_back(t);
+    TraceTexture(t, 1);
     return t;
 }
 
@@ -844,6 +917,7 @@ flushed:
     if (s_executor != NULL)
         s_executor->DestroyTexture(texture);
     s_textures.erase(std::remove(s_textures.begin(), s_textures.end(), texture), s_textures.end());
+    TraceTexture(texture, -1);
     for (int f = 1; f < 6; f++)
         delete texture->faceViews[f];
     delete texture;
