@@ -312,14 +312,32 @@ struct Stats {
 //   lookup only       the 3D draws stop before their first GXM call: with
 //                     "no 3D" and "tile" it splits the CPU cost of a draw
 //                     into the executor's own part and the GXM calls
+//   profile           normal, with the time of each step of a 3D draw (and of
+//                     an Execute before its draws) summed: a second line
+//                     gives them for a frame
 // Each line also has the CPU time of an Execute up to the present: the cost
 // of the draw calls without the wait for the GPU.
 enum ProbeMode {
     PROBE_OFF, PROBE_NORMAL, PROBE_QUARTER, PROBE_TILE, PROBE_NO_3D, PROBE_NO_DEPTH_PASS, PROBE_GENERAL,
-    PROBE_FADE_ALWAYS, PROBE_DEPTH_PASS_ALWAYS, PROBE_LOOKUP_ONLY, PROBE_END
+    PROBE_FADE_ALWAYS, PROBE_DEPTH_PASS_ALWAYS, PROBE_LOOKUP_ONLY, PROBE_PROFILE, PROBE_END
 };
-const char *const kProbeNames[PROBE_END] = { "off",           "normal",  "quarter",     "tile",              "no 3D",
-                                             "no depth pass", "general", "fade always", "depth pass always", "lookup only" };
+const char *const kProbeNames[PROBE_END] = { "off",         "normal",        "quarter", "tile",
+                                             "no 3D",       "no depth pass", "general", "fade always",
+                                             "depth pass always", "lookup only", "profile" };
+
+// The steps the profile mode times: an Execute before its draws, then the
+// steps of a 3D draw in Draw's order.
+enum ProfileSection {
+    PROFILE_SETUP,      // textures, vertex buffers, the frame's vertices into the ring
+    PROFILE_STATE,      // the viewport and the vertex uniforms of the draw's state
+    PROFILE_KEYS,       // the fragment key and the arguments key
+    PROFILE_RANGE,      // the vertex range and its eye distance
+    PROFILE_VARIANT,    // the variant and its fragment program
+    PROFILE_DEPTH,      // whether the draw needs a depth pass, and its program
+    PROFILE_VERTICES,   // where the vertices and the indices are
+    PROFILE_PASSES,     // the GXM calls of the draw's passes
+    PROFILE_SECTIONS
+};
 constexpr uint64_t kProbeModeMicros = 3000000;
 constexpr uint64_t kProbeSettleMicros = 500000;     // at the start of a mode: not counted
 
@@ -328,6 +346,9 @@ struct Probe {
     uint64_t modeStart = 0, lastPresent = 0;
     uint64_t frameMicros = 0, frameMax = 0;
     uint64_t submitMicros = 0;      // in Execute, up to the present
+    uint64_t section[PROFILE_SECTIONS] = {};    // the profile mode's sums
+    uint64_t mark = 0;              // the end of the step before
+    unsigned draws3d = 0;
     unsigned frames = 0, draws = 0;
     bool touchStarted = false, touchDown = false;
 };
@@ -1095,6 +1116,19 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         }
         if (probe.mode == PROBE_NO_3D && !c.transformed)
             return;
+        // The profile mode sums the time of each step of a 3D draw.
+        const bool profiled = probe.mode == PROBE_PROFILE && !c.transformed;
+        auto step = [&](int section) {
+            if (!profiled)
+                return;
+            const uint64_t now = sceKernelGetProcessTimeWide();
+            probe.section[section] += now - probe.mark;
+            probe.mark = now;
+        };
+        if (profiled) {
+            probe.mark = sceKernelGetProcessTimeWide();
+            probe.draws3d++;
+        }
         const GfxDrawState &s = frame.states[c.state];
         const GfxViewport viewport = ToTarget(s.viewport, s.screenW, s.screenH, backBuffer, targetW, targetH);
         if (!c.transformed && (vertexUniformState == nullptr || vertexUniformW != targetW || vertexUniformH != targetH ||
@@ -1105,8 +1139,10 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             vertexUniformH = targetH;
             stats.vertexFills++;
         }
+        step(PROFILE_STATE);
         uint64_t key = Gfx_FragmentKey(s, backBuffer && !c.transformed);
         const uint64_t args = Gfx_FragmentArgsKey(s);
+        step(PROFILE_KEYS);
         int variant = -1;
         // The fade changes no pixel of a draw whose vertices are all nearer
         // than its start: such a draw takes the variant of its key without
@@ -1117,8 +1153,10 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         if ((key & kFadeKeyBit) != 0) {
             range = RangeOf(c, frame, scratch);
             measured = true;
-            if (probe.mode != PROBE_FADE_ALWAYS && range != nullptr &&
-                Gxm_FarthestEyeDistance(range->box, &vertexUniforms[VU_WORLD_VIEW]) < s.fadeStart)
+            const bool tooNear = probe.mode != PROBE_FADE_ALWAYS && range != nullptr &&
+                                 Gxm_FarthestEyeDistance(range->box, &vertexUniforms[VU_WORLD_VIEW]) < s.fadeStart;
+            step(PROFILE_RANGE);
+            if (tooNear)
                 variant = FindVariant(key & ~kFadeKeyBit, args, s, c.transformed);
             if (variant >= 0) {
                 key &= ~kFadeKeyBit;
@@ -1135,6 +1173,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                                                           c.transformed);
         if (fragment == nullptr)
             return;
+        step(PROFILE_VARIANT);
         // A blended draw with the alpha test cannot discard (the SGX543), so
         // its program writes each pixel. Its depth must be written only where
         // the alpha test passes, as in Direct3D. Thus a pass without colour
@@ -1155,6 +1194,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                     depthProgram = FragmentProgram(depthVariant, false, 0, 0, c.transformed, true);
             }
         }
+        step(PROFILE_DEPTH);
         // Where the vertices and the indices are.
         const unsigned char *vertices = nullptr;
         if (c.buffer != nullptr) {
@@ -1178,6 +1218,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             return;
         }
 
+        step(PROFILE_VERTICES);
         if (probe.mode == PROBE_LOOKUP_ONLY && !c.transformed)
             return;
         const bool scaled = backBuffer && s.screenW > 0 && s.screenH > 0;
@@ -1228,6 +1269,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             depthWrite = false;
         }
         pass(variant, fragment, func, depthWrite);
+        step(PROFILE_PASSES);
     }
 
     // ---- a system dialog (GxmDialogPresenter) ----
@@ -1380,6 +1422,8 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         // The drawing into textures runs first, then the back buffer's, as in
         // gfx_gpu.cpp: no scene on another target splits the back buffer's.
         backdropAhead = HasBackdrop(frame);
+        if (probe.mode == PROBE_PROFILE)
+            probe.section[PROFILE_SETUP] += sceKernelGetProcessTimeWide() - entered;
         for (int phase = 0; phase < 2; phase++) {
             GfxTexture *target = nullptr;
             const GxmTexture *targetTexture = nullptr;
@@ -1489,7 +1533,9 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                 probe.frames++;
             } else {
                 probe.draws = 0;
+                probe.draws3d = 0;
                 probe.submitMicros = 0;
+                memset(probe.section, 0, sizeof(probe.section));
             }
             probe.lastPresent = now;
         }
@@ -1499,6 +1545,21 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         Sys_Log("gxm probe: %s: frame ms avg %.2f max %.2f over %u frames, %u draws per frame, draw calls %.2f ms",
                 kProbeNames[probe.mode], probe.frameMicros / 1000.0 / frames, probe.frameMax / 1000.0, probe.frames,
                 probe.draws / frames, probe.submitMicros / 1000.0 / frames);
+        if (probe.mode == PROBE_PROFILE) {
+            // What a time read costs: the steps of each draw have 7 of them.
+            const uint64_t t0 = sceKernelGetProcessTimeWide();
+            uint64_t t1 = t0;
+            for (int i = 0; i < 256; i++)
+                t1 = sceKernelGetProcessTimeWide();
+            const double perFrame = 1000.0 * frames;
+            Sys_Log("gxm probe: profile ms per frame: setup %.2f, state %.2f, keys %.2f, range %.2f, variant %.2f, "
+                    "depth %.2f, vertices %.2f, passes %.2f (%u 3D draws per frame, a time read %.2f us)",
+                    probe.section[PROFILE_SETUP] / perFrame, probe.section[PROFILE_STATE] / perFrame,
+                    probe.section[PROFILE_KEYS] / perFrame, probe.section[PROFILE_RANGE] / perFrame,
+                    probe.section[PROFILE_VARIANT] / perFrame, probe.section[PROFILE_DEPTH] / perFrame,
+                    probe.section[PROFILE_VERTICES] / perFrame, probe.section[PROFILE_PASSES] / perFrame,
+                    probe.draws3d / frames, (double)(t1 - t0) / 256.0);
+        }
         const bool touchDown = probe.touchDown;
         const int next = probe.mode + 1;
         probe = Probe();
