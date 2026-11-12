@@ -134,8 +134,12 @@ int Gxm_LiveBlocks(void)
 unsigned char *GxmArenaSource::Alloc(unsigned bytes, int *handle)
 {
     GxmBlock block;
-    if (!Gxm_AllocGpu(type, bytes, attribs, block) && !Gxm_AllocGpu(fallback, bytes, attribs, block))
-        return nullptr;
+    if (!Gxm_AllocGpu(type, bytes, attribs, block)) {
+        if (fallback == type || !Gxm_AllocGpu(fallback, bytes, attribs, block))
+            return nullptr;
+        Sys_Log("gxm mem: no room for %u KB of memblock type 0x%08x: took type 0x%08x", bytes / kKB, (unsigned)type,
+                (unsigned)fallback);
+    }
     *handle = (int)blocks.size();
     blocks.push_back(block);
     return (unsigned char *)block.data;
