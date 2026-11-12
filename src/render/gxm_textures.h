@@ -21,6 +21,7 @@ struct GxmTexture {
     GxmTextureLayout layout;
     uint32_t sampler = ~0u;         // the sampler state last set on texture (SamplerKey)
     unsigned generation = 0;        // counts the moves of the texture to other memory
+    uint8_t minAlpha = 0;           // the least alpha of the levels uploaded (0: not known, or 0)
     unsigned lastDrawn = ~0u;       // the last frame that drew with it (~0u: none)
     bool failed = false;            // GXM refused it: never drawn, never tried again
     // A render target: its colour surface is the texture's memory.

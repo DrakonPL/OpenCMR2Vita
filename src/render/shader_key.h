@@ -134,6 +134,64 @@ inline uint64_t Gfx_FragmentArgsKey(const GfxDrawState &s)
            (uint64_t)Gfx_AlphaCompare(s) << 40;
 }
 
+// ---- a lower bound of a draw's alpha ----
+// With the least alpha of the diffuse colour and of the stages' textures
+// (0..1), the least alpha the texture stages can give a pixel. 0 where the
+// stages are not ones the bound knows: a wrong 0 costs time, a wrong value
+// above it would lose pixels. The alpha test passes for each pixel of a draw
+// whose bound is at least its threshold.
+
+// One alpha argument: its least value, or 0 for a source or a modifier the
+// bound does not know (specular, complement).
+inline float Gfx_ArgAlphaBound(DWORD arg, float diffuse, float current, float texture, float factor)
+{
+    if (arg & GFX_TA_COMPLEMENT)
+        return 0.0f;
+    switch (arg & 0xf) {
+    case GFX_TA_DIFFUSE: return diffuse;
+    case GFX_TA_TEXTURE: return texture;
+    case GFX_TA_TFACTOR: return factor;
+    case GFX_TA_SPECULAR: return 0.0f;
+    default: return current;
+    }
+}
+
+// One stage on current (the least alpha so far).
+inline float Gfx_StageAlphaBound(const GfxStageState &stage, float diffuse, float current, float texture,
+                                 float factor)
+{
+    const float a1 = Gfx_ArgAlphaBound(stage.alphaArg1, diffuse, current, texture, factor);
+    const float a2 = Gfx_ArgAlphaBound(stage.alphaArg2, diffuse, current, texture, factor);
+    switch (stage.alphaOp) {
+    case GFX_TOP_DISABLE: return current;
+    case GFX_TOP_SELECTARG1: return a1;
+    case GFX_TOP_SELECTARG2: return a2;
+    // The product, also where it is doubled: saturate(2 x) is not below x.
+    case GFX_TOP_MODULATE:
+    case GFX_TOP_MODULATE2X:
+    case GFX_TOP_MODULATE4X: return a1 * a2;
+    case GFX_TOP_ADD: return a1 > a2 ? a1 : a2;
+    default: return 0.0f;
+    }
+}
+
+// texture0, texture1: the least alpha the stage's texture read gives (1 with
+// no texture, 0 where it is not known).
+inline float Gfx_AlphaLowerBound(const GfxDrawState &s, float diffuse, float texture0, float texture1)
+{
+    const GfxStageState &stage0 = s.stages[0], &stage1 = s.stages[1];
+    if (stage0.colorOp == GFX_TOP_DISABLE)
+        return diffuse;
+    // A bump stage leaves the alpha to stage 1, with a changed texture read.
+    if (stage0.colorOp == GFX_TOP_BUMPENVMAP || stage0.colorOp == GFX_TOP_BUMPENVMAPLUMINANCE)
+        return 0.0f;
+    const float factor = (float)(s.textureFactor >> 24) / 255.0f;
+    const float current = Gfx_StageAlphaBound(stage0, diffuse, diffuse, texture0, factor);
+    if (stage1.colorOp == GFX_TOP_DISABLE)
+        return current;
+    return Gfx_StageAlphaBound(stage1, diffuse, current, texture1, factor);
+}
+
 // Everything of a draw's pipeline that the state can change: vertex format,
 // primitive, blending, depth and culling. primitive is a list or strip type
 // (fans are converted before they are drawn).

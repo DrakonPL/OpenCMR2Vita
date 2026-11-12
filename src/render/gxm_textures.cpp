@@ -3,6 +3,7 @@
 #include "render/gxm_textures.h"
 
 #include "port/sys.h"
+#include "render/gxm_alpha.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -231,15 +232,27 @@ void GxmTextures::Upload(std::vector<GfxTexture *> &textures, unsigned frame)
                 g->generation++;
             }
         }
+        // The least alpha of the levels goes with the upload: the executor
+        // leaves out work where no texel can fail the alpha test. A render
+        // target's is not known.
         const int faces = g->layout.faceBytes != 0 ? 6 : 1;
+        int minAlpha = g->target == nullptr ? 255 : 0;
         for (int face = 0; face < faces; face++)
             for (int m = 0; m < g->layout.levels; m++) {
                 const GxmLevelLayout &l = g->layout.level[m];
-                if (t->levels[face][m].size() < (size_t)l.sourceRowBytes * l.sourceRows)
+                const size_t bytes = (size_t)l.sourceRowBytes * l.sourceRows;
+                if (t->levels[face][m].size() < bytes) {
+                    minAlpha = 0;
                     continue;
+                }
                 CopyLevel(t->format, t->levels[face][m].data(), g->layout, l,
                           (uint8_t *)g->memory + (size_t)face * g->layout.faceBytes + l.offset);
+                if (minAlpha > 0) {
+                    const int a = Gxm_MinAlpha(t->format, t->levels[face][m].data(), bytes);
+                    minAlpha = a < minAlpha ? a : minAlpha;
+                }
             }
+        g->minAlpha = (uint8_t)minAlpha;
     }
 }
 

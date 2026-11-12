@@ -8,6 +8,7 @@
 #include "render/gfx_executor_shared.h"
 #include "render/gfx_internal.h"
 #include "render/gxm_device.h"
+#include "render/gxm_alpha.h"
 #include "render/gxm_bounds.h"
 #include "render/gxm_dialog.h"
 #include "render/gxm_readback.h"
@@ -140,7 +141,11 @@ void FillVertexUniforms(const GfxDrawState &s, const GfxViewport &viewport, floa
     Copy4(s.material.emissive, u[VU_MATERIAL_EMISSIVE]);
     Color(s.ambient, u[VU_GLOBAL_AMBIENT]);
     u[VU_GLOBAL_AMBIENT][3] = s.material.power;
+    // The rows of a light that is off stay 0: fixed3d_v.cg skips it by its
+    // enabled flag, and reads no light when the lighting is off.
     for (int i = 0; i < 8; i++) {
+        if (!s.lighting || !s.lightEnabled[i])
+            continue;
         const GfxLight &l = s.lights[i];
         float(*row)[4] = &u[VU_LIGHTS + i * VU_LIGHT_ROWS];
         Copy4(l.diffuse, row[VU_LIGHT_DIFFUSE]);
@@ -156,7 +161,7 @@ void FillVertexUniforms(const GfxDrawState &s, const GfxViewport &viewport, floa
         row[VU_LIGHT_ATTENUATION][3] = l.falloff;
         row[VU_LIGHT_SPOT][0] = cosf(l.theta * 0.5f);
         row[VU_LIGHT_SPOT][1] = cosf(l.phi * 0.5f);
-        row[VU_LIGHT_SPOT][2] = s.lightEnabled[i] ? 1.0f : 0.0f;
+        row[VU_LIGHT_SPOT][2] = 1.0f;
     }
     u[VU_LIGHT_FLAGS][0] = s.lighting;
     u[VU_LIGHT_FLAGS][1] = s.colorVertex;
@@ -224,15 +229,32 @@ void FillFragmentUniforms(const GfxDrawState &s, int targetW, int targetH, bool 
     u[FU_TARGET][1] = targetH ? 1.0f / targetH : 0.0f;
 }
 
+// What the executor finds out about the vertices of a 3D draw from their CPU
+// copy: their box, and the least alpha of their two colours.
+struct DrawRange {
+    GxmBounds box;
+    uint8_t diffuseAlpha = 0, specularAlpha = 0;
+};
+
+inline DrawRange MeasureRange(const GfxVertex *vertices, unsigned count)
+{
+    DrawRange r;
+    r.box = Gxm_VertexBounds(vertices, sizeof(GfxVertex), count);
+    r.diffuseAlpha = (uint8_t)Gxm_MinVertexByte(vertices, sizeof(GfxVertex), count, offsetof(GfxVertex, diffuse) + 3);
+    r.specularAlpha =
+        (uint8_t)Gxm_MinVertexByte(vertices, sizeof(GfxVertex), count, offsetof(GfxVertex, specular) + 3);
+    return r;
+}
+
 // The copy of a GfxVertexBuffer the GPU draws from, as of a version of it.
 struct GxmVertexBuffer {
     void *memory = nullptr;     // from the static pool
     uint32_t version = 0;
     uint32_t noRoomVersion = 0; // the version the pool had no room for (0: none)
-    // The boxes of the vertex ranges drawn from boundsVersion of the buffer,
-    // by first vertex << 32 | count.
-    std::unordered_map<uint64_t, GxmBounds> bounds;
-    uint32_t boundsVersion = 0;
+    // The vertex ranges drawn from rangesVersion of the buffer, by first
+    // vertex << 32 | count.
+    std::unordered_map<uint64_t, DrawRange> ranges;
+    uint32_t rangesVersion = 0;
 };
 
 // A fragment program variant: its patcher id and its fu[] parameter.
@@ -267,6 +289,7 @@ struct Bound {
 struct Stats {
     unsigned draws = 0, misses = 0, vertexFills = 0, textureBinds = 0, dropped = 0, depthPasses = 0;
     unsigned fadeDraws = 0, nearDraws = 0;  // draws of a key with the fade: with it, and too near for it
+    unsigned depthSkipped = 0;              // blended draws whose alpha test passes for each pixel: no depth pass
 };
 
 // The frame time probe of dev builds. A tap on the front touch screen starts
@@ -284,14 +307,19 @@ struct Stats {
 //                     variants made for the arguments keys save
 //   fade always       normal, with the fade also in the draws that are too
 //                     near for it: what the near test saves
+//   depth pass always normal, with the depth pass also for the blended
+//                     draws whose alpha test passes for each pixel
+//   lookup only       the 3D draws stop before their first GXM call: with
+//                     "no 3D" and "tile" it splits the CPU cost of a draw
+//                     into the executor's own part and the GXM calls
 // Each line also has the CPU time of an Execute up to the present: the cost
 // of the draw calls without the wait for the GPU.
 enum ProbeMode {
     PROBE_OFF, PROBE_NORMAL, PROBE_QUARTER, PROBE_TILE, PROBE_NO_3D, PROBE_NO_DEPTH_PASS, PROBE_GENERAL,
-    PROBE_FADE_ALWAYS, PROBE_END
+    PROBE_FADE_ALWAYS, PROBE_DEPTH_PASS_ALWAYS, PROBE_LOOKUP_ONLY, PROBE_END
 };
-const char *const kProbeNames[PROBE_END] = { "off",           "normal",  "quarter",    "tile", "no 3D",
-                                             "no depth pass", "general", "fade always" };
+const char *const kProbeNames[PROBE_END] = { "off",           "normal",  "quarter",     "tile",              "no 3D",
+                                             "no depth pass", "general", "fade always", "depth pass always", "lookup only" };
 constexpr uint64_t kProbeModeMicros = 3000000;
 constexpr uint64_t kProbeSettleMicros = 500000;     // at the start of a mode: not counted
 
@@ -993,35 +1021,65 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                                               identityIndices, 4));
     }
 
-    // The largest eye distance of the vertices of a 3D draw (the vertex
-    // uniforms are those of its state), from the CPU copy of its vertices.
-    // The box of a range of a vertex buffer is kept while the buffer does
-    // not change. A draw without readable vertices is as far as can be.
-    float FarthestEyeDistance(const GfxCommand &c, const GfxFrame &frame)
+    // The vertices of a 3D draw, measured from their CPU copy, or nullptr
+    // where they cannot be read. The range of a vertex buffer is kept while
+    // the buffer does not change. scratch holds that of the frame's vertices.
+    const DrawRange *RangeOf(const GfxCommand &c, const GfxFrame &frame, DrawRange &scratch)
     {
-        const float (*worldView)[4] = &vertexUniforms[VU_WORLD_VIEW];
-        if (c.vertexCount == 0)
-            return kNoFadeStart;
+        if (c.transformed || c.vertexCount == 0)
+            return nullptr;
         if (c.buffer == nullptr) {
             if ((size_t)c.firstVertexByte + (size_t)c.vertexCount * sizeof(GfxVertex) > frame.vertices.size())
-                return kNoFadeStart;
-            return Gxm_FarthestEyeDistance(
-                Gxm_VertexBounds(frame.vertices.data() + c.firstVertexByte, sizeof(GfxVertex), c.vertexCount), worldView);
+                return nullptr;
+            scratch = MeasureRange((const GfxVertex *)(frame.vertices.data() + c.firstVertexByte), c.vertexCount);
+            return &scratch;
         }
         GxmVertexBuffer *g = (GxmVertexBuffer *)c.buffer->gpu;
         const size_t first = c.firstVertexByte / sizeof(GfxVertex);
         if (g == nullptr || first + c.vertexCount > c.buffer->vertices.size())
-            return kNoFadeStart;
-        if (g->boundsVersion != c.buffer->version) {
-            g->bounds.clear();
-            g->boundsVersion = c.buffer->version;
+            return nullptr;
+        if (g->rangesVersion != c.buffer->version) {
+            g->ranges.clear();
+            g->rangesVersion = c.buffer->version;
         }
-        const uint64_t range = (uint64_t)first << 32 | c.vertexCount;
-        auto it = g->bounds.find(range);
-        if (it == g->bounds.end())
-            it = g->bounds.emplace(range, Gxm_VertexBounds(&c.buffer->vertices[first], sizeof(GfxVertex), c.vertexCount))
-                     .first;
-        return Gxm_FarthestEyeDistance(it->second, worldView);
+        const uint64_t key = (uint64_t)first << 32 | c.vertexCount;
+        auto it = g->ranges.find(key);
+        if (it == g->ranges.end())
+            it = g->ranges.emplace(key, MeasureRange(&c.buffer->vertices[first], c.vertexCount)).first;
+        return &it->second;
+    }
+
+    // The least alpha (0..1) the texture read of a stage gives: 1 with no
+    // texture, 0 where it is not known (a texture that is not a plain 2D one,
+    // or not on the GPU yet).
+    static float StageTextureAlpha(const GfxStageState &stage)
+    {
+        if (stage.texture == nullptr)
+            return 1.0f;
+        if (Gfx_TextureKind(stage) != 1)
+            return 0.0f;
+        const GxmTexture *g = (const GxmTexture *)Gfx_DrawnTexture(stage.texture)->gpu;
+        return g != nullptr && !g->failed ? (float)g->minAlpha / 255.0f : 0.0f;
+    }
+
+    // Whether the alpha test of a 3D draw passes for each of its pixels: the
+    // least alpha its stages can give is at least the test's threshold. Then
+    // the test changes nothing.
+    static bool AlphaTestAlwaysPasses(const GfxDrawState &s, const DrawRange &range)
+    {
+        if (Gfx_AlphaCompare(s) != GFX_ALPHA_COMPARE_AT_LEAST)
+            return false;
+        // The alpha of the diffuse colour, as fixed3d_v.cg gives it.
+        float diffuse = (float)range.diffuseAlpha / 255.0f;
+        if (s.lighting) {
+            if (s.colorVertex && s.diffuseSource == 2)
+                diffuse = (float)range.specularAlpha / 255.0f;
+            else if (!s.colorVertex || s.diffuseSource != 1)
+                diffuse = s.material.diffuse.a < 1.0f ? s.material.diffuse.a : 1.0f;
+        }
+        const float bound = Gfx_AlphaLowerBound(s, diffuse, StageTextureAlpha(s.stages[0]), StageTextureAlpha(s.stages[1]));
+        // A margin for the rounding of the interpolated colour.
+        return bound >= Gfx_AlphaThreshold(s) + 1.0f / 1024.0f;
     }
 
     // vertexOffset, indexOffset: the Execute's data in the ring (kFull: none).
@@ -1053,8 +1111,14 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         // The fade changes no pixel of a draw whose vertices are all nearer
         // than its start: such a draw takes the variant of its key without
         // the fade, which is much shorter.
+        DrawRange scratch;
+        const DrawRange *range = nullptr;
+        bool measured = false;
         if ((key & kFadeKeyBit) != 0) {
-            if (probe.mode != PROBE_FADE_ALWAYS && FarthestEyeDistance(c, frame) < s.fadeStart)
+            range = RangeOf(c, frame, scratch);
+            measured = true;
+            if (probe.mode != PROBE_FADE_ALWAYS && range != nullptr &&
+                Gxm_FarthestEyeDistance(range->box, &vertexUniforms[VU_WORLD_VIEW]) < s.fadeStart)
                 variant = FindVariant(key & ~kFadeKeyBit, args, s, c.transformed);
             if (variant >= 0) {
                 key &= ~kFadeKeyBit;
@@ -1075,14 +1139,21 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         // its program writes each pixel. Its depth must be written only where
         // the alpha test passes, as in Direct3D. Thus a pass without colour
         // and with the discard writes the depth first, and the blended pass
-        // writes none.
+        // writes none. A draw whose alpha test passes for each pixel needs no
+        // depth pass: its blended pass writes the same depth.
         int depthVariant = -1;
         SceGxmFragmentProgram *depthProgram = nullptr;
         if (s.alphaBlend && kGxmFragmentVariants[variant].alphaTest == 2 && s.depthTest && s.depthWrite &&
             probe.mode != PROBE_NO_DEPTH_PASS) {
-            depthVariant = LookupVariant(key, 1, args);
-            if (depthVariant >= 0)
-                depthProgram = FragmentProgram(depthVariant, false, 0, 0, c.transformed, true);
+            if (!measured)
+                range = RangeOf(c, frame, scratch);
+            if (range != nullptr && probe.mode != PROBE_DEPTH_PASS_ALWAYS && AlphaTestAlwaysPasses(s, *range)) {
+                stats.depthSkipped++;
+            } else {
+                depthVariant = LookupVariant(key, 1, args);
+                if (depthVariant >= 0)
+                    depthProgram = FragmentProgram(depthVariant, false, 0, 0, c.transformed, true);
+            }
         }
         // Where the vertices and the indices are.
         const unsigned char *vertices = nullptr;
@@ -1107,6 +1178,8 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             return;
         }
 
+        if (probe.mode == PROBE_LOOKUP_ONLY && !c.transformed)
+            return;
         const bool scaled = backBuffer && s.screenW > 0 && s.screenH > 0;
         if (c.transformed)
             SetViewport(0.0f, 0.0f, (float)targetW, (float)targetH, 0.0f, 1.0f, viewport);
@@ -1460,10 +1533,10 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             statsStart = now;
         if (now - statsStart < kStatsMicros)
             return;
-        Sys_Log("gxm: per s draws %u (depth passes %u, fade %u, near %u), patcher misses %u, vertex fills %u, "
-                "texture binds %u, dropped %u",
-                stats.draws, stats.depthPasses, stats.fadeDraws, stats.nearDraws, stats.misses, stats.vertexFills,
-                stats.textureBinds, stats.dropped);
+        Sys_Log("gxm: per s draws %u (depth passes %u, not needed %u, fade %u, near %u), patcher misses %u, "
+                "vertex fills %u, texture binds %u, dropped %u",
+                stats.draws, stats.depthPasses, stats.depthSkipped, stats.fadeDraws, stats.nearDraws, stats.misses,
+                stats.vertexFills, stats.textureBinds, stats.dropped);
         stats = Stats();
         statsStart = now;
 #endif
