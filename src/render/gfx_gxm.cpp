@@ -277,6 +277,13 @@ struct Executor : GfxExecutor {
     bool texturesChanged = false, texturesLogPending = false;
     Stats stats;
     uint64_t statsStart = 0;
+#ifdef OPENCMR2_DEV
+    // A diagnosis for the device (VP-2.5 run 3: the frontend draws do not
+    // show): each second all draws change one state, and a grid of the shown
+    // frame is logged. Removed when the cause is known.
+    int probeMode = 0;      // 0 as recorded, 1 no culling, 2 the alpha test passes, 3 no blending
+    unsigned probeSecond = 0, frameDraws = 0;
+#endif
 
     ~Executor() override
     {
@@ -695,6 +702,10 @@ struct Executor : GfxExecutor {
         memory.FrameRing().BeginFrame(device.FrameSlot());
         backBufferBegun = false;
         frameStarted = true;
+#ifdef OPENCMR2_DEV
+        probeMode = (int)(sceKernelGetProcessTimeWide() / 1000000 % 4);
+        frameDraws = 0;
+#endif
     }
 
     // ---- drawing ----
@@ -738,8 +749,16 @@ struct Executor : GfxExecutor {
         const int variant = FindVariant(Gfx_FragmentKey(s, backBuffer && !c.transformed), s.alphaBlend);
         if (variant < 0)
             return;
-        SceGxmFragmentProgram *fragment = FragmentProgram(variant, s.alphaBlend, s.srcBlend, s.destBlend,
-                                                          c.transformed);
+        bool blend = s.alphaBlend;
+        SceGxmCullMode cull = CullMode(s.cull);
+#ifdef OPENCMR2_DEV
+        if (probeMode == 1)
+            cull = SCE_GXM_CULL_NONE;
+        if (probeMode == 3)
+            blend = false;
+        frameDraws++;
+#endif
+        SceGxmFragmentProgram *fragment = FragmentProgram(variant, blend, s.srcBlend, s.destBlend, c.transformed);
         if (fragment == nullptr)
             return;
         // Where the vertices and the indices are.
@@ -774,7 +793,7 @@ struct Executor : GfxExecutor {
             SetViewport((float)viewport.x, (float)viewport.y, (float)viewport.width, (float)viewport.height,
                         viewport.minZ, viewport.maxZ, viewport);
         SetDepthAndCull(s.depthTest ? DepthFunc(s.depthFunc) : SCE_GXM_DEPTH_FUNC_ALWAYS, s.depthTest && s.depthWrite,
-                        CullMode(s.cull));
+                        cull);
 
         // The default uniform buffers last one draw: reserved and filled each
         // time, after the programs are set.
@@ -801,6 +820,10 @@ struct Executor : GfxExecutor {
         if (v.uniforms != nullptr) {
             float fragmentUniforms[FU_ROWS][4];
             FillFragmentUniforms(s, targetW, targetH, fragmentUniforms);
+#ifdef OPENCMR2_DEV
+            if (probeMode == 2)
+                fragmentUniforms[FU_ALPHA_TEST][0] = (float)GFX_CMP_ALWAYS;
+#endif
             sceGxmReserveFragmentDefaultUniformBuffer(context, &buffer);
             sceGxmSetUniformDataF(buffer, v.uniforms, 0, v.uniformRows * 4, fragmentUniforms[0]);
         }
@@ -898,7 +921,41 @@ struct Executor : GfxExecutor {
         frameStarted = false;
         LogTextures();
         LogStats();
+#ifdef OPENCMR2_DEV
+        LogProbe();
+#endif
     }
+
+#ifdef OPENCMR2_DEV
+    // Once a second, half way through its mode: the colours of a 16x16 grid
+    // of the frame just shown.
+    void LogProbe()
+    {
+        static const char *const kModes[4] = { "as recorded", "no culling", "alpha test passes", "no blending" };
+        const uint64_t now = sceKernelGetProcessTimeWide();
+        const unsigned second = (unsigned)(now / 1000000);
+        if (second == probeSecond || now % 1000000 < 500000)
+            return;
+        probeSecond = second;
+        device.Finish();
+        int stride;
+        const uint32_t *pixels = device.ShownPixels(&stride);
+        const int w = device.Width(), h = device.Height();
+        uint32_t colours[256];
+        int count = 0;
+        for (int gy = 0; gy < 16; gy++)
+            for (int gx = 0; gx < 16; gx++) {
+                const uint32_t c = pixels[(size_t)(gy * h / 16 + h / 32) * stride + gx * w / 16 + w / 32] & 0xffffff;
+                int i = 0;
+                while (i < count && colours[i] != c)
+                    i++;
+                if (i == count)
+                    colours[count++] = c;
+            }
+        Sys_Log("gxm probe: mode %d (%s), draws %u, %d colours, first %06x", probeMode, kModes[probeMode], frameDraws,
+                count, (unsigned)colours[0]);
+    }
+#endif
 
     // One "gxm tex" and one "gxm mem" line when the textures stop changing
     // (the end of a load), not one per frame of the load.
