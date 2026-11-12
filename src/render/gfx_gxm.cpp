@@ -8,6 +8,7 @@
 #include "render/gfx_executor_shared.h"
 #include "render/gfx_internal.h"
 #include "render/gxm_device.h"
+#include "render/gxm_readback.h"
 #include "render/gxm_textures.h"
 #include "render/gxm_viewport.h"
 #include "render/shader_key.h"
@@ -25,6 +26,7 @@
 extern "C" {
 extern const SceGxmProgram clear_v_gxp_start;
 extern const SceGxmProgram clear_f_gxp_start;
+extern const SceGxmProgram copy_f_gxp_start;
 extern const SceGxmProgram fixed3d_v_gxp_start;
 extern const SceGxmProgram fixedtl_v_gxp_start;
 }
@@ -36,12 +38,15 @@ using namespace GfxShared;
 constexpr int kVariantCount = (int)(sizeof(kGxmFragmentVariants) / sizeof(kGxmFragmentVariants[0]));
 constexpr unsigned kIdentityIndices = 65536;    // a non-indexed draw indexes through these
 constexpr size_t kLoggedUnknownKeys = 64;    // different missing variants logged, at most
-// The distance fade waits for the backdrop copy (VP-2.6). Until then its range
-// starts beyond any eye distance, so no pixel fades. The start and the end
-// are different: smoothstep with equal edges divides by zero, and on the
-// device each faded pixel then showed the backdrop (a white texture).
+// A frame with no backdrop copy does not fade: the range starts beyond any eye
+// distance. The start and the end are different: smoothstep with equal edges
+// divides by zero, and on the device each faded pixel then showed the
+// backdrop.
 constexpr float kNoFadeStart = 1e18f;
 constexpr float kNoFadeEnd = 2e18f;
+// Dev builds time the backdrop copy once in this many frames (it waits for
+// the GPU before and after it).
+constexpr unsigned kBackdropTimingFrames = 600;
 constexpr uint64_t kStatsMicros = 1000000;
 
 SceGxmBlendFactor BlendFactor(int d3d)
@@ -172,8 +177,9 @@ void FillVertexUniforms(const GfxDrawState &s, const GfxViewport &viewport, floa
     u[VU_TARGET][3] = viewport.height ? -1.0f / viewport.height : 0.0f;
 }
 
-// The rows of fu[] in the fixed_f variants (shaders/cg/uniforms.h).
-void FillFragmentUniforms(const GfxDrawState &s, int targetW, int targetH, float u[FU_ROWS][4])
+// The rows of fu[] in the fixed_f variants (shaders/cg/uniforms.h). fade:
+// the frame has its backdrop copy.
+void FillFragmentUniforms(const GfxDrawState &s, int targetW, int targetH, bool fade, float u[FU_ROWS][4])
 {
     memset(u, 0, sizeof(float) * 4 * FU_ROWS);
     for (int i = 0; i < 2; i++) {
@@ -205,8 +211,8 @@ void FillFragmentUniforms(const GfxDrawState &s, int targetW, int targetH, float
     memcpy(u[FU_BUMP_MATRIX], s.stages[0].bumpMat, sizeof(float) * 4);
     u[FU_BUMP_LUMINANCE][0] = s.stages[0].bumpLumScale;
     u[FU_BUMP_LUMINANCE][1] = s.stages[0].bumpLumOffset;
-    u[FU_DISTANCE_FADE][0] = kNoFadeStart;
-    u[FU_DISTANCE_FADE][1] = kNoFadeEnd;
+    u[FU_DISTANCE_FADE][0] = fade ? s.fadeStart : kNoFadeStart;
+    u[FU_DISTANCE_FADE][1] = fade ? s.fadeEnd : kNoFadeEnd;
     u[FU_TARGET][0] = targetW ? 1.0f / targetW : 0.0f;
     u[FU_TARGET][1] = targetH ? 1.0f / targetH : 0.0f;
 }
@@ -241,6 +247,15 @@ struct Stats {
     unsigned draws = 0, misses = 0, vertexFills = 0, textureBinds = 0, dropped = 0;
 };
 
+// A back buffer readback the GPU has not finished: a rectangle of a display
+// buffer, ready when the notification word reaches value.
+struct PendingRead {
+    bool active = false;
+    int buffer = 0;
+    GxmReadbackRect rect;
+    uint32_t value = 0;
+};
+
 struct Executor : GfxExecutor {
     GxmDevice device;
     GxmMemory memory;   // after the device: freed before it
@@ -249,11 +264,11 @@ struct Executor : GfxExecutor {
     bool loggedInit = false;
 
     // Programs.
-    SceGxmShaderPatcherId clearVertexId = nullptr, clearFragmentId = nullptr, vertex3dId = nullptr,
-                          vertexTLId = nullptr;
+    SceGxmShaderPatcherId clearVertexId = nullptr, clearFragmentId = nullptr, copyFragmentId = nullptr,
+                          vertex3dId = nullptr, vertexTLId = nullptr;
     SceGxmVertexProgram *clearVertex = nullptr, *vertex3d = nullptr, *vertexTL = nullptr;
-    SceGxmFragmentProgram *clearColor = nullptr, *clearDepthOnly = nullptr;
-    const SceGxmProgramParameter *clearDepthParam = nullptr, *clearColorParam = nullptr;
+    SceGxmFragmentProgram *clearColor = nullptr, *clearDepthOnly = nullptr, *copyProgram = nullptr;
+    const SceGxmProgramParameter *clearDepthParam = nullptr, *clearColorParam = nullptr, *copyInvSizeParam = nullptr;
     const SceGxmProgramParameter *vertexUniformsParam = nullptr, *targetParam = nullptr;
     unsigned vertexUniformRows = 0;
     Variant variants[kVariantCount];
@@ -263,12 +278,25 @@ struct Executor : GfxExecutor {
 
     uint16_t *identityIndices = nullptr;
     GxmTexture white;   // for a slot a program reads but the draw has no texture for
+    // The back buffer as it was at GFX_CMD_BACKDROP: the distance fade reads it.
+    GxmTexture backdrop;
+    int backdropW = 0, backdropH = 0;
+    unsigned nextBackdropTiming = 0;
+    // The readback: the notification word the GPU writes after a frame that
+    // has one, the last value asked for, and the read not collected yet.
+    volatile unsigned int *notificationWord = nullptr;
+    uint32_t notificationValue = 0;
+    PendingRead pendingRead;
     GxmDeferredFree staticDeferred;     // static pool blocks of replaced or destroyed vertex buffers
 
     // The frame being recorded.
     unsigned presented = 0;     // frames shown: the number of the frame being recorded
     bool frameStarted = false;
     bool backBufferBegun = false;   // its scene was begun this frame
+    bool backdropAhead = false;     // this Execute copies the backdrop: the back buffer scene stores its depth
+    bool backdropCopied = false;    // this frame has its backdrop copy
+    bool backSceneStoresDepth = false;  // the open back buffer scene stores its depth
+    bool depthStored = false;       // the next back buffer scene loads the depth the last one stored
     bool inScene = false;
     const GxmTexture *sceneTarget = nullptr;    // nullptr: the back buffer
     Bound bound;
@@ -292,7 +320,7 @@ struct Executor : GfxExecutor {
         for (auto &p : fragmentPrograms)
             if (p.second != nullptr)
                 sceGxmShaderPatcherReleaseFragmentProgram(patcher, p.second);
-        for (SceGxmFragmentProgram *p : { clearColor, clearDepthOnly })
+        for (SceGxmFragmentProgram *p : { clearColor, clearDepthOnly, copyProgram })
             if (p != nullptr)
                 sceGxmShaderPatcherReleaseFragmentProgram(patcher, p);
         for (SceGxmVertexProgram *p : { clearVertex, vertex3d, vertexTL })
@@ -301,13 +329,14 @@ struct Executor : GfxExecutor {
         for (Variant &v : variants)
             if (v.id != nullptr)
                 sceGxmShaderPatcherUnregisterProgram(patcher, v.id);
-        for (SceGxmShaderPatcherId id : { clearVertexId, clearFragmentId, vertex3dId, vertexTLId })
+        for (SceGxmShaderPatcherId id : { clearVertexId, clearFragmentId, copyFragmentId, vertex3dId, vertexTLId })
             if (id != nullptr)
                 sceGxmShaderPatcherUnregisterProgram(patcher, id);
         for (const GxmDeferredFree::Entry &e : staticDeferred.entries)
             memory.Static().Free(e.memory);
         memory.Static().Free(identityIndices);
         memory.Textures().Free(white.memory);
+        ReleaseBackdrop();
     }
 
     // ---- set up ----
@@ -372,6 +401,7 @@ struct Executor : GfxExecutor {
         SceGxmShaderPatcher *patcher = device.Patcher();
         if (!Register(&clear_v_gxp_start, "clear_v", &clearVertexId) ||
             !Register(&clear_f_gxp_start, "clear_f", &clearFragmentId) ||
+            !Register(&copy_f_gxp_start, "copy_f", &copyFragmentId) ||
             !Register(&fixed3d_v_gxp_start, "fixed3d_v", &vertex3dId) ||
             !Register(&fixedtl_v_gxp_start, "fixedtl_v", &vertexTLId))
             return false;
@@ -392,16 +422,22 @@ struct Executor : GfxExecutor {
                                                             SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
                                                             SCE_GXM_MULTISAMPLE_NONE, &noColor, &clear_v_gxp_start,
                                                             &clearDepthOnly)) ||
+            !Check("CreateFragmentProgram(copy_f)",
+                   sceGxmShaderPatcherCreateFragmentProgram(patcher, copyFragmentId,
+                                                            SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
+                                                            SCE_GXM_MULTISAMPLE_NONE, nullptr, &clear_v_gxp_start,
+                                                            &copyProgram)) ||
             !VertexProgram(vertex3dId, &fixed3d_v_gxp_start, false, &vertex3d) ||
             !VertexProgram(vertexTLId, &fixedtl_v_gxp_start, true, &vertexTL))
             return false;
         clearDepthParam = sceGxmProgramFindParameterByName(&clear_v_gxp_start, "clearDepth");
         clearColorParam = sceGxmProgramFindParameterByName(&clear_f_gxp_start, "clearColor");
+        copyInvSizeParam = sceGxmProgramFindParameterByName(&copy_f_gxp_start, "invSize");
         vertexUniformsParam = sceGxmProgramFindParameterByName(&fixed3d_v_gxp_start, "vu");
         targetParam = sceGxmProgramFindParameterByName(&fixedtl_v_gxp_start, "target");
-        if (clearDepthParam == nullptr || clearColorParam == nullptr || vertexUniformsParam == nullptr ||
-            targetParam == nullptr) {
-            Sys_Log("gxm: a program lacks clearDepth, clearColor, vu or target");
+        if (clearDepthParam == nullptr || clearColorParam == nullptr || copyInvSizeParam == nullptr ||
+            vertexUniformsParam == nullptr || targetParam == nullptr) {
+            Sys_Log("gxm: a program lacks clearDepth, clearColor, invSize, vu or target");
             return false;
         }
         vertexUniformRows = std::min<unsigned>(VU_ROWS, sceGxmProgramParameterGetArraySize(vertexUniformsParam));
@@ -438,6 +474,8 @@ struct Executor : GfxExecutor {
             return false;
         for (unsigned i = 0; i < kIdentityIndices; i++)
             identityIndices[i] = (uint16_t)i;
+        notificationWord = sceGxmGetNotificationRegion();
+        *notificationWord = 0;
         memset(white.memory, 0xff, white.layout.bytes);
         return Check("sceGxmTextureInitLinear(white)",
                      sceGxmTextureInitLinear(&white.texture, white.memory, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ARGB, 8, 8,
@@ -448,7 +486,60 @@ struct Executor : GfxExecutor {
     {
         if (!ready)
             ready = device.Init() && memory.Init() && CreatePrograms() && CreateBuffers();
-        return ready && device.SetMode(width, height);
+        if (!ready || !device.SetMode(width, height))
+            return false;
+        // Without it the scenery does not fade, and the game still runs.
+        CreateBackdrop();
+        return true;
+    }
+
+    // The backdrop target, the size of the back buffer, from the texture pool.
+    // SetMode waited for the GPU before a size change.
+    void CreateBackdrop()
+    {
+        const int w = device.Width(), h = device.Height();
+        if (backdrop.target != nullptr && w == backdropW && h == backdropH)
+            return;
+        ReleaseBackdrop();
+        backdrop.layout = Gxm_TextureLayout(GFX_FORMAT_BGRA8, w, h, 1);
+        backdrop.memory = memory.Textures().Alloc(backdrop.layout.bytes);
+        if (backdrop.memory == nullptr) {
+            Sys_Log("gxm: no room for the backdrop (%u KB): the scenery does not fade", backdrop.layout.bytes / 1024);
+            return;
+        }
+        const unsigned rowBytes = backdrop.layout.level[0].rowBytes;
+        SceGxmRenderTargetParams params{};
+        params.width = w;
+        params.height = h;
+        params.scenesPerFrame = 1;
+        params.multisampleMode = SCE_GXM_MULTISAMPLE_NONE;
+        params.driverMemBlock = -1;
+        if (!Check("sceGxmColorSurfaceInit(backdrop)",
+                   sceGxmColorSurfaceInit(&backdrop.color, SCE_GXM_COLOR_FORMAT_A8B8G8R8, SCE_GXM_COLOR_SURFACE_LINEAR,
+                                          SCE_GXM_COLOR_SURFACE_SCALE_NONE, SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, w, h,
+                                          rowBytes / 4, backdrop.memory)) ||
+            !Check("sceGxmTextureInitLinearStrided(backdrop)",
+                   sceGxmTextureInitLinearStrided(&backdrop.texture, backdrop.memory,
+                                                  SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, w, h, rowBytes)) ||
+            !Check("sceGxmCreateRenderTarget(backdrop)", sceGxmCreateRenderTarget(&params, &backdrop.target))) {
+            ReleaseBackdrop();
+            return;
+        }
+        // Read pixel for pixel (copy_f and the fade both sample texel centres).
+        gpuTextures.SetSampler(backdrop, GFX_FILTER_POINT, GFX_FILTER_POINT, GFX_MIPFILTER_NONE, GFX_ADDRESS_CLAMP);
+        backdropW = w;
+        backdropH = h;
+    }
+
+    void ReleaseBackdrop()
+    {
+        if (backdrop.target != nullptr)
+            sceGxmDestroyRenderTarget(backdrop.target);
+        backdrop.target = nullptr;
+        memory.Textures().Free(backdrop.memory);
+        backdrop.memory = nullptr;
+        backdrop.sampler = ~0u;
+        backdropW = backdropH = 0;
     }
 
     void SetFullscreen(bool) override {}
@@ -579,7 +670,7 @@ struct Executor : GfxExecutor {
         for (int unit = 0; unit < GXM_TEXTURE_UNITS && v.units[unit] != GXM_SLOT_NONE; unit++) {
             const int slot = v.units[unit];
             if (slot == GXM_SLOT_BACKDROP) {
-                BindTexture(unit, nullptr);     // VP-2.6
+                BindTexture(unit, backdropCopied ? &backdrop : nullptr);
                 continue;
             }
             const int i = (slot == GXM_SLOT_TEX1 || slot == GXM_SLOT_CUBE1 || slot == GXM_SLOT_NATIVE1) ? 1 : 0;
@@ -606,12 +697,13 @@ struct Executor : GfxExecutor {
 
     // ---- scenes ----
 
-    void EndScene()
+    // fragment: the back buffer scene's notification (the readback).
+    void EndScene(const SceGxmNotification *fragment = nullptr)
     {
         if (!inScene)
             return;
         if (sceneTarget == nullptr)
-            device.EndScene();
+            device.EndScene(fragment);
         else
             Check("sceGxmEndScene", sceGxmEndScene(device.Context(), nullptr, nullptr));
         inScene = false;
@@ -624,12 +716,15 @@ struct Executor : GfxExecutor {
         EndScene();
         bool ok;
         if (target == nullptr) {
-            // The back buffer's depth is not kept across a second scene.
-            if (backBufferBegun && !loggedSplit) {
+            // The back buffer's depth is kept across a second scene only
+            // around the backdrop copy.
+            if (backBufferBegun && !depthStored && !loggedSplit) {
                 Sys_Log("gxm: the back buffer's scene was split in a frame");
                 loggedSplit = true;
             }
-            ok = device.BeginBackBufferScene();
+            backSceneStoresDepth = backdropAhead && !backdropCopied;
+            ok = device.BeginBackBufferScene(depthStored, backSceneStoresDepth);
+            depthStored = false;
             backBufferBegun = backBufferBegun || ok;
         } else {
             ok = Check("sceGxmBeginScene(target)", sceGxmBeginScene(device.Context(), 0, target->target, nullptr,
@@ -706,6 +801,8 @@ struct Executor : GfxExecutor {
         staticDeferred.Collect(presented, [this](void *block) { memory.Static().Free(block); });
         memory.FrameRing().BeginFrame(device.FrameSlot());
         backBufferBegun = false;
+        backdropCopied = false;
+        depthStored = false;
         frameStarted = true;
     }
 
@@ -812,7 +909,7 @@ struct Executor : GfxExecutor {
         const Variant &v = variants[variant];
         if (v.uniforms != nullptr) {
             float fragmentUniforms[FU_ROWS][4];
-            FillFragmentUniforms(s, targetW, targetH, fragmentUniforms);
+            FillFragmentUniforms(s, targetW, targetH, backdropCopied, fragmentUniforms);
             sceGxmReserveFragmentDefaultUniformBuffer(context, &buffer);
             sceGxmSetUniformDataF(buffer, v.uniforms, 0, v.uniformRows * 4, fragmentUniforms[0]);
         }
@@ -820,6 +917,108 @@ struct Executor : GfxExecutor {
         sceGxmSetVertexStream(context, 0, vertices + c.firstVertexByte);
         Check("sceGxmDraw", sceGxmDraw(context, primitive, SCE_GXM_INDEX_FORMAT_U16, indices, count));
         stats.draws++;
+    }
+
+    // ---- the backdrop and the readback ----
+
+    // Whether the frame's back buffer commands copy the backdrop.
+    static bool HasBackdrop(const GfxFrame &frame)
+    {
+        bool backBuffer = true;
+        for (const GfxCommand &c : frame.commands) {
+            if (c.type == GFX_CMD_TARGET)
+                backBuffer = c.target == nullptr;
+            else if (c.type == GFX_CMD_BACKDROP && backBuffer)
+                return true;
+        }
+        return false;
+    }
+
+    // GFX_CMD_BACKDROP: the back buffer as drawn so far into the backdrop.
+    // GXM cannot copy a surface inside a scene: the back buffer's scene ends
+    // (it stores its colour, and its depth for the scene after), a scene on
+    // the backdrop draws the back buffer through copy_f, and the next draw
+    // begins the back buffer's scene again, which loads both.
+    void CopyBackdrop()
+    {
+        if (backdrop.target == nullptr || backdropCopied || !BeginScene(nullptr))
+            return;
+        depthStored = backSceneStoresDepth;
+        EndScene();
+        SceGxmTexture source;
+        if (!device.BackBufferTexture(&source))
+            return;
+        sceGxmTextureSetMinFilter(&source, SCE_GXM_TEXTURE_FILTER_POINT);
+        sceGxmTextureSetMagFilter(&source, SCE_GXM_TEXTURE_FILTER_POINT);
+        bool timed = false;
+        uint64_t start = 0;
+#ifdef OPENCMR2_DEV
+        if (presented >= nextBackdropTiming) {
+            nextBackdropTiming = presented + kBackdropTimingFrames;
+            timed = true;
+            device.Finish();
+            start = sceKernelGetProcessTimeWide();
+        }
+#endif
+        SceGxmContext *context = device.Context();
+        if (!Check("sceGxmBeginScene(backdrop)", sceGxmBeginScene(context, 0, backdrop.target, nullptr, nullptr,
+                                                                  nullptr, &backdrop.color, nullptr)))
+            return;
+        bound = Bound();
+        GfxViewport whole = {};
+        whole.width = (DWORD)backdropW;
+        whole.height = (DWORD)backdropH;
+        whole.maxZ = 1.0f;
+        SetPrograms(clearVertex, copyProgram);
+        SetViewport(0.0f, 0.0f, (float)backdropW, (float)backdropH, 0.0f, 1.0f, whole);
+        SetDepthAndCull(SCE_GXM_DEPTH_FUNC_ALWAYS, false, SCE_GXM_CULL_NONE);
+        void *buffer;
+        const float z[4] = {};
+        sceGxmReserveVertexDefaultUniformBuffer(context, &buffer);
+        sceGxmSetUniformDataF(buffer, clearDepthParam, 0, 4, z);
+        const float invSize[4] = { 1.0f / backdropW, 1.0f / backdropH, 0.0f, 0.0f };
+        sceGxmReserveFragmentDefaultUniformBuffer(context, &buffer);
+        sceGxmSetUniformDataF(buffer, copyInvSizeParam, 0, 4, invSize);
+        sceGxmSetFragmentTexture(context, 0, &source);
+        Check("sceGxmDraw(backdrop)", sceGxmDraw(context, SCE_GXM_PRIMITIVE_TRIANGLE_STRIP,
+                                                 SCE_GXM_INDEX_FORMAT_U16, identityIndices, 4));
+        Check("sceGxmEndScene(backdrop)", sceGxmEndScene(context, nullptr, nullptr));
+        bound = Bound();
+        backdropCopied = true;
+        if (timed) {
+            device.Finish();
+            Sys_Log("gxm: backdrop copy %.2f ms on the GPU (%dx%d)",
+                    (sceKernelGetProcessTimeWide() - start) / 1000.0, backdropW, backdropH);
+        }
+    }
+
+    // Takes the pending readback when the GPU has done its frame. wait: the
+    // display buffer is about to be drawn again, so it is taken now.
+    void CollectRead(GfxReadback &readback, bool wait)
+    {
+        if (!pendingRead.active)
+            return;
+        if ((int32_t)(*notificationWord - pendingRead.value) < 0) {
+            if (!wait)
+                return;
+            SceGxmNotification n;
+            n.address = notificationWord;
+            n.value = pendingRead.value;
+            sceGxmNotificationWait(&n);
+        }
+        const GxmReadbackRect &r = pendingRead.rect;
+        readback.pixels.resize((size_t)r.width * r.height);
+        device.ReadPixels(pendingRead.buffer, r.x, r.y, r.width, r.height, readback.pixels.data());
+        readback.readyWidth = r.width;
+        readback.readyHeight = r.height;
+        readback.ready = true;
+        pendingRead.active = false;
+    }
+
+    void CollectReadback(GfxReadback &readback) override
+    {
+        if (ready)
+            CollectRead(readback, false);
     }
 
     // ---- frame execution ----
@@ -834,6 +1033,8 @@ struct Executor : GfxExecutor {
         }
         if (!frameStarted)
             StartFrame();
+        // The read of a display buffer is taken before it is drawn again.
+        CollectRead(readback, pendingRead.active && pendingRead.buffer == device.BackBuffer());
         EnsureTextures(frame);
         gpuTextures.Upload(textures, presented);
         texturesChanged = gpuTextures.TakeChanged() || texturesChanged;
@@ -854,6 +1055,7 @@ struct Executor : GfxExecutor {
 
         // The drawing into textures runs first, then the back buffer's, as in
         // gfx_gpu.cpp: no scene on another target splits the back buffer's.
+        backdropAhead = HasBackdrop(frame);
         for (int phase = 0; phase < 2; phase++) {
             GfxTexture *target = nullptr;
             const GxmTexture *targetTexture = nullptr;
@@ -867,9 +1069,11 @@ struct Executor : GfxExecutor {
                 }
                 if ((target != nullptr) != (phase == 0))
                     continue;
-                // The backdrop copy for the distance fade: VP-2.6.
-                if (c.type == GFX_CMD_BACKDROP)
+                if (c.type == GFX_CMD_BACKDROP) {
+                    if (target == nullptr)
+                        CopyBackdrop();
                     continue;
+                }
                 // A target with no GPU surface (a cube face) is not drawn.
                 if (target != nullptr && (targetTexture == nullptr || targetTexture->target == nullptr))
                     continue;
@@ -890,11 +1094,14 @@ struct Executor : GfxExecutor {
         if (!present)
             return;
 
+        // The readback: a rectangle of this frame, read from its display
+        // buffer when the GPU has done it (the lens flare test of a later
+        // frame takes it, as on the PC).
+        GxmReadbackRect read;
         if (readback.requested) {
-            readback.pixels.assign((size_t)readback.width * readback.height, 0xff000000);
-            readback.readyWidth = readback.width;
-            readback.readyHeight = readback.height;
-            readback.ready = true;
+            CollectRead(readback, true);
+            read = Gxm_ClampReadback(readback.x, readback.y, readback.width, readback.height, device.Width(),
+                                     device.Height());
             readback.requested = false;
         }
         if (!loggedInit) {
@@ -904,7 +1111,19 @@ struct Executor : GfxExecutor {
         }
         if (!BeginScene(nullptr))
             return;
-        EndScene();
+        SceGxmNotification notification;
+        const SceGxmNotification *fragment = nullptr;
+        if (read.width > 0 && read.height > 0) {
+            notification.address = notificationWord;
+            notification.value = ++notificationValue;
+            fragment = &notification;
+            pendingRead.active = true;
+            pendingRead.buffer = device.BackBuffer();
+            pendingRead.rect = read;
+            pendingRead.value = notification.value;
+        }
+        EndScene(fragment);
+        backdropAhead = false;
         device.Present(vsync);
         presented++;
         frameStarted = false;

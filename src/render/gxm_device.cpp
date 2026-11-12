@@ -3,6 +3,7 @@
 #include "render/gxm_device.h"
 
 #include "port/sys.h"
+#include "render/gxm_readback.h"
 
 #include <psp2/display.h>
 
@@ -14,7 +15,8 @@ namespace {
 constexpr int kDisplayStride = 1024;    // pixels: a multiple of 64, as the display needs
 constexpr unsigned kDisplayBytes = kDisplayStride * GxmDevice::kDisplayHeight * 4;
 constexpr int kPendingFlips = GxmDevice::kFrameSlots - 1;
-// The back buffer is one scene, or two around the backdrop copy (VP-2.6).
+// The back buffer is one scene, or two around the backdrop copy, and more
+// when the game reads a render target in the middle of a frame.
 constexpr unsigned kScenesPerFrame = 4;
 // The sizes of the GXM samples.
 constexpr unsigned kPatcherBufferBytes = 64 * 1024;
@@ -186,6 +188,7 @@ bool GxmDevice::SetMode(int w, int h)
     for (DisplayBuffer &d : display) {
         memset(d.memory.data, 0, kDisplayBytes);
         unsigned char *origin = (unsigned char *)d.memory.data + ((size_t)y * kDisplayStride + x) * 4;
+        d.origin = origin;
         if (!Check("sceGxmColorSurfaceInit",
                    sceGxmColorSurfaceInit(&d.surface, SCE_GXM_COLOR_FORMAT_A8B8G8R8, SCE_GXM_COLOR_SURFACE_LINEAR,
                                           SCE_GXM_COLOR_SURFACE_SCALE_NONE, SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, w, h,
@@ -203,16 +206,38 @@ bool GxmDevice::SetMode(int w, int h)
     return true;
 }
 
-bool GxmDevice::BeginBackBufferScene()
+bool GxmDevice::BeginBackBufferScene(bool loadDepth, bool storeDepth)
 {
     DisplayBuffer &d = display[back];
+    // The colour surface is always loaded and stored. The depth is not,
+    // unless a split scene asks for it: it costs a read or a write of the
+    // whole depth buffer.
+    sceGxmDepthStencilSurfaceSetForceLoadMode(&depth, loadDepth ? SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED
+                                                                : SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_DISABLED);
+    sceGxmDepthStencilSurfaceSetForceStoreMode(&depth, storeDepth ? SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED
+                                                                  : SCE_GXM_DEPTH_STENCIL_FORCE_STORE_DISABLED);
     return Check("sceGxmBeginScene",
                  sceGxmBeginScene(context, 0, renderTarget, nullptr, nullptr, d.sync, &d.surface, &depth));
 }
 
-void GxmDevice::EndScene()
+void GxmDevice::EndScene(const SceGxmNotification *fragment)
 {
-    Check("sceGxmEndScene", sceGxmEndScene(context, nullptr, nullptr));
+    Check("sceGxmEndScene", sceGxmEndScene(context, nullptr, fragment));
+}
+
+bool GxmDevice::BackBufferTexture(SceGxmTexture *texture) const
+{
+    return Check("sceGxmTextureInitLinearStrided(back buffer)",
+                 sceGxmTextureInitLinearStrided(texture, display[back].origin, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR,
+                                                width, height, kDisplayStride * 4));
+}
+
+void GxmDevice::ReadPixels(int buffer, int x, int y, int w, int h, uint32_t *pixels) const
+{
+    const unsigned char *origin = display[buffer].origin;
+    for (int row = 0; row < h; row++)
+        Gxm_PackReadbackRow((const uint32_t *)(origin + ((size_t)(y + row) * kDisplayStride + x) * 4),
+                            pixels + (size_t)row * w, w);
 }
 
 void GxmDevice::Present(bool vsync)
