@@ -774,6 +774,58 @@ void CheckControlsPages(Pad &pad)
 
 // controls.ini is written with the defaults and read back; an edited file
 // rebinds the actions.
+// A [vita] section (the PS Vita's controls.ini) read on the PC: the bindings
+// of its defaults table with an edit kept, its settings, and the names written
+// back as they were.
+void CheckVitaSection()
+{
+    std::filesystem::path dir = std::filesystem::temp_directory_path() / ("opencmr2-vita-" + std::to_string(SDL_GetTicksNS()));
+    std::filesystem::create_directories(dir);
+    std::string dirText = dir.string() + "/";
+    std::filesystem::path file = dir / "controls.ini";
+    std::string text = "format = 2\n[vita]\nbrake = square\n";
+    SDL_SaveFile(file.string().c_str(), text.data(), text.size());
+    Platform_SetTestUserDir(dirText.c_str());
+    Input_ReloadBindings();
+
+    const Profile *vita = Bindings_Find("vita");
+    Check(vita != nullptr, "a [vita] section is read");
+    if (vita == nullptr)
+        return;
+    auto is = [](const std::vector<Source> &list, size_t i, SourceKind kind, int index, int direction) {
+        return list.size() > i && list[i].kind == kind && list[i].index == index && list[i].direction == direction;
+    };
+    Check(vita->actions[INPUT_BRAKE].size() == 1 && is(vita->actions[INPUT_BRAKE], 0, SOURCE_VITA_BUTTON, VITA_SQUARE, 0),
+          "the edited brake is Square");
+    Check(is(vita->actions[INPUT_THROTTLE], 0, SOURCE_VITA_BUTTON, VITA_R, 0), "R is the throttle by default");
+    Check(is(vita->actions[INPUT_STEER_LEFT], 0, SOURCE_VITA_AXIS, VITA_LX, AXIS_NEGATIVE) &&
+          is(vita->actions[INPUT_STEER_RIGHT], 0, SOURCE_VITA_AXIS, VITA_LX, AXIS_POSITIVE), "the left stick steers");
+    Check(vita->actions[INPUT_MENU_UP].size() == 2 && is(vita->actions[INPUT_MENU_UP], 0, SOURCE_VITA_BUTTON, VITA_UP, 0) &&
+          is(vita->actions[INPUT_MENU_UP], 1, SOURCE_VITA_AXIS, VITA_LY, AXIS_NEGATIVE), "up and the stick go up a menu");
+    Check(is(vita->actions[INPUT_MENU_CONFIRM], 0, SOURCE_VITA_BUTTON, VITA_CROSS, 0) &&
+          is(vita->actions[INPUT_MENU_BACK], 0, SOURCE_VITA_BUTTON, VITA_CIRCLE, 0), "Cross confirms, Circle goes back");
+    Check(vita->deadzone == 10 && vita->saturation == 95 && vita->steeringCurve == 30 && vita->rumble == 0,
+          "the Vita's settings");
+
+    Bindings_MarkChanged();
+    Input_SaveBindings();
+    char *saved = (char *)SDL_LoadFile(file.string().c_str(), nullptr);
+    std::string content = saved ? saved : "";
+    SDL_free(saved);
+    Check(content.find("[vita]\n") != std::string::npos && content.find("brake = square\n") != std::string::npos &&
+          content.find("menu_up = up | ly-\n") != std::string::npos &&
+          content.find("steer_left = lx-\n") != std::string::npos, "the [vita] names are written back");
+    Input_ReloadBindings();
+    vita = Bindings_Find("vita");
+    Check(vita != nullptr && is(vita->actions[INPUT_BRAKE], 0, SOURCE_VITA_BUTTON, VITA_SQUARE, 0),
+          "and read again");
+
+    // The checks after this one run without a [vita] section.
+    text = "format = 2\n";
+    SDL_SaveFile(file.string().c_str(), text.data(), text.size());
+    Input_ReloadBindings();
+}
+
 void CheckBindingsFile(Pad &pad)
 {
     std::filesystem::path dir = std::filesystem::temp_directory_path() / ("opencmr2-input-" + std::to_string(SDL_GetTicksNS()));
@@ -876,6 +928,7 @@ int main()
     CheckRumble(pad);
     CheckControlsPages(pad);
     CheckBindingsFile(pad);
+    CheckVitaSection();
 
     Check(Input_GetProfileCount() == 3 && Input_GetProfileKind(2) == INPUT_PROFILE_GAMEPAD,
           "the controls pages list the gamepads while one is connected");

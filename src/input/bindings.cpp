@@ -1,14 +1,25 @@
 // Bindings of the actions: defaults, and controls.ini in the user directory.
+// On the PS Vita only the [vita] section, with no SDL.
 
 #include "input/input_internal.h"
+#ifdef VITA
+#include "platform/platform_vita.h"
+#else
 #include "platform/platform.h"
+#endif
 #include "port/sys.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <algorithm>
 #include <sstream>
+
+const char *const kVitaButtonNames[VITA_BUTTON_COUNT] = {
+    "cross", "circle", "square", "triangle", "l", "r", "start", "select", "up", "down", "left", "right",
+};
+const char *const kVitaAxisNames[VITA_AXIS_COUNT] = { "lx", "ly", "rx", "ry" };
 
 namespace {
 
@@ -22,6 +33,19 @@ bool s_changed;
 bool s_loaded;
 bool s_fileExists;
 
+#ifdef VITA
+const char *const s_header =
+    "# OpenCMR2 controls\n"
+    "#\n"
+    "# Each action lists the inputs bound to it, separated by '|': cross, circle,\n"
+    "# square, triangle, l, r, start, select, the d-pad up, down, left, right, and\n"
+    "# the stick halves lx-, lx+, ly-, ly+, rx-, rx+, ry-, ry+.\n"
+    "#\n"
+    "# deadzone and saturation are percentages of a stick: the part left out around\n"
+    "# its rest, and the part that gives the full value. steering_curve, 0 to 100,\n"
+    "# makes the steering gentler around the centre for finer corrections, keeping\n"
+    "# full lock at the end. Settings left out follow the defaults (10, 95, 30).\n";
+#else
 const char *const s_header =
     "# OpenCMR2 controls\n"
     "#\n"
@@ -49,6 +73,7 @@ const char *const s_header =
     "# to every controller SDL knows the layout of, [joystick] is the default for\n"
     "# other joysticks and wheels, and a [device <GUID>] section applies to one\n"
     "# model of controller.\n";
+#endif
 
 std::string Trim(const std::string &text)
 {
@@ -73,8 +98,38 @@ bool IsGamepad(const Profile &profile)
     return profile.section == "gamepad";
 }
 
+bool IsVita(const Profile &profile)
+{
+    return profile.section == "vita";
+}
+
+// A [vita] input: a button, or a stick half (lx-, ry+).
+bool ParseVitaSource(const std::string &name, Source *out)
+{
+    for (int button = 0; button < VITA_BUTTON_COUNT; button++) {
+        if (name == kVitaButtonNames[button]) {
+            *out = { SOURCE_VITA_BUTTON, button, 0 };
+            return true;
+        }
+    }
+    if (name.size() != 3 || (name[2] != '-' && name[2] != '+'))
+        return false;
+    for (int axis = 0; axis < VITA_AXIS_COUNT; axis++) {
+        if (name.compare(0, 2, kVitaAxisNames[axis]) == 0) {
+            *out = { SOURCE_VITA_AXIS, axis, name[2] == '-' ? AXIS_NEGATIVE : AXIS_POSITIVE };
+            return true;
+        }
+    }
+    return false;
+}
+
 bool ParseSource(const Profile &profile, const std::string &token, Source *out)
 {
+    if (IsVita(profile))
+        return ParseVitaSource(Lower(token), out);
+#ifdef VITA
+    return false;
+#else
     if (IsKeyboard(profile)) {
         SDL_Scancode scancode = SDL_GetScancodeFromName(token.c_str());
         if (scancode == SDL_SCANCODE_UNKNOWN)
@@ -137,6 +192,7 @@ bool ParseSource(const Profile &profile, const std::string &token, Source *out)
         return true;
     }
     return false;
+#endif
 }
 
 void Bind(Profile &profile, int action, const char *list)
@@ -188,10 +244,23 @@ const char *const s_joystick[INPUT_ACTION_COUNT] = {
     "hat0left | axis0-", "hat0right | axis0+", "hat0up | axis1-", "hat0down | axis1+", "button0", "button1",
 };
 
+// The PS Vita: the left stick steers, R and L are throttle and brake (they
+// are buttons), Cross and Triangle shift.
+const char *const s_vita[INPUT_ACTION_COUNT] = {
+    "lx-", "lx+", "r", "l", "square", "cross", "triangle", "select", "circle", "start",
+    "left | lx-", "right | lx+", "up | ly-", "down | ly+", "cross", "circle",
+};
+
+#ifdef VITA
+const char *const s_sections[] = { "vita" };
+#else
+const char *const s_sections[] = { "keyboard", "keyboard2", "gamepad", "joystick" };
+#endif
+
 void SetDefaults(void)
 {
     s_profiles.clear();
-    for (const char *section : { "keyboard", "keyboard2", "gamepad", "joystick" }) {
+    for (const char *section : s_sections) {
         s_profiles.emplace_back();
         s_profiles.back().section = section;
         Bindings_SetDefaults(s_profiles.back(), NULL);
@@ -203,6 +272,43 @@ std::string Path(void)
 {
     const char *dir = Platform_GetUserDir();
     return dir && *dir ? std::string(dir) + "controls.ini" : std::string();
+}
+
+bool LoadText(const std::string &path, std::string &text)
+{
+#ifdef VITA
+    FILE *file = fopen(path.c_str(), "rb");
+    if (file == NULL)
+        return false;
+    char buffer[4096];
+    size_t got;
+    text.clear();
+    while ((got = fread(buffer, 1, sizeof(buffer), file)) > 0)
+        text.append(buffer, got);
+    fclose(file);
+    return true;
+#else
+    size_t size = 0;
+    char *data = (char *)SDL_LoadFile(path.c_str(), &size);
+    if (data == NULL)
+        return false;
+    text.assign(data, size);
+    SDL_free(data);
+    return true;
+#endif
+}
+
+bool SaveText(const std::string &path, const std::string &text)
+{
+#ifdef VITA
+    FILE *file = fopen(path.c_str(), "wb");
+    if (file == NULL)
+        return false;
+    const bool written = fwrite(text.data(), 1, text.size(), file) == text.size();
+    return fclose(file) == 0 && written;
+#else
+    return SDL_SaveFile(path.c_str(), text.data(), text.size());
+#endif
 }
 
 // The format of controls.ini: 1 wrote every setting, the defaults too; 2
@@ -223,6 +329,14 @@ void Read(const char *text)
             size_t end = line.find(']');
             std::string section = Trim(line.substr(1, end == std::string::npos ? std::string::npos : end - 1));
             profile = Bindings_Find(section);
+            // A [vita] section read on the PC is kept as it is.
+            if (profile == NULL && section == "vita") {
+                s_profiles.emplace_back();
+                profile = &s_profiles.back();
+                profile->section = section;
+                Bindings_SetDefaults(*profile, NULL);
+            }
+#ifndef VITA
             if (profile == NULL && section.compare(0, 7, "device ") == 0) {
                 // Starts from the joystick defaults, as a new device would.
                 s_profiles.push_back(*Bindings_Find("joystick"));
@@ -230,6 +344,7 @@ void Read(const char *text)
                 profile->section = section;
                 profile->chosen = 0;
             }
+#endif
             if (profile == NULL)
                 Sys_Log("controls.ini: unknown section [%s]", section.c_str());
             continue;
@@ -241,7 +356,7 @@ void Read(const char *text)
         std::string value = Trim(line.substr(equals + 1));
         if (profile == NULL) {
             if (key == "format")
-                format = SDL_atoi(value.c_str());
+                format = atoi(value.c_str());
             continue;
         }
         // Format 1 wrote the defaults of the time (2, 100, 0, 100) as if
@@ -258,10 +373,10 @@ void Read(const char *text)
         else if (key == "name")
             profile->name = value;
         else if (key == "deadzone") {
-            profile->deadzone = SDL_clamp(SDL_atoi(value.c_str()), 0, 99);
+            profile->deadzone = std::clamp(atoi(value.c_str()), 0, 99);
             profile->chosen |= SETTING_DEADZONE;
         } else if (key == "saturation") {
-            profile->saturation = SDL_clamp(SDL_atoi(value.c_str()), 1, 100);
+            profile->saturation = std::clamp(atoi(value.c_str()), 1, 100);
             profile->chosen |= SETTING_SATURATION;
         }
         else if (key == "player")
@@ -269,10 +384,10 @@ void Read(const char *text)
         else if (key == "smooth_steering")
             ;   // the kind of device decides (Input_IsSmoothSteering)
         else if (key == "steering_curve") {
-            profile->steeringCurve = SDL_clamp(SDL_atoi(value.c_str()), 0, 100);
+            profile->steeringCurve = std::clamp(atoi(value.c_str()), 0, 100);
             profile->chosen |= SETTING_CURVE;
         } else if (key == "rumble") {
-            profile->rumble = SDL_clamp(SDL_atoi(value.c_str()), 0, 100);
+            profile->rumble = std::clamp(atoi(value.c_str()), 0, 100);
             profile->chosen |= SETTING_RUMBLE;
         } else
             Sys_Log("controls.ini: [%s] unknown setting '%s'", profile->section.c_str(), key.c_str());
@@ -320,6 +435,16 @@ bool IsAnalog(const Source &source)
 std::string FormatSource(const Profile &profile, const Source &source)
 {
     switch (source.kind) {
+    case SOURCE_VITA_BUTTON:
+        return source.index >= 0 && source.index < VITA_BUTTON_COUNT ? kVitaButtonNames[source.index] : "";
+    case SOURCE_VITA_AXIS:
+        if (source.index < 0 || source.index >= VITA_AXIS_COUNT)
+            return "";
+        return std::string(kVitaAxisNames[source.index]) + (source.direction == AXIS_NEGATIVE ? "-" : "+");
+#ifdef VITA
+    default:
+        break;
+#else
     case SOURCE_KEY: {
         const char *name = SDL_GetScancodeName((SDL_Scancode)source.index);
         return name ? name : "";
@@ -351,6 +476,7 @@ std::string FormatSource(const Profile &profile, const Source &source)
         default: return axis;
         }
     }
+#endif
     }
     (void)profile;
     return "";
@@ -375,16 +501,14 @@ void Bindings_Load(void)
 {
     s_loaded = true;
     SetDefaults();
-    size_t size = 0;
     std::string path = Path();
-    char *text = path.empty() ? NULL : (char *)SDL_LoadFile(path.c_str(), &size);
-    s_fileExists = text != NULL;
-    if (text == NULL) {
+    std::string text;
+    s_fileExists = !path.empty() && LoadText(path, text);
+    if (!s_fileExists) {
         s_changed = true;   // written with the defaults
         return;
     }
-    Read(text);
-    SDL_free(text);
+    Read(text.c_str());
     s_changed = false;
 }
 
@@ -393,6 +517,7 @@ void Bindings_MarkChanged(void)
     s_changed = true;
 }
 
+#ifndef VITA
 namespace {
 
 // A joystick's: the joystick section, and a wheel's pedals, the axes that
@@ -424,11 +549,29 @@ void JoystickDefaults(Profile &profile, SDL_Joystick *joystick)
 }
 
 } // namespace
+#endif
 
 void Bindings_DefaultSettings(Profile &profile, SDL_Joystick *joystick)
 {
+    // The Vita's sticks are short and stiff near their rest; its pad does not rumble.
+    if (IsVita(profile)) {
+        if (!(profile.chosen & SETTING_DEADZONE))
+            profile.deadzone = 10;
+        if (!(profile.chosen & SETTING_SATURATION))
+            profile.saturation = 95;
+        if (!(profile.chosen & SETTING_CURVE))
+            profile.steeringCurve = 30;
+        if (!(profile.chosen & SETTING_RUMBLE))
+            profile.rumble = 0;
+        return;
+    }
     bool gamepad = profile.section == "gamepad";
+#ifdef VITA
+    bool wheel = false;
+    (void)joystick;
+#else
     bool wheel = joystick != NULL && SDL_GetJoystickType(joystick) == SDL_JOYSTICK_TYPE_WHEEL;
+#endif
     if (!(profile.chosen & SETTING_DEADZONE))
         profile.deadzone = wheel ? 0 : 2;
     // A thumbstick often stops short of its end, more so on the diagonals.
@@ -444,6 +587,7 @@ void Bindings_SetDefaults(Profile &profile, SDL_Joystick *joystick)
 {
     static const struct { const char *section; const char *const *bindings; } defaults[] = {
         { "keyboard", s_keyboard }, { "keyboard2", s_keyboard2 }, { "gamepad", s_gamepad }, { "joystick", s_joystick },
+        { "vita", s_vita },
     };
     for (const auto &entry : defaults) {
         if (profile.section == entry.section) {
@@ -457,8 +601,10 @@ void Bindings_SetDefaults(Profile &profile, SDL_Joystick *joystick)
             return;
         }
     }
+#ifndef VITA
     if (joystick != NULL)
         JoystickDefaults(profile, joystick);
+#endif
 }
 
 const Profile &Bindings_TouchProfile(void)
@@ -467,6 +613,7 @@ const Profile &Bindings_TouchProfile(void)
     return profile;
 }
 
+#ifndef VITA
 Profile *Bindings_ForJoystick(SDL_Joystick *joystick, bool gamepad)
 {
     Bindings_Get();
@@ -504,14 +651,15 @@ extern "C" void Input_ImportKeyboardKeys(int player, const BYTE keys[9])
     }
     s_changed = true;
 }
+#endif
 
 extern "C" void Input_SaveBindings(void)
 {
     if (!s_loaded || !s_changed || Path().empty())
         return;
     std::string text = Write();
-    if (!SDL_SaveFile(Path().c_str(), text.data(), text.size())) {
-        Sys_Log("controls.ini: cannot write: %s", SDL_GetError());
+    if (!SaveText(Path(), text)) {
+        Sys_Log("controls.ini: cannot write %s", Path().c_str());
         return;
     }
     s_changed = false;
