@@ -382,30 +382,12 @@ bool Plays(int owner, int player)
 
 int Scale(const Profile &profile, int value)
 {
-    int deadzone = profile.deadzone * INPUT_FULL / 100;
-    int saturation = profile.saturation * INPUT_FULL / 100;
-    if (value <= deadzone)
-        return 0;
-    if (value >= saturation || saturation <= deadzone)
-        return INPUT_FULL;
-    return (int)((long long)(value - deadzone) * INPUT_FULL / (saturation - deadzone));
+    return InputMath::Scale(value, profile.deadzone, profile.saturation);
 }
 
-int AxisValue(Sint16 raw, int range)
-{
-    switch (range) {
-    case AXIS_NEGATIVE: return raw < 0 ? (int)(-(long long)raw * INPUT_FULL / 32768) : 0;
-    case AXIS_POSITIVE: return raw > 0 ? (int)((long long)raw * INPUT_FULL / 32767) : 0;
-    case AXIS_RISING: return (int)(((long long)raw + 32768) * INPUT_FULL / 65535);
-    default: return (int)((32767 - (long long)raw) * INPUT_FULL / 65535);
-    }
-}
+using InputMath::AxisValue;
 
-// A thumbstick's gate is round: pushed to its edge on a diagonal, each axis
-// reads about 70%, so a thumb that rises or drops a little while pushing to
-// the side does not reach full lock. The stick is read as if its gate were
-// square: at the edge the axis nearer to the push gives its full value, and
-// along the axes and towards the centre nothing changes.
+// A gamepad axis read as if the stick's gate were square (InputMath::SquareStick).
 Sint16 SquareStick(SDL_Gamepad *gamepad, SDL_GamepadAxis axis)
 {
     SDL_GamepadAxis other;
@@ -416,13 +398,7 @@ Sint16 SquareStick(SDL_Gamepad *gamepad, SDL_GamepadAxis axis)
     case SDL_GAMEPAD_AXIS_RIGHTY: other = SDL_GAMEPAD_AXIS_RIGHTX; break;
     default: return SDL_GetGamepadAxis(gamepad, axis);
     }
-    double x = SDL_GetGamepadAxis(gamepad, axis) / 32767.0;
-    double y = SDL_GetGamepadAxis(gamepad, other) / 32767.0;
-    double longest = SDL_max(fabs(x), fabs(y));
-    if (longest <= 0.0)
-        return 0;
-    double value = SDL_clamp(x * sqrt(x * x + y * y) / longest, -1.0, 1.0);
-    return (Sint16)lround(value * 32767.0);
+    return InputMath::SquareStick(SDL_GetGamepadAxis(gamepad, axis), SDL_GetGamepadAxis(gamepad, other));
 }
 
 int SourceValue(const InputDevice *device, const Profile &profile, const Source &source)
@@ -450,14 +426,7 @@ int SourceValue(const InputDevice *device, const Profile &profile, const Source 
     return 0;
 }
 
-// Blends the linear response with a cubic one, which moves less near the
-// centre and reaches the full value at the same end.
-int Curve(int value, int percent)
-{
-    long long v = value;
-    long long cubic = v * v / INPUT_FULL * v / INPUT_FULL;
-    return (int)((v * (100 - percent) + cubic * percent) / 100);
-}
+using InputMath::Curve;
 
 // Takes the larger value of each action from one profile into the player's,
 // and notes whether the steering and the pedals came from keys and buttons

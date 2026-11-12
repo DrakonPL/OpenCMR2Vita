@@ -319,6 +319,8 @@ if(VITA)
         render/gxm_memory.cpp
         render/gxm_textures.cpp
         audio/audio_vita.cpp
+        input/bindings.cpp
+        input/input_math.cpp
         input/input_vita.cpp
         net/net_api_vita.cpp)
 else()
@@ -331,6 +333,7 @@ else()
         ${ICON_HEADER}
         audio/audio_sdl.cpp
         input/bindings.cpp
+        input/input_math.cpp
         input/input_sdl.cpp
         net/net_api.cpp)
     target_link_libraries(opencmr2_platform PRIVATE opencmr2_net)

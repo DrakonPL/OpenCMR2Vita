@@ -1,58 +1,237 @@
-// Input on the PS Vita (port/input.h). Stubs: no device, no action, no effect.
+// Input on the PS Vita (port/input.h): the built-in pad is player 1's
+// controller, bound in the [vita] section of controls.ini (bindings.cpp).
+// The menus read the menu actions, as with a gamepad on Android: no key
+// events. No keyboard, mouse or rumble.
 
+#include "input/input_internal.h"
+#include "input/input_math.h"
 #include "port/input.h"
 
-void Input_Update(void) {}
-void Input_SetLocalPlayers(int) {}
-void Input_SetTextEntryOpen(BOOL) {}
-int Input_GetAction(int, int) { return 0; }
-BOOL Input_IsAnalogSteering(int) { return FALSE; }
-BOOL Input_IsAnalogPedals(int) { return FALSE; }
-BOOL Input_IsSmoothSteering(int) { return FALSE; }
-BOOL Input_DevicesChanged(void) { return FALSE; }
-InputDevice *Input_GetFeedbackDevice(int) { return NULL; }
-void Input_SetRumble(int, int, int) {}
-void Input_ImportKeyboardKeys(int, const BYTE[9]) {}
-void Input_SaveBindings(void) {}
+#include <psp2/ctrl.h>
 
-int Input_GetProfileCount(void) { return 0; }
-int Input_GetProfileKind(int) { return INPUT_PROFILE_GAMEPAD; }
-int Input_GetLastUsedProfile(void) { return -1; }
-const char *Input_GetProfileName(int) { return ""; }
+#include <string.h>
 
-void Input_GetBindingText(int, int, char *text, int size)
+#include <algorithm>
+#include <string>
+
+namespace {
+
+// The pad's button of each VitaButton.
+const unsigned kButtonBits[VITA_BUTTON_COUNT] = {
+    SCE_CTRL_CROSS, SCE_CTRL_CIRCLE, SCE_CTRL_SQUARE, SCE_CTRL_TRIANGLE, SCE_CTRL_LTRIGGER, SCE_CTRL_RTRIGGER,
+    SCE_CTRL_START, SCE_CTRL_SELECT, SCE_CTRL_UP, SCE_CTRL_DOWN, SCE_CTRL_LEFT, SCE_CTRL_RIGHT,
+};
+
+// The two channels whose kind of input (axis or button) the game asks about.
+enum Channel { CHANNEL_STEERING, CHANNEL_PEDALS, CHANNEL_COUNT };
+
+bool s_ready;
+SceCtrlData s_pad;
+int s_values[INPUT_ACTION_COUNT];
+bool s_analog[CHANNEL_COUNT] = { true, false };
+bool s_textEntryOpen;
+bool s_used;    // an input was given: the controls page opens on the pad's profile
+
+Profile &VitaProfile()
 {
-    if (size > 0)
-        text[0] = '\0';
+    Bindings_Get();
+    return *Bindings_Find("vita");
 }
 
-int Input_GetSetting(int, int) { return 0; }
-void Input_SetSetting(int, int, int) {}
-void Input_RestoreDefaults(int) {}
-void Input_BeginCapture(int, int) {}
-int Input_UpdateCapture(void) { return -1; }
-void Input_ReloadBindings(void) {}
+// A stick axis, 0..255 with its rest at 128, as an SDL axis (-32768..32767).
+int16_t StickAxis(int axis)
+{
+    const unsigned char raw[VITA_AXIS_COUNT] = { s_pad.lx, s_pad.ly, s_pad.rx, s_pad.ry };
+    return (int16_t)std::clamp((raw[axis] - 128) * 256, -32768, 32767);
+}
 
-InputDevice *Input_OpenKeyboard(void) { return NULL; }
-InputDevice *Input_OpenMouse(void) { return NULL; }
-void Input_CloseDevice(InputDevice *) {}
-void Input_SetMouseExclusive(InputDevice *, BOOL) {}
-BOOL Input_ReadKeyboard(InputDevice *, BYTE[256]) { return FALSE; }
-BOOL Input_ReadMouse(InputDevice *, InputMouseState *) { return FALSE; }
-BOOL Input_IsKeyDown(int) { return FALSE; }
+int SourceValue(const Profile &profile, const Source &source)
+{
+    if (source.kind == SOURCE_VITA_BUTTON)
+        return (s_pad.buttons & kButtonBits[source.index]) != 0 ? INPUT_FULL : 0;
+    if (source.kind != SOURCE_VITA_AXIS)
+        return 0;
+    const int other = source.index ^ 1;     // lx with ly, rx with ry
+    const int16_t value = InputMath::SquareStick(StickAxis(source.index), StickAxis(other));
+    return InputMath::Scale(InputMath::AxisValue(value, source.direction), profile.deadzone, profile.saturation);
+}
 
-void Input_GetKeyRepeat(DWORD *delay, DWORD *interval)
+// The values of the actions, and whether the steering and the pedals came
+// from a stick or from buttons, as the SDL path decides it (input_sdl.cpp).
+void UpdateActions(const Profile &profile)
+{
+    bool analog[CHANNEL_COUNT] = {}, digital[CHANNEL_COUNT] = {};
+    memset(s_values, 0, sizeof(s_values));
+    for (int action = 0; action < INPUT_ACTION_COUNT; action++) {
+        for (const Source &source : profile.actions[action]) {
+            int value = SourceValue(profile, source);
+            if (action <= INPUT_STEER_RIGHT && IsAnalog(source) && profile.steeringCurve != 0)
+                value = InputMath::Curve(value, profile.steeringCurve);
+            s_values[action] = std::max(s_values[action], value);
+            s_used = s_used || value > INPUT_FULL / 4;
+            if (action > INPUT_BRAKE)
+                continue;
+            const int channel = action <= INPUT_STEER_RIGHT ? CHANNEL_STEERING : CHANNEL_PEDALS;
+            if (IsAnalog(source) && value > INPUT_FULL / 4)
+                analog[channel] = true;
+            else if (!IsAnalog(source) && value != 0)
+                digital[channel] = true;
+        }
+    }
+    for (int channel = 0; channel < CHANNEL_COUNT; channel++)
+        if (analog[channel] != digital[channel])
+            s_analog[channel] = analog[channel];
+}
+
+} // namespace
+
+// ---- players and actions -------------------------------------------------------
+
+extern "C" void Input_Update(void)
+{
+    if (!s_ready) {
+        sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
+        s_ready = true;
+    }
+    if (sceCtrlPeekBufferPositive(0, &s_pad, 1) < 0)
+        memset(&s_pad, 0, sizeof(s_pad));
+    UpdateActions(VitaProfile());
+}
+
+// The pad is player 1's. Two local players are accepted; player 2 has no
+// device (one pad, PLAN.md D6).
+extern "C" void Input_SetLocalPlayers(int) {}
+
+extern "C" void Input_SetTextEntryOpen(BOOL open)
+{
+    s_textEntryOpen = open != FALSE;
+}
+
+extern "C" int Input_GetAction(int player, int action)
+{
+    if (s_textEntryOpen || player != 0 || action < 0 || action >= INPUT_ACTION_COUNT)
+        return 0;
+    return s_values[action];
+}
+
+extern "C" BOOL Input_IsAnalogSteering(int player)
+{
+    return player == 0 && s_analog[CHANNEL_STEERING];
+}
+
+extern "C" BOOL Input_IsAnalogPedals(int player)
+{
+    return player == 0 && s_analog[CHANNEL_PEDALS];
+}
+
+// A stick is short: the game eases the wheels towards it (input.h).
+extern "C" BOOL Input_IsSmoothSteering(int player)
+{
+    return Input_IsAnalogSteering(player);
+}
+
+extern "C" BOOL Input_DevicesChanged(void) { return FALSE; }
+extern "C" InputDevice *Input_GetFeedbackDevice(int) { return NULL; }
+extern "C" void Input_SetRumble(int, int, int) {}
+extern "C" void Input_ImportKeyboardKeys(int, const BYTE[9]) {}
+
+// ---- controls pages: one profile, the pad ---------------------------------------
+
+namespace {
+
+Profile *EditableProfile(int index)
+{
+    return index == 0 ? &VitaProfile() : NULL;
+}
+
+} // namespace
+
+extern "C" int Input_GetProfileCount(void) { return 1; }
+extern "C" int Input_GetProfileKind(int) { return INPUT_PROFILE_GAMEPAD; }
+extern "C" int Input_GetLastUsedProfile(void) { return s_used ? 0 : -1; }
+extern "C" const char *Input_GetProfileName(int) { return "PS Vita"; }
+
+extern "C" void Input_GetBindingText(int index, int action, char *text, int size)
+{
+    std::string names;
+    Profile *profile = EditableProfile(index);
+    if (profile != NULL && action >= 0 && action < INPUT_ACTION_COUNT)
+        for (const Source &source : profile->actions[action])
+            names += (names.empty() ? "" : " / ") + FormatSource(*profile, source);
+    if (size > 0) {
+        strncpy(text, names.c_str(), size - 1);
+        text[size - 1] = '\0';
+    }
+}
+
+extern "C" int Input_GetSetting(int index, int setting)
+{
+    Profile *profile = EditableProfile(index);
+    if (profile == NULL)
+        return 0;
+    switch (setting) {
+    case INPUT_SETTING_DEADZONE: return profile->deadzone;
+    case INPUT_SETTING_CURVE: return profile->steeringCurve;
+    default: return profile->rumble;
+    }
+}
+
+extern "C" void Input_SetSetting(int index, int setting, int value)
+{
+    Profile *profile = EditableProfile(index);
+    if (profile == NULL || Input_GetSetting(index, setting) == value)
+        return;
+    switch (setting) {
+    case INPUT_SETTING_DEADZONE: profile->deadzone = std::clamp(value, 0, 99); profile->chosen |= SETTING_DEADZONE; break;
+    case INPUT_SETTING_CURVE: profile->steeringCurve = std::clamp(value, 0, 100); profile->chosen |= SETTING_CURVE; break;
+    default: profile->rumble = std::clamp(value, 0, 100); profile->chosen |= SETTING_RUMBLE; break;
+    }
+    Bindings_MarkChanged();
+}
+
+extern "C" void Input_RestoreDefaults(int index)
+{
+    Profile *profile = EditableProfile(index);
+    if (profile == NULL)
+        return;
+    Bindings_SetDefaults(*profile, NULL);
+    Bindings_MarkChanged();
+}
+
+// Binding a button from the controls page: VP-3.2. Until then the capture
+// gives up at once.
+extern "C" void Input_BeginCapture(int, int) {}
+extern "C" int Input_UpdateCapture(void) { return -1; }
+
+extern "C" void Input_ReloadBindings(void)
+{
+    Bindings_Load();
+}
+
+// ---- raw keyboard and mouse: none ------------------------------------------------
+
+extern "C" InputDevice *Input_OpenKeyboard(void) { return NULL; }
+extern "C" InputDevice *Input_OpenMouse(void) { return NULL; }
+extern "C" void Input_CloseDevice(InputDevice *) {}
+extern "C" void Input_SetMouseExclusive(InputDevice *, BOOL) {}
+extern "C" BOOL Input_ReadKeyboard(InputDevice *, BYTE[256]) { return FALSE; }
+extern "C" BOOL Input_ReadMouse(InputDevice *, InputMouseState *) { return FALSE; }
+extern "C" BOOL Input_IsKeyDown(int) { return FALSE; }
+
+extern "C" void Input_GetKeyRepeat(DWORD *delay, DWORD *interval)
 {
     *delay = 500;
     *interval = 33;
 }
 
-const char *Input_GetKeyName(int) { return ""; }
+extern "C" const char *Input_GetKeyName(int) { return ""; }
 
-InputEffect *Input_CreateEffect(InputDevice *, const InputEffectParams *) { return NULL; }
-void Input_UpdateEffect(InputEffect *, const InputEffectParams *) {}
-void Input_StartEffect(InputEffect *) {}
-BOOL Input_IsEffectPlaying(InputEffect *) { return FALSE; }
-void Input_DestroyEffect(InputEffect *) {}
-void Input_StopAllEffects(InputDevice *) {}
-void Input_SetAutocenter(InputDevice *, BOOL) {}
+// ---- force feedback: none -----------------------------------------------------------
+
+extern "C" InputEffect *Input_CreateEffect(InputDevice *, const InputEffectParams *) { return NULL; }
+extern "C" void Input_UpdateEffect(InputEffect *, const InputEffectParams *) {}
+extern "C" void Input_StartEffect(InputEffect *) {}
+extern "C" BOOL Input_IsEffectPlaying(InputEffect *) { return FALSE; }
+extern "C" void Input_DestroyEffect(InputEffect *) {}
+extern "C" void Input_StopAllEffects(InputDevice *) {}
+extern "C" void Input_SetAutocenter(InputDevice *, BOOL) {}

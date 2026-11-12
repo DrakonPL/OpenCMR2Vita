@@ -1,10 +1,16 @@
-// Shared by the input sources (input_sdl.cpp) and the bindings (bindings.cpp).
+// Shared by the input sources (input_sdl.cpp, input_vita.cpp) and the
+// bindings (bindings.cpp).
 #ifndef OPENCMR2_INPUT_INTERNAL_H
 #define OPENCMR2_INPUT_INTERNAL_H
 
+#include "input/input_math.h"
 #include "port/input.h"
 
+#ifdef VITA
+struct SDL_Joystick;
+#else
 #include <SDL3/SDL.h>
+#endif
 
 #include <deque>
 #include <string>
@@ -18,15 +24,19 @@ enum SourceKind {
     SOURCE_JOY_BUTTON,      // index: joystick button
     SOURCE_JOY_AXIS,        // index: joystick axis
     SOURCE_JOY_HAT,         // index: hat, direction: SDL_HAT_UP/RIGHT/DOWN/LEFT
+    SOURCE_VITA_BUTTON,     // index: VitaButton
+    SOURCE_VITA_AXIS,       // index: VitaAxis, direction: AXIS_NEGATIVE or AXIS_POSITIVE
 };
 
-// How an axis gives an action its value.
-enum AxisRange {
-    AXIS_NEGATIVE,          // the half below the centre
-    AXIS_POSITIVE,          // the half above it (a gamepad trigger)
-    AXIS_RISING,            // the whole axis, released at its minimum (a pedal)
-    AXIS_FALLING,           // the whole axis, released at its maximum
+// The PS Vita's buttons and stick axes, as the [vita] section names them
+// (kVitaButtonNames, kVitaAxisNames).
+enum VitaButton {
+    VITA_CROSS, VITA_CIRCLE, VITA_SQUARE, VITA_TRIANGLE, VITA_L, VITA_R, VITA_START, VITA_SELECT,
+    VITA_UP, VITA_DOWN, VITA_LEFT, VITA_RIGHT, VITA_BUTTON_COUNT
 };
+enum VitaAxis { VITA_LX, VITA_LY, VITA_RX, VITA_RY, VITA_AXIS_COUNT };
+extern const char *const kVitaButtonNames[VITA_BUTTON_COUNT];
+extern const char *const kVitaAxisNames[VITA_AXIS_COUNT];
 
 struct Source {
     SourceKind kind;
