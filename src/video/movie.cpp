@@ -27,6 +27,33 @@ static bool ReadMovie(void *context, uint32_t offset, void *dst, uint32_t bytes)
            Sys_ReadFile(file, dst, bytes) == bytes;
 }
 
+#ifdef OPENCMR2_DEV
+// Every 100 frames: the decode with the copy into the texture, average and
+// longest in ms, the parts of the decode, and the frame interval of the file.
+static void LogDecodeTime(Movie *movie, double ms)
+{
+    static double total, longest;
+    static Bink::Timing parts;
+    static unsigned frames;
+    const Bink::Timing &t = movie->decoder.GetTiming();
+    total += ms;
+    longest = ms > longest ? ms : longest;
+    parts.audio += t.audio;
+    parts.luma += t.luma;
+    parts.chroma += t.chroma;
+    parts.convert += t.convert;
+    if (++frames < 100)
+        return;
+    Sys_Log("movie: frame %u, decode ms average %.1f max %.1f (audio %.1f, luma %.1f, chroma %.1f, convert %.1f), "
+            "interval %.1f", movie->frame + 1, total / frames, longest, parts.audio / frames, parts.luma / frames,
+            parts.chroma / frames, parts.convert / frames,
+            1000.0 * movie->info.fpsDenominator / movie->info.fpsNumerator);
+    total = longest = 0;
+    parts = Bink::Timing();
+    frames = 0;
+}
+#endif
+
 extern "C" Movie *Movie_Open(const char *path, int audioTrack)
 {
     SysFile *file = Sys_OpenFile(path, SYS_FILE_READ);
@@ -38,6 +65,8 @@ extern "C" Movie *Movie_Open(const char *path, int audioTrack)
         return nullptr;
     }
     movie->file = file;
+    // Threads beside the game's for the decode (Bink::Decoder::SetWorkers).
+    movie->decoder.SetWorkers((unsigned)Sys_GetOption("video.movie_workers", 0));
     DWORD size = Sys_GetFileSize(file);
     if (size > 0x7fffffff || !movie->decoder.Open({file, size, ReadMovie}, audioTrack)) {
         Sys_Log("movie %s: %s", path, movie->decoder.Error().c_str());
@@ -83,6 +112,9 @@ extern "C" void Movie_DecodeFrame(Movie *movie)
 {
     if (movie->decodedCurrent || movie->frame >= movie->info.frames)
         return;
+#ifdef OPENCMR2_DEV
+    const double decodeStart = Sys_GetTicksPrecise();
+#endif
     if (!movie->decoder.Decode(movie->decoded)) {
         Sys_Log("movie frame %u: %s", movie->frame + 1, movie->decoder.Error().c_str());
         Audio_ReleaseStream(movie->audio);
@@ -105,6 +137,9 @@ extern "C" void Movie_DecodeFrame(Movie *movie)
                    movie->decoded.bgrx.data() + size_t(y) * movie->info.width * 4, movie->info.width * 4);
         Gfx_UnlockTexture(movie->texture, 0, 0);
     }
+#ifdef OPENCMR2_DEV
+    LogDecodeTime(movie, Sys_GetTicksPrecise() - decodeStart);
+#endif
 }
 
 extern "C" void Movie_NextFrame(Movie *movie)

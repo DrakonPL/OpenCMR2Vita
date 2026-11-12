@@ -3,6 +3,8 @@ set(GAME_DIR ${PROJECT_SOURCE_DIR}/game)
 # Small standalone decoder, also usable by tests without SDL or game data.
 add_library(opencmr2_bink STATIC video/bink_decoder.cpp)
 target_include_directories(opencmr2_bink PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+find_package(Threads REQUIRED)
+target_link_libraries(opencmr2_bink PUBLIC Threads::Threads)   # its decode workers
 
 # The decompiled game. zlib is C, as in the original (ZlibZutil.cpp is C++).
 file(GLOB GAME_SOURCES CONFIGURE_DEPENDS ${GAME_DIR}/*.cpp)
@@ -252,7 +254,6 @@ if(NOT VITA)
     # Sessions over ENet, without SDL: tests run hosts and clients in one process.
     add_library(opencmr2_net STATIC net/net_session.cpp)
     target_include_directories(opencmr2_net PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-    find_package(Threads REQUIRED)
     target_link_libraries(opencmr2_net PUBLIC enet Threads::Threads)
 endif()
 

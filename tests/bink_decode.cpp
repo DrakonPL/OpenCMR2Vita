@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 static bool Read(void *context, uint32_t offset, void *dst, uint32_t bytes)
 {
@@ -26,6 +27,9 @@ int main(int argc, char **argv)
     }
     long size = std::ftell(file);
     Bink::Decoder decoder;
+    // OPENCMR2_BINK_WORKERS=n: decode with n worker threads (the output must not change).
+    if (const char *workers = std::getenv("OPENCMR2_BINK_WORKERS"))
+        decoder.SetWorkers(unsigned(std::atoi(workers)));
     int track = argc > 2 ? std::atoi(argv[2]) : 0;
     if (size < 0 || size > 0x7fffffff || !decoder.Open({file, uint32_t(size), Read}, track)) {
         std::fprintf(stderr, "%s\n", decoder.Error().c_str());
@@ -44,7 +48,7 @@ int main(int argc, char **argv)
     Bink::Info info = decoder.GetInfo();
     unsigned count = argc > 5 ? std::min(unsigned(std::atoi(argv[5])), info.frames) : info.frames;
     Bink::Frame frame;
-    uint64_t hash = 14695981039346656037ull, samples = 0;
+    uint64_t hash = 14695981039346656037ull, audioHash = hash, samples = 0;
     float peak = 0;
     bool ok = true;
     double decodeMs = 0, maxDecodeMs = 0;
@@ -61,7 +65,12 @@ int main(int argc, char **argv)
         }
         for (uint8_t byte : frame.bgrx) { hash ^= byte; hash *= 1099511628211ull; }
         samples += frame.audio.size();
-        for (float sample : frame.audio) peak = std::max(peak, std::abs(sample));
+        for (float sample : frame.audio) {
+            peak = std::max(peak, std::abs(sample));
+            uint32_t bits;
+            std::memcpy(&bits, &sample, sizeof(bits));
+            for (int b = 0; b < 4; ++b) { audioHash ^= (bits >> (8 * b)) & 0xff; audioHash *= 1099511628211ull; }
+        }
         if (video && std::fwrite(frame.bgrx.data(), 1, frame.bgrx.size(), video) != frame.bgrx.size()) ok = false;
         if (audio && std::fwrite(frame.audio.data(), sizeof(float), frame.audio.size(), audio) != frame.audio.size()) ok = false;
         if (!ok) break;
@@ -69,6 +78,7 @@ int main(int argc, char **argv)
     std::printf("%ux%u, %u frames, %u/%u fps, %u Hz/%u channels: %llu samples, peak %.6f, BGRX FNV64 %016llx\n",
                 info.width, info.height, count, info.fpsNumerator, info.fpsDenominator,
                 info.sampleRate, info.channels, (unsigned long long)samples, peak, (unsigned long long)hash);
+    std::printf("audio FNV64 %016llx\n", (unsigned long long)audioHash);
     std::printf("decode ms per frame: average %.3f, max %.3f\n", count ? decodeMs / count : 0.0, maxDecodeMs);
     if (video && std::fclose(video)) ok = false;
     if (audio && std::fclose(audio)) ok = false;

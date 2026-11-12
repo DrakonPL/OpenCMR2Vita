@@ -60,6 +60,7 @@ std::vector<uint8_t> Video(unsigned width, unsigned height, unsigned type, uint8
     Writer bits;
     bits.Write(0, 32);
     Plane(bits, width, height, type, luma);
+    Put32(bits.data, 0, uint32_t(bits.data.size()));   // BIKi: the byte where the luma plane ends
     Plane(bits, (width + 1) / 2, (height + 1) / 2, type, 128);
     Plane(bits, (width + 1) / 2, (height + 1) / 2, type, 128);
     return bits.data;

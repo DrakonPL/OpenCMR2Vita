@@ -23,6 +23,12 @@ struct Info {
     unsigned channels = 0;
 };
 
+// Milliseconds of the last decoded frame, per part. With workers, the parts
+// overlap in time.
+struct Timing {
+    double audio = 0, luma = 0, chroma = 0, convert = 0;
+};
+
 struct Frame {
     std::vector<uint8_t> bgrx;
     // Interleaved float PCM for the selected track, at Info::sampleRate.
@@ -35,12 +41,17 @@ public:
     ~Decoder();
     Decoder(const Decoder &) = delete;
     Decoder &operator=(const Decoder &) = delete;
+    // Threads that decode beside the caller: 1 decodes the audio, 2 also the
+    // chroma planes and half of the picture. 0 (the default) decodes on the
+    // calling thread. The output is the same. Kept by Open.
+    void SetWorkers(unsigned count);
     // Reader remains owned by caller. Track is a Bink track ID (language);
     // unavailable IDs fall back to the first track, -1 selects silence.
     bool Open(Reader reader, int track);
     // Sequential decode; on corruption decoding stops until Open is called.
     bool Decode(Frame &frame);
     const Info &GetInfo() const;
+    const Timing &GetTiming() const;
     const std::string &Error() const;
 private:
     struct Impl;

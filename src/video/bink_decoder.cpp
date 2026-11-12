@@ -28,11 +28,17 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <complex>
+#include <condition_variable>
 #include <cstring>
+#include <exception>
+#include <functional>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 namespace Bink {
@@ -40,6 +46,65 @@ namespace {
 void Require(bool valid, const char *message) {
     if (!valid) throw std::runtime_error(message);
 }
+
+double NowMs() {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// A thread that runs one job at a time for the decoder (Decoder::SetWorkers).
+// A job keeps to a small stack: the Vita gives a thread 32 KB.
+class Worker {
+public:
+    Worker() : thread([this] { Run(); }) {}
+    ~Worker() {
+        { std::lock_guard<std::mutex> lock(mutex); quit = true; }
+        wake.notify_all();
+        thread.join();
+    }
+    void Start(std::function<void()> next) {
+        std::lock_guard<std::mutex> lock(mutex);
+        job = std::move(next);
+        failure = nullptr;
+        busy = true;
+        wake.notify_all();
+    }
+    // Waits for the job; its exception comes out here.
+    void Wait() {
+        std::unique_lock<std::mutex> lock(mutex);
+        wake.wait(lock, [this] { return !busy; });
+        std::exception_ptr error = failure;
+        failure = nullptr;
+        if (error) std::rethrow_exception(error);
+    }
+    // For a thread that is already throwing.
+    void WaitQuietly() {
+        std::unique_lock<std::mutex> lock(mutex);
+        wake.wait(lock, [this] { return !busy; });
+        failure = nullptr;
+    }
+private:
+    void Run() {
+        std::unique_lock<std::mutex> lock(mutex);
+        for (;;) {
+            wake.wait(lock, [this] { return busy || quit; });
+            if (quit) return;
+            std::function<void()> current = std::move(job);
+            lock.unlock();
+            std::exception_ptr error;
+            try { current(); } catch (...) { error = std::current_exception(); }
+            lock.lock();
+            failure = error;
+            busy = false;
+            wake.notify_all();
+        }
+    }
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::function<void()> job;
+    std::exception_ptr failure;
+    bool busy = false, quit = false;
+    std::thread thread;     // last: it starts after the members above exist
+};
 
 template<class T, size_t N> struct CheckedArray {
     T values[N] = {};
@@ -49,22 +114,39 @@ template<class T, size_t N> struct CheckedArray {
     }
 };
 
+static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "Bits loads little-endian words");
+
+// Least significant bit first, as Bink writes them.
 class Bits {
     const uint8_t *data;
-    size_t size, position = 0;
+    size_t bytes, size, position;
+
+    // The next bits from position on, at least 57 of them; zero past the end.
+    uint64_t Window() const {
+        const size_t byte = position >> 3;
+        uint64_t window = 0;
+        std::memcpy(&window, data + byte, std::min<size_t>(8, bytes - byte));
+        return window >> (position & 7);
+    }
 public:
-    Bits(const uint8_t *bytes, size_t count) : data(bytes), size(count * 8) {}
+    Bits(const uint8_t *data, size_t count, size_t startBit = 0)
+        : data(data), bytes(count), size(count * 8), position(startBit) {}
     size_t Left() const { return size - position; }
+    size_t Position() const { return position; }
     uint32_t Read(unsigned count) {
         Require(count <= 32 && count <= Left(), "truncated Bink bitstream");
-        uint32_t value = 0;
-        for (unsigned shift = 0; shift < count;) {
-            unsigned take = std::min(8u - unsigned(position & 7), count - shift);
-            value |= uint32_t((data[position / 8] >> (position & 7)) & ((1u << take) - 1)) << shift;
-            position += take;
-            shift += take;
-        }
+        if (count == 0) return 0;
+        const uint32_t value = uint32_t(Window() & (0xffffffffu >> (32 - count)));
+        position += count;
         return value;
+    }
+    // Up to 25 bits, zero past the end.
+    uint32_t Peek(unsigned count) const {
+        return position < size ? uint32_t(Window() & ((1u << count) - 1)) : 0;
+    }
+    void Skip(unsigned count) {
+        Require(count <= Left(), "truncated Bink bitstream");
+        position += count;
     }
     void Align() { Read(unsigned((-position) & 31)); }
 };
@@ -107,9 +189,10 @@ struct VideoState {
     std::vector<uint8_t> bundleStorage;
     Tree col_high[16];
     int col_lastval;
-    void Init(unsigned w, unsigned h, bool hasAlpha) {
+    // withPlanes false: the bundles alone, for decoding another state's planes.
+    void Init(unsigned w, unsigned h, bool hasAlpha, bool withPlanes = true) {
         width = w; height = h; alpha = hasAlpha;
-        for (int i = 0; i < (alpha ? 4 : 3); ++i)
+        for (int i = 0; withPlanes && i < (alpha ? 4 : 3); ++i)
             planes[i].Init((i == 1 || i == 2) ? (w + 1) / 2 : w,
                            (i == 1 || i == 2) ? (h + 1) / 2 : h);
         size_t bytes = size_t((w + 7) / 8) * ((h + 7) / 8) * 64;
@@ -121,18 +204,31 @@ struct VideoState {
     }
 };
 
+// For each tree: the next 7 bits -> symbol + 16 * code length, 0 for no code.
+// Shorter codes, then lower symbols, win, as in a search bit by bit.
+struct HuffTables {
+    uint8_t entry[16][128] = {};
+    HuffTables() {
+        for (int vlc = 0; vlc < 16; ++vlc)
+            for (unsigned length = 7; length >= 1; --length)
+                for (int symbol = 15; symbol >= 0; --symbol) {
+                    const unsigned code = bink_tree_bits[vlc][symbol];
+                    if (bink_tree_lens[vlc][symbol] != length || code >> length)
+                        continue;
+                    for (unsigned rest = 0; rest < (128u >> length); ++rest)
+                        entry[vlc][code | rest << length] = uint8_t(symbol + 16 * length);
+                }
+    }
+};
+
 uint8_t Huff(Bits *bits, const Tree &tree) {
     if (!tree.vlc_num)
         return tree.syms[bits->Read(4)];
-    unsigned code = 0;
-    for (unsigned length = 1; length <= 7; ++length) {
-        code |= bits->Read(1) << (length - 1);
-        for (int symbol = 0; symbol < 16; ++symbol)
-            if (bink_tree_lens[tree.vlc_num][symbol] == length &&
-                bink_tree_bits[tree.vlc_num][symbol] == code)
-                return tree.syms[symbol];
-    }
-    throw std::runtime_error("invalid Bink Huffman code");
+    static const HuffTables tables;
+    const uint8_t entry = tables.entry[tree.vlc_num][bits->Peek(7)];
+    Require(entry != 0, "invalid Bink Huffman code");
+    bits->Skip(entry >> 4);
+    return tree.syms[entry & 15];
 }
 #define GET_HUFF(gb, tree) Huff(gb, tree)
 
@@ -741,8 +837,8 @@ void CopyBlock(uint8_t *dst, const uint8_t *src, int stride) {
     for (int y = 0; y < 8; ++y) std::memcpy(dst + y * stride, src + y * stride, 8);
 }
 
-void DecodePlane(VideoState &s, Bits &bits, int index, bool chroma) {
-    Plane &plane = s.planes[index];
+// s gives the size and the bundles; plane may belong to another state.
+void DecodePlane(VideoState &s, Plane &plane, Bits &bits, bool chroma) {
     int bw = (s.width + (chroma ? 15 : 7)) >> (chroma ? 4 : 3);
     int bh = (s.height + (chroma ? 15 : 7)) >> (chroma ? 4 : 3);
     init_lengths(&s, std::max(int(s.width >> chroma), 8), bw);
@@ -862,32 +958,98 @@ void DecodePlane(VideoState &s, Bits &bits, int index, bool chroma) {
 }
 
 uint8_t Clamp(int value) { return uint8_t(std::clamp(value, 0, 255)); }
-void DecodeVideo(VideoState &s, const uint8_t *data, size_t bytes, Frame &frame) {
-    Bits bits(data, bytes);
-    if (s.alpha) { bits.Read(32); DecodePlane(s, bits, 3, false); }
-    bits.Read(32); // BIKi luma plane size; planes are word aligned.
-    DecodePlane(s, bits, 0, false);
-    DecodePlane(s, bits, 2, true); // BIKi stores V before U.
-    DecodePlane(s, bits, 1, true);
-    frame.bgrx.resize(size_t(s.width) * s.height * 4);
-    for (unsigned y = 0; y < s.height; ++y) {
-        for (unsigned x = 0; x < s.width; ++x) {
-            int luma = std::max(int(s.planes[0].current[y * s.planes[0].stride + x]) - 16, 0);
-            int u = int(s.planes[1].current[(y / 2) * s.planes[1].stride + x / 2]) - 128;
-            int v = int(s.planes[2].current[(y / 2) * s.planes[2].stride + x / 2]) - 128;
-            uint8_t *dst = frame.bgrx.data() + (size_t(y) * s.width + x) * 4;
-            dst[0] = Clamp((298 * luma + 516 * u + 128) >> 8);
-            dst[1] = Clamp((298 * luma - 100 * u - 208 * v + 128) >> 8);
-            dst[2] = Clamp((298 * luma + 409 * v + 128) >> 8);
+
+// Rows y0 to y1 of the picture from the planes (BT.601, limited range).
+void ConvertRows(const VideoState &s, uint8_t *bgrx, unsigned y0, unsigned y1) {
+    const Plane &py = s.planes[0], &pu = s.planes[1], &pv = s.planes[2];
+    for (unsigned y = y0; y < y1; ++y) {
+        const uint8_t *lumaRow = py.current.data() + size_t(y) * py.stride;
+        const uint8_t *uRow = pu.current.data() + size_t(y / 2) * pu.stride;
+        const uint8_t *vRow = pv.current.data() + size_t(y / 2) * pv.stride;
+        uint8_t *dst = bgrx + size_t(y) * s.width * 4;
+        for (unsigned x = 0; x < s.width; ++x, dst += 4) {
+            const int luma = 298 * std::max(int(lumaRow[x]) - 16, 0) + 128;
+            const int u = int(uRow[x / 2]) - 128, v = int(vRow[x / 2]) - 128;
+            dst[0] = Clamp((luma + 516 * u) >> 8);
+            dst[1] = Clamp((luma - 100 * u - 208 * v) >> 8);
+            dst[2] = Clamp((luma + 409 * v) >> 8);
             dst[3] = 255;
         }
+    }
+}
+
+// The planes of a frame, then the picture. With a worker the chroma planes
+// decode there while this thread decodes luma (BIKi gives the byte where luma
+// ends), and each thread converts half of the rows. chromaState holds the
+// worker's bundles.
+void DecodeVideo(VideoState &s, VideoState &chromaState, Worker *worker, const uint8_t *data, size_t bytes,
+                 Frame &frame, Timing &timing) {
+    Bits bits(data, bytes);
+    frame.bgrx.resize(size_t(s.width) * s.height * 4);
+    if (worker == nullptr || s.alpha) {
+        double start = NowMs();
+        if (s.alpha) { bits.Read(32); DecodePlane(s, s.planes[3], bits, false); }
+        bits.Read(32); // BIKi: the byte where the luma plane ends; planes are word aligned.
+        DecodePlane(s, s.planes[0], bits, false);
+        timing.luma = NowMs() - start;
+        start = NowMs();
+        DecodePlane(s, s.planes[2], bits, true); // BIKi stores V before U.
+        DecodePlane(s, s.planes[1], bits, true);
+        timing.chroma = NowMs() - start;
+        start = NowMs();
+        ConvertRows(s, frame.bgrx.data(), 0, s.height);
+        timing.convert = NowMs() - start;
+    } else {
+        const uint32_t lumaEnd = bits.Read(32);
+        Require(lumaEnd >= 4 && lumaEnd <= bytes, "invalid Bink luma plane size");
+        Bits chroma(data, bytes, size_t(lumaEnd) * 8);
+        worker->Start([&] {
+            const double start = NowMs();
+            DecodePlane(chromaState, s.planes[2], chroma, true);
+            DecodePlane(chromaState, s.planes[1], chroma, true);
+            timing.chroma = NowMs() - start;
+        });
+        try {
+            const double start = NowMs();
+            DecodePlane(s, s.planes[0], bits, false);
+            Require(bits.Position() == size_t(lumaEnd) * 8, "Bink luma plane size mismatch");
+            timing.luma = NowMs() - start;
+        } catch (...) {
+            worker->WaitQuietly();
+            throw;
+        }
+        worker->Wait();
+        const double start = NowMs();
+        const unsigned half = s.height / 2;
+        worker->Start([&] { ConvertRows(s, frame.bgrx.data(), half, s.height); });
+        ConvertRows(s, frame.bgrx.data(), 0, half);
+        worker->Wait();
+        timing.convert = NowMs() - start;
     }
     for (Plane &plane : s.planes) plane.previous.swap(plane.current);
 }
 
 // Radix-2 complex FFT, unnormalised inverse. Bink uses only small fixed powers of two.
 constexpr double Pi = 3.14159265358979323846;
-void InverseFFT(std::vector<std::complex<double>> &a) {
+
+// The factors of each stage of InverseFFT for n points: stage length L starts
+// at L / 2 - 1. Each comes from repeated multiplication, as a running factor
+// in the loop would, so the results do not change by a bit.
+std::vector<std::complex<double>> FFTTwiddles(size_t n) {
+    std::vector<std::complex<double>> twiddles;
+    for (size_t length = 2; length <= n; length <<= 1) {
+        double angle = 2 * Pi / length;
+        std::complex<double> step(std::cos(angle), std::sin(angle));
+        std::complex<double> w(1, 0);
+        for (size_t j = 0; j < length / 2; ++j) {
+            twiddles.push_back(w);
+            w *= step;
+        }
+    }
+    return twiddles;
+}
+
+void InverseFFT(std::vector<std::complex<double>> &a, const std::vector<std::complex<double>> &twiddles) {
     size_t n = a.size();
     for (size_t i = 1, j = 0; i < n; ++i) {
         size_t bit = n >> 1;
@@ -896,14 +1058,11 @@ void InverseFFT(std::vector<std::complex<double>> &a) {
         if (i < j) std::swap(a[i], a[j]);
     }
     for (size_t length = 2; length <= n; length <<= 1) {
-        double angle = 2 * Pi / length;
-        std::complex<double> step(std::cos(angle), std::sin(angle));
+        const std::complex<double> *w = twiddles.data() + length / 2 - 1;
         for (size_t start = 0; start < n; start += length) {
-            std::complex<double> w(1, 0);
             for (size_t j = 0; j < length / 2; ++j) {
-                auto even = a[start + j], odd = a[start + j + length / 2] * w;
+                auto even = a[start + j], odd = a[start + j + length / 2] * w[j];
                 a[start + j] = even + odd; a[start + j + length / 2] = even - odd;
-                w *= step;
             }
         }
     }
@@ -916,6 +1075,10 @@ struct AudioState {
     std::vector<unsigned> bands;
     std::vector<float> previous[2];
     std::vector<std::complex<double>> transform;
+    // Made once in Init: the FFT factors, the DCT phase factors, and the
+    // buffers of a block.
+    std::vector<std::complex<double>> twiddles, dctTwiddles;
+    std::vector<float> quant, samples[2];
     void Init(unsigned rate, unsigned count, bool useDct) {
         channels = count; dct = useDct; first = true;
         length = rate < 22050 ? 512 : (rate < 44100 ? 1024 : 2048);
@@ -935,16 +1098,24 @@ struct AudioState {
         bands[countBands] = length;
         for (unsigned i = 0; i < codedChannels; ++i) previous[i].assign(overlap, 0);
         transform.resize(dct ? length * 2 : length);
+        twiddles = FFTTwiddles(transform.size());
+        dctTwiddles.clear();
+        for (unsigned k = 0; dct && k < length; ++k) {
+            double angle = Pi * k / (2 * length);
+            dctTwiddles.emplace_back(std::cos(angle), std::sin(angle));
+        }
+        quant.resize(bands.size() - 1);
+        for (std::vector<float> &s : samples) s.resize(length);
     }
     float Float(Bits &bits) {
         int exponent = bits.Read(5);
         float value = std::ldexp(float(bits.Read(23)), exponent - 23);
         return bits.Read(1) ? -value : value;
     }
-    std::vector<float> Coefficients(Bits &bits) {
-        std::vector<float> c(length);
+    // One block of one channel into c (length samples).
+    void Coefficients(Bits &bits, std::vector<float> &c) {
+        std::fill(c.begin(), c.end(), 0.0f);
         c[0] = Float(bits) * root; c[1] = Float(bits) * root;
-        std::vector<float> quant(bands.size() - 1);
         for (float &q : quant) q = std::exp(std::min(bits.Read(8), 95u) * 0.15289164787221953823f) * root;
         unsigned band = 0, i = 2;
         float q = quant[0];
@@ -968,8 +1139,7 @@ struct AudioState {
             // DCT III via the even, phase-shifted spectrum of a 2N-point FFT.
             transform[0] = 2 * c[0];
             for (unsigned k = 1; k < length; ++k) {
-                double angle = Pi * k / (2 * length);
-                transform[k] = double(c[k]) * std::complex<double>(std::cos(angle), std::sin(angle));
+                transform[k] = double(c[k]) * dctTwiddles[k];
                 transform[2 * length - k] = std::conj(transform[k]);
             }
         } else {
@@ -979,10 +1149,9 @@ struct AudioState {
                 transform[length - k] = std::conj(transform[k]);
             }
         }
-        InverseFFT(transform);
+        InverseFFT(transform, twiddles);
         float scale = dct ? 1.0f / length : 0.5f;
         for (unsigned i = 0; i < length; ++i) c[i] = transform[i].real() * scale;
-        return c;
     }
     void Decode(const uint8_t *data, size_t bytes, std::vector<float> &pcm) {
         Require(bytes >= 4, "truncated Bink audio packet");
@@ -991,12 +1160,12 @@ struct AudioState {
                 "invalid Bink audio output size");
         Bits bits(data + 4, bytes - 4);
         pcm.clear();
+        pcm.reserve(reported / 2 + length * codedChannels);
         while (bits.Left()) {
             Require(pcm.size() < 8 * 1024 * 1024, "Bink audio packet too large");
             if (dct) bits.Read(2);
-            std::vector<float> samples[2];
             for (unsigned ch = 0; ch < codedChannels; ++ch) {
-                samples[ch] = Coefficients(bits);
+                Coefficients(bits, samples[ch]);
                 if (!first) {
                     unsigned total = overlap * codedChannels;
                     for (unsigned i = 0; i < overlap; ++i) {
@@ -1026,7 +1195,10 @@ struct Decoder::Impl {
     Info info;
     std::string error;
     VideoState video;
+    VideoState chroma;      // the bundles of the chroma worker
     AudioState audio;
+    std::vector<std::unique_ptr<Worker>> workers;   // [0] audio, [1] chroma and half the picture
+    Timing timing;
     std::vector<uint32_t> offsets;
     unsigned tracks = 0, frame = 0;
     int selected = -1;
@@ -1082,6 +1254,7 @@ struct Decoder::Impl {
             Require(offsets[i + 1] > offsets[i] && offsets[i + 1] - offsets[i] <= largest,
                     "invalid Bink frame offset/size");
         video.Init(info.width, info.height, flags & 0x00100000);
+        chroma.Init(info.width, info.height, flags & 0x00100000, false);
         ready = true;
     }
     void Decode(Frame &output) {
@@ -1089,23 +1262,55 @@ struct Decoder::Impl {
         packet.resize(offsets[frame + 1] - offsets[frame]);
         Read(offsets[frame], packet.data(), uint32_t(packet.size()));
         size_t cursor = 0;
+        const uint8_t *audioData = nullptr;
+        size_t audioBytes = 0;
         output.audio.clear();
         for (unsigned i = 0; i < tracks; ++i) {
             Require(packet.size() - cursor >= 4, "truncated Bink audio length");
             uint32_t bytes = LE32(packet.data() + cursor); cursor += 4;
             Require(bytes <= packet.size() - cursor && (bytes == 0 || bytes >= 4), "invalid Bink audio length");
-            if (int(i) == selected && bytes) audio.Decode(packet.data() + cursor, bytes, output.audio);
+            if (int(i) == selected && bytes) {
+                audioData = packet.data() + cursor;
+                audioBytes = bytes;
+            }
             cursor += bytes;
         }
-        DecodeVideo(video, packet.data() + cursor, packet.size() - cursor, output);
+        const uint8_t *videoData = packet.data() + cursor;
+        const size_t videoBytes = packet.size() - cursor;
+        Worker *audioWorker = workers.empty() ? nullptr : workers[0].get();
+        Worker *chromaWorker = workers.size() > 1 ? workers[1].get() : nullptr;
+        timing = Timing();
+        auto decodeAudio = [&] {
+            const double start = NowMs();
+            audio.Decode(audioData, audioBytes, output.audio);
+            timing.audio = NowMs() - start;
+        };
+        if (audioData && !audioWorker)
+            decodeAudio();
+        if (audioData && audioWorker)
+            audioWorker->Start(decodeAudio);
+        try {
+            DecodeVideo(video, chroma, chromaWorker, videoData, videoBytes, output, timing);
+        } catch (...) {
+            if (audioWorker) audioWorker->WaitQuietly();
+            throw;
+        }
+        if (audioWorker) audioWorker->Wait();
         ++frame;
     }
 };
 
 Decoder::Decoder() : impl(new Impl) {}
 Decoder::~Decoder() = default;
+void Decoder::SetWorkers(unsigned count) {
+    count = std::min(count, 2u);
+    while (impl->workers.size() > count) impl->workers.pop_back();
+    while (impl->workers.size() < count) impl->workers.emplace_back(new Worker);
+}
 bool Decoder::Open(Reader reader, int track) {
+    std::vector<std::unique_ptr<Worker>> workers = std::move(impl->workers);
     impl.reset(new Impl);
+    impl->workers = std::move(workers);
     try { impl->Open(reader, track); return true; }
     catch (const std::exception &e) { impl->error = e.what(); impl->ready = false; return false; }
 }
@@ -1118,5 +1323,6 @@ bool Decoder::Decode(Frame &frame) {
     }
 }
 const Info &Decoder::GetInfo() const { return impl->info; }
+const Timing &Decoder::GetTiming() const { return impl->timing; }
 const std::string &Decoder::Error() const { return impl->error; }
 } // namespace Bink
