@@ -31,7 +31,11 @@ struct ListedTriple {
     bool transformed;
 };
 
-bool ReadVariants(const char *path, std::vector<uint64_t> &keys, std::vector<ListedTriple> &triples)
+// An args line: a fragment key and an arguments key it draws with.
+typedef std::pair<uint64_t, uint64_t> ListedArgs;
+
+bool ReadVariants(const char *path, std::vector<uint64_t> &keys, std::vector<ListedTriple> &triples,
+                  std::set<ListedArgs> &args)
 {
     std::ifstream in(path);
     if (!in)
@@ -52,6 +56,10 @@ bool ReadVariants(const char *path, std::vector<uint64_t> &keys, std::vector<Lis
             if (blend != "off" && sscanf(blend.c_str(), "%d/%d", &t.srcBlend, &t.destBlend) != 2)
                 return false;
             triples.push_back(t);
+        } else if (kind == "args") {
+            std::string value;
+            words >> value;
+            args.insert({ strtoull(key.c_str(), nullptr, 16), strtoull(value.c_str(), nullptr, 16) });
         }
     }
     return true;
@@ -80,13 +88,23 @@ int main(int argc, char **argv)
     REQUIRE(argc == 2);
     std::vector<uint64_t> keys;
     std::vector<ListedTriple> triples;
-    REQUIRE(ReadVariants(argv[1], keys, triples));
+    std::set<ListedArgs> args;
+    REQUIRE(ReadVariants(argv[1], keys, triples, args));
     REQUIRE(!keys.empty() && !triples.empty());
 
-    // One row per key and form, and only keys of the list.
+    // One general row per key and form, and only keys of the list. A row of
+    // an arguments key is one of the list, has its general row, and its
+    // compare form is on exactly with the alpha test.
     std::set<std::pair<uint64_t, int>> rows;
+    std::set<std::pair<std::pair<uint64_t, int>, uint64_t>> made;
     for (const GxmFragmentVariant &v : kGxmFragmentVariants) {
-        REQUIRE(rows.insert({ v.key, v.alphaTest }).second);
+        if (v.args == GXM_ARGS_GENERAL) {
+            REQUIRE(rows.insert({ v.key, v.alphaTest }).second);
+        } else {
+            REQUIRE(made.insert({ { v.key, v.alphaTest }, v.args }).second);
+            REQUIRE(args.count({ v.key, v.args }) == 1);
+            REQUIRE(((v.args >> 40) != 0) == ((v.key & kAlphaTestBit) != 0));
+        }
         REQUIRE(std::set<uint64_t>(keys.begin(), keys.end()).count(v.key) == 1);
         REQUIRE(((v.key & kAlphaTestBit) != 0) == (v.alphaTest != 0));
         REQUIRE(v.gxp == nullptr);
@@ -105,6 +123,14 @@ int main(int argc, char **argv)
         }
         REQUIRE(HasSlot(v, GXM_SLOT_BACKDROP) == ((v.key & kFadeBit) != 0));
     }
+
+    for (const auto &m : made)
+        REQUIRE(rows.count(m.first) == 1);
+    // Each listed arguments key has a row for each form of its key.
+    for (const ListedArgs &a : args)
+        for (const auto &row : rows)
+            if (row.first == a.first)
+                REQUIRE(made.count({ row, a.second }) == 1);
 
     // Each key with a blended form also has the discard form: the depth pass
     // of a blended draw that writes depth.
@@ -136,6 +162,7 @@ int main(int argc, char **argv)
         for (const GxmPipelineTriple &g : kGxmPipelineTriples) {
             REQUIRE(g.variant >= 0 && g.variant < kVariantCount);
             const GxmFragmentVariant &v = kGxmFragmentVariants[g.variant];
+            REQUIRE(v.args == GXM_ARGS_GENERAL);
             REQUIRE(!(g.srcBlend != 0 && v.alphaTest == 1));
             if (v.key == t.key && g.srcBlend == t.srcBlend && g.destBlend == t.destBlend &&
                 g.transformed == t.transformed) {

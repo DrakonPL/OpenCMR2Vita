@@ -62,6 +62,78 @@ inline uint64_t Gfx_FragmentKey(const GfxDrawState &s, bool fade)
            (uint64_t)(distanceFade ? 1 : 0) << 32;
 }
 
+// ---- the arguments key ----
+// What a fragment program reads from uniforms and a variant made for one
+// draw state has as constants: the arguments of the texture stages and the
+// form of the alpha test's compare. The GXM executor draws with the variant
+// of a draw's arguments key where there is one (shaders/cg/variants.txt), and
+// with the program that reads them from uniforms otherwise.
+
+// One argument, 5 bits: its source (GFX_TA_DIFFUSE..GFX_TA_SPECULAR, any
+// other reads as the current colour), complement, alpha replicate.
+inline uint64_t Gfx_ArgKey(DWORD arg)
+{
+    const DWORD source = (arg & 0xf) <= GFX_TA_SPECULAR ? (arg & 0xf) : (DWORD)GFX_TA_CURRENT;
+    return source | ((arg & GFX_TA_COMPLEMENT) ? 8u : 0u) | ((arg & GFX_TA_ALPHAREPLICATE) ? 16u : 0u);
+}
+
+// 20 bits: colour argument 1, 2, alpha argument 1, 2. An argument that the
+// stage's operation does not read is 0, so that draws which differ only in
+// it share a variant.
+inline uint64_t Gfx_StageArgsKey(const GfxStageState &stage)
+{
+    const int op = stage.colorOp, alphaOp = stage.alphaOp;
+    if (op == GFX_TOP_DISABLE || op == GFX_TOP_BUMPENVMAP || op == GFX_TOP_BUMPENVMAPLUMINANCE)
+        return 0;
+    uint64_t key = 0;
+    if (op != GFX_TOP_SELECTARG2)
+        key |= Gfx_ArgKey(stage.colorArg1);
+    if (op != GFX_TOP_SELECTARG1)
+        key |= Gfx_ArgKey(stage.colorArg2) << 5;
+    if (alphaOp != GFX_TOP_DISABLE && alphaOp != GFX_TOP_SELECTARG2)
+        key |= Gfx_ArgKey(stage.alphaArg1) << 10;
+    if (alphaOp != GFX_TOP_DISABLE && alphaOp != GFX_TOP_SELECTARG1)
+        key |= Gfx_ArgKey(stage.alphaArg2) << 15;
+    return key;
+}
+
+// The alpha test as the fragment program runs it: 0 off, 1 alpha >=
+// threshold, 2 alpha < threshold, 3 the general compare of the function and
+// the reference.
+enum { GFX_ALPHA_COMPARE_OFF, GFX_ALPHA_COMPARE_AT_LEAST, GFX_ALPHA_COMPARE_BELOW, GFX_ALPHA_COMPARE_GENERAL };
+
+inline int Gfx_AlphaCompare(const GfxDrawState &s)
+{
+    if (!s.alphaTest)
+        return GFX_ALPHA_COMPARE_OFF;
+    switch (s.alphaFunc) {
+    case GFX_CMP_GREATEREQUAL:
+    case GFX_CMP_GREATER: return GFX_ALPHA_COMPARE_AT_LEAST;
+    case GFX_CMP_LESS:
+    case GFX_CMP_LESSEQUAL: return GFX_ALPHA_COMPARE_BELOW;
+    default: return GFX_ALPHA_COMPARE_GENERAL;
+    }
+}
+
+// The threshold of compare forms 1 and 2. Direct3D compares the alpha as a
+// whole number of 255ths (rounded) with the reference: alpha * 255 + 0.5 >=
+// ref is alpha >= (ref - 0.5) / 255, and > ref is >= ref + 1.
+inline float Gfx_AlphaThreshold(const GfxDrawState &s)
+{
+    const float ref = (float)(s.alphaRef & 0xff);
+    const bool above = s.alphaFunc == GFX_CMP_GREATER || s.alphaFunc == GFX_CMP_LESSEQUAL;
+    return (ref + (above ? 0.5f : -0.5f)) / 255.0f;
+}
+
+// Stage 0 in bits 0-19, stage 1 in 20-39 (when it runs), the compare form
+// in 40-41.
+inline uint64_t Gfx_FragmentArgsKey(const GfxDrawState &s)
+{
+    const bool stage1 = s.stages[0].colorOp != GFX_TOP_DISABLE && s.stages[1].colorOp != GFX_TOP_DISABLE;
+    return Gfx_StageArgsKey(s.stages[0]) | (stage1 ? Gfx_StageArgsKey(s.stages[1]) << 20 : 0) |
+           (uint64_t)Gfx_AlphaCompare(s) << 40;
+}
+
 // Everything of a draw's pipeline that the state can change: vertex format,
 // primitive, blending, depth and culling. primitive is a list or strip type
 // (fans are converted before they are drawn).

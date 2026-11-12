@@ -8,10 +8,19 @@
 #define STAGE1_KIND 0
 #define STAGE1_SCALED 0
 #define ALPHA_TEST 1
+#define ALPHA_COMPARE 3
 #define FOG 0
 #define FOG_TABLE 0
 #define SPECULAR_ADD 0
 #define FADE 1
+#define STAGE0_COLOR1 Arg(fu[FU_STAGE0_SOURCE].x, fu[FU_STAGE0_COMPLEMENT].x, fu[FU_STAGE0_REPLICATE].x, diffuse, specular, current, texel)
+#define STAGE0_COLOR2 Arg(fu[FU_STAGE0_SOURCE].y, fu[FU_STAGE0_COMPLEMENT].y, fu[FU_STAGE0_REPLICATE].y, diffuse, specular, current, texel)
+#define STAGE0_ALPHA1 Arg(fu[FU_STAGE0_SOURCE].z, fu[FU_STAGE0_COMPLEMENT].z, fu[FU_STAGE0_REPLICATE].z, diffuse, specular, current, texel)
+#define STAGE0_ALPHA2 Arg(fu[FU_STAGE0_SOURCE].w, fu[FU_STAGE0_COMPLEMENT].w, fu[FU_STAGE0_REPLICATE].w, diffuse, specular, current, texel)
+#define STAGE1_COLOR1 Arg(fu[FU_STAGE1_SOURCE].x, fu[FU_STAGE1_COMPLEMENT].x, fu[FU_STAGE1_REPLICATE].x, diffuse, specular, current, texel)
+#define STAGE1_COLOR2 Arg(fu[FU_STAGE1_SOURCE].y, fu[FU_STAGE1_COMPLEMENT].y, fu[FU_STAGE1_REPLICATE].y, diffuse, specular, current, texel)
+#define STAGE1_ALPHA1 Arg(fu[FU_STAGE1_SOURCE].z, fu[FU_STAGE1_COMPLEMENT].z, fu[FU_STAGE1_REPLICATE].z, diffuse, specular, current, texel)
+#define STAGE1_ALPHA2 Arg(fu[FU_STAGE1_SOURCE].w, fu[FU_STAGE1_COMPLEMENT].w, fu[FU_STAGE1_REPLICATE].w, diffuse, specular, current, texel)
 uniform sampler2D backdrop : TEXUNIT0;
 
 // Direct3D 7 texture stages, alpha test, fog and the distance fade: a port of
@@ -21,7 +30,13 @@ uniform sampler2D backdrop : TEXUNIT0;
 //   STAGEn_KIND: 0 none, 1 2D, 2 cube, 3 bump, 4 distance field, 5 menu dot, 6 vector icon
 //   STAGEn_SCALED: a point-filtered 2D texture read through a linear sampler
 //   ALPHA_TEST: 0 off, 1 discard (blending off), 2 colour and alpha 0 (blending on)
+//   ALPHA_COMPARE: 1 alpha >= threshold, 2 alpha < threshold, 3 the general compare
 //   FOG, FOG_TABLE, SPECULAR_ADD, FADE: 0 or 1
+//   STAGEn_COLOR1, STAGEn_COLOR2, STAGEn_ALPHA1, STAGEn_ALPHA2: the stage's
+//     arguments, as expressions over diffuse, specular, current and texel. A
+//     variant made for one arguments key (render/shader_key.h) has them and
+//     ALPHA_COMPARE fixed. The general variant reads them from fu[] with Arg()
+//     and Compare().
 // Samplers: tex0, cube0, native0, tex1, cube1, native1, backdrop, as used.
 
 #include "uniforms.h"
@@ -85,17 +100,25 @@ float4 Op(const int op, float4 a, float4 b)
     return a;
 }
 
-// One texture stage on current; first: its FU_STAGEn_SOURCE row.
-float4 Stage(const int colorOp, const int alphaOp, const int first, float4 diffuse, float4 specular, float4 current,
-             float4 texel)
+// Texture stage 0 and 1 on current. The names diffuse, specular, current and
+// texel are what the STAGEn_ argument expressions read.
+float4 Stage0(float4 diffuse, float4 specular, float4 current, float4 texel)
 {
-    const float4 source = fu[first], complement = fu[first + 1], replicate = fu[first + 2];
-    float4 color = Op(colorOp, Arg(source.x, complement.x, replicate.x, diffuse, specular, current, texel),
-                      Arg(source.y, complement.y, replicate.y, diffuse, specular, current, texel));
+    float4 color = Op(STAGE0_OP, STAGE0_COLOR1, STAGE0_COLOR2);
     float alpha = current.a;
-    if (alphaOp != TOP_DISABLE)
-        alpha = Op(alphaOp, Arg(source.z, complement.z, replicate.z, diffuse, specular, current, texel),
-                   Arg(source.w, complement.w, replicate.w, diffuse, specular, current, texel)).a;
+#if STAGE0_ALPHA_OP != TOP_DISABLE
+    alpha = Op(STAGE0_ALPHA_OP, STAGE0_ALPHA1, STAGE0_ALPHA2).a;
+#endif
+    return float4(color.rgb, alpha);
+}
+
+float4 Stage1(float4 diffuse, float4 specular, float4 current, float4 texel)
+{
+    float4 color = Op(STAGE1_OP, STAGE1_COLOR1, STAGE1_COLOR2);
+    float alpha = current.a;
+#if STAGE1_ALPHA_OP != TOP_DISABLE
+    alpha = Op(STAGE1_ALPHA_OP, STAGE1_ALPHA1, STAGE1_ALPHA2).a;
+#endif
     return float4(color.rgb, alpha);
 }
 
@@ -242,13 +265,13 @@ float4 main(
 #endif
     }
 #else
-    current = Stage(STAGE0_OP, STAGE0_ALPHA_OP, FU_STAGE0_SOURCE, vDiffuse, vSpecular, current, SAMPLE0(vTex0));
+    current = Stage0(vDiffuse, vSpecular, current, SAMPLE0(vTex0));
 #endif
 #if STAGE1_OP != TOP_DISABLE
     {
         float4 texel = SAMPLE1(vTex1 + float4(bumpOffset, 0.0, 0.0));
         texel.rgb *= luminance;
-        current = Stage(STAGE1_OP, STAGE1_ALPHA_OP, FU_STAGE1_SOURCE, vDiffuse, vSpecular, current, texel);
+        current = Stage1(vDiffuse, vSpecular, current, texel);
     }
 #endif
 #endif
@@ -259,7 +282,13 @@ float4 main(
 
 #if ALPHA_TEST != 0
     const float4 alphaTest = fu[FU_ALPHA_TEST];
+#if ALPHA_COMPARE == 1
+    const bool passed = current.a >= alphaTest.z;
+#elif ALPHA_COMPARE == 2
+    const bool passed = current.a < alphaTest.z;
+#else
     const bool passed = Compare(alphaTest.x, floor(current.a * 255.0 + 0.5), alphaTest.y);
+#endif
 #if ALPHA_TEST == 1
     if (!passed)
         discard;

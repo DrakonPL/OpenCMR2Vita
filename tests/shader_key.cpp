@@ -57,6 +57,51 @@ int main()
     other.stages[0].bumpMat[0] = 0.5f;
     REQUIRE(Gfx_FragmentKey(other, true) == Gfx_FragmentKey(stage, true));
 
+    // The arguments key: what the program of a key reads from uniforms.
+    // Texture times diffuse in colour and alpha, alpha >= 1: the HUD sprite
+    // with the game's default arguments.
+    hud.stages[0].colorArg1 = hud.stages[0].alphaArg1 = GFX_TA_TEXTURE;
+    hud.stages[0].colorArg2 = hud.stages[0].alphaArg2 = GFX_TA_DIFFUSE;
+    hud.alphaFunc = GFX_CMP_GREATEREQUAL;
+    hud.alphaRef = 1;
+    REQUIRE(Gfx_FragmentArgsKey(hud) == (0x2ull | 0x0ull << 5 | 0x2ull << 10 | 0x0ull << 15 | 1ull << 40));
+    // Complement and alpha replicate are part of an argument; a source the
+    // program does not know reads as the current colour.
+    REQUIRE(Gfx_ArgKey(GFX_TA_TFACTOR | GFX_TA_COMPLEMENT) == (3u | 8u));
+    REQUIRE(Gfx_ArgKey(GFX_TA_TEXTURE | GFX_TA_ALPHAREPLICATE) == (2u | 16u));
+    REQUIRE(Gfx_ArgKey(7) == (uint64_t)GFX_TA_CURRENT);
+    // An argument the operation does not read leaves the key alone.
+    GfxDrawState select = hud;
+    select.stages[0].colorOp = GFX_TOP_SELECTARG1;
+    const uint64_t selectKey = Gfx_FragmentArgsKey(select);
+    select.stages[0].colorArg2 = GFX_TA_SPECULAR;
+    REQUIRE(Gfx_FragmentArgsKey(select) == selectKey);
+    select.stages[0].colorArg1 = GFX_TA_SPECULAR;
+    REQUIRE(Gfx_FragmentArgsKey(select) != selectKey);
+    // Stage 1 counts only when both stages run.
+    GfxDrawState two = hud;
+    two.stages[1].colorArg1 = GFX_TA_SPECULAR;
+    REQUIRE(Gfx_FragmentArgsKey(two) == Gfx_FragmentArgsKey(hud));
+    two.stages[1].colorOp = GFX_TOP_MODULATE;
+    two.stages[1].alphaOp = GFX_TOP_DISABLE;
+    REQUIRE(Gfx_FragmentArgsKey(two) >> 20 << 20 == (4ull << 20 | Gfx_ArgKey(two.stages[1].colorArg2) << 25 | 1ull << 40));
+    // The alpha test: off, one compare with a threshold, or the general one.
+    GfxDrawState alpha = hud;
+    REQUIRE(Gfx_AlphaCompare(alpha) == GFX_ALPHA_COMPARE_AT_LEAST);
+    // >= 1: every alpha from 1/255 passes, 0 fails.
+    REQUIRE(Gfx_AlphaThreshold(alpha) > 0.0f && Gfx_AlphaThreshold(alpha) < 1.0f / 255.0f);
+    alpha.alphaFunc = GFX_CMP_GREATER;
+    alpha.alphaRef = 0x80;
+    REQUIRE(Gfx_AlphaCompare(alpha) == GFX_ALPHA_COMPARE_AT_LEAST);
+    REQUIRE(Gfx_AlphaThreshold(alpha) > 128.0f / 255.0f && Gfx_AlphaThreshold(alpha) < 129.0f / 255.0f);
+    alpha.alphaFunc = GFX_CMP_LESS;
+    REQUIRE(Gfx_AlphaCompare(alpha) == GFX_ALPHA_COMPARE_BELOW);
+    REQUIRE(Gfx_AlphaThreshold(alpha) > 127.0f / 255.0f && Gfx_AlphaThreshold(alpha) < 128.0f / 255.0f);
+    alpha.alphaFunc = GFX_CMP_NOTEQUAL;
+    REQUIRE(Gfx_AlphaCompare(alpha) == GFX_ALPHA_COMPARE_GENERAL);
+    alpha.alphaTest = false;
+    REQUIRE(Gfx_AlphaCompare(alpha) == GFX_ALPHA_COMPARE_OFF && Gfx_FragmentArgsKey(alpha) >> 40 == 0);
+
     // Stage 1 does not run when stage 0 is off.
     GfxDrawState off = stage;
     off.stages[0].colorOp = GFX_TOP_DISABLE;

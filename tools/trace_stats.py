@@ -4,7 +4,8 @@
 Each trace is named after its run: a path like runs/<scenario>/gfx.trace, as
 tests/runtime_scenarios.py --trace writes them. Prints the maxima per frame,
 the most live texture and vertex buffer memory, and the fragment key and
-pipeline sets. --variants writes the key sets for the GXM shader variants.
+pipeline sets. --variants writes the key sets for the GXM shader variants,
+with the arguments keys each fragment key drew with.
 """
 import argparse
 from pathlib import Path
@@ -12,7 +13,7 @@ import re
 
 FORMATS = ['BGRX8', 'BGRA8', 'BC1', 'BC3', 'BUMP_DUDVL']
 FRAME = re.compile(r'^F (\d+) v=(\d+) i=(\d+) c=(\d+) s=(\d+) b=(\d+)/(\d+)$')
-DRAW = re.compile(r' k=([0-9a-f]+) p=([0-9a-f]+)$')
+DRAW = re.compile(r' k=([0-9a-f]+) p=([0-9a-f]+)(?: a=([0-9a-f]+))?$')
 FRAME_FIELDS = ['vertex bytes', 'indices', 'commands', 'states', 'buffers drawn', 'buffer bytes drawn']
 
 
@@ -56,6 +57,8 @@ def read(path, name, stats):
             stats['fragments'].setdefault(fragment, name)
             stats['pipelines'].setdefault(pipeline, name)
             stats['triples'].setdefault(triple(fragment, pipeline), name)
+            if match[3] is not None:
+                stats['args'].setdefault((fragment, int(match[3], 16)), name)
 
 
 def main():
@@ -63,7 +66,8 @@ def main():
     parser.add_argument('traces', type=Path, nargs='+')
     parser.add_argument('--variants', type=Path, help='write the key sets here')
     args = parser.parse_args()
-    stats = {'frame': {}, 'all': {}, 'live': {}, 'live_total': (0, ''), 'fragments': {}, 'pipelines': {}, 'triples': {}}
+    stats = {'frame': {}, 'all': {}, 'live': {}, 'live_total': (0, ''), 'fragments': {}, 'pipelines': {}, 'triples': {},
+             'args': {}}
     for path in args.traces:
         read(path, path.parent.name, stats)
 
@@ -82,13 +86,15 @@ def main():
     print(f'Distinct fragment keys: {len(stats["fragments"])}')
     print(f'Distinct pipeline keys: {len(stats["pipelines"])}')
     print(f'Distinct (fragment key, blend pair, vertex program): {len(stats["triples"])}')
+    print(f'Distinct (fragment key, arguments key): {len(stats["args"])}')
 
     if args.variants:
         lines = ['# GXM shader variants: the keys the PC runs drew with (tools/trace_stats.py).',
-                 '# fragment <key> (render/shader_key.h) and triple <key> <blend src/dst or off> <tl|3d>,',
-                 '# each with the run that first used it.']
+                 '# fragment <key> (render/shader_key.h), triple <key> <blend src/dst or off> <tl|3d>',
+                 '# and args <key> <arguments key>, each with the run that first used it.']
         lines += [f'fragment {k:09x}  # {n}' for k, n in sorted(stats['fragments'].items())]
         lines += [f'triple {t}  # {n}' for t, n in sorted(stats['triples'].items())]
+        lines += [f'args {k:09x} {a:011x}  # {n}' for (k, a), n in sorted(stats['args'].items())]
         args.variants.parent.mkdir(parents=True, exist_ok=True)
         args.variants.write_text('\n'.join(lines) + '\n')
 
