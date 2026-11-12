@@ -3,6 +3,8 @@
 #include "port/movie.h"
 #include "port/sys.h"
 #include "render/gfx_internal.h"
+#include "render/shader_key.h"
+#include "render/shader_variants_gen.h"
 
 using namespace BinkTest;
 struct SysFile { size_t position = 0; };
@@ -43,6 +45,17 @@ struct CaptureExecutor : GfxExecutor {
 };
 GfxExecutor *Gfx_CreateGpuExecutor() { return new CaptureExecutor; }
 
+// The GXM executor draws only the fragment keys of its variant table: a movie
+// draw without a row there is black on the Vita.
+static bool HasGxmVariant(const GfxDrawState &s) {
+    const uint64_t key = Gfx_FragmentKey(s, false);
+    const int form = (key & 1ull << 28) == 0 ? 0 : s.alphaBlend ? 2 : 1;
+    for (const GxmFragmentVariant &v : kGxmFragmentVariants)
+        if (v.key == key && v.alphaTest == form)
+            return true;
+    return false;
+}
+
 int main()
 {
     data = Container(8, 8, {Video(8, 8, 6, 81)});
@@ -65,6 +78,7 @@ int main()
         Movie_Present(movie, 0, 0, 640, 480);
         Check(!stretched && !drawnState.alphaBlend && !drawnState.alphaTest && !drawnState.depthTest &&
               drawnState.stages[0].texture != menuTexture, "movie pass uses its own state");
+        Check(HasGxmVariant(drawnState), "the movie draw has a GXM fragment variant");
         // Draw the menu without resetting the cached state, exactly as at boot.
         GfxTLVertex vertices[3] = {};
         Gfx_DrawPrimitiveTL(GFX_TRIANGLELIST, vertices, 3);

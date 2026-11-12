@@ -1,6 +1,7 @@
 # GXM shader variants: the keys the PC runs drew with (tools/trace_stats.py).
 # fragment <key> (render/shader_key.h) and triple <key> <blend src/dst or off> <tl|3d>,
 # each with the run that first used it.
+fragment 000004442  # the intro movies (video/movie.cpp, not in a scenario)
 fragment 010000001  # preliminary-map
 fragment 010004424  # preliminary-map
 fragment 010004464  # preliminary-map
@@ -14,6 +15,7 @@ fragment 010007884  # preliminary-map
 fragment 110000001  # preliminary-map
 fragment 110004424  # preliminary-map
 fragment 110004484  # preliminary-map
+triple 000004442 off tl  # the intro movies (video/movie.cpp, not in a scenario)
 triple 010000001 5/6 3d  # preliminary-map
 triple 010000001 5/6 tl  # preliminary-map
 triple 010004424 2/2 3d  # preliminary-map

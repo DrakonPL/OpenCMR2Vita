@@ -39,6 +39,7 @@ struct GxmPipelineTriple {
 
 #ifdef VITA
 extern "C" {
+extern const unsigned char fixed_f_000004442_t0_gxp_start[];
 extern const unsigned char fixed_f_010000001_t2_gxp_start[];
 extern const unsigned char fixed_f_010004424_t2_gxp_start[];
 extern const unsigned char fixed_f_010004464_t2_gxp_start[];
@@ -60,6 +61,7 @@ extern const unsigned char fixed_f_110004484_t2_gxp_start[];
 #endif
 
 static const GxmFragmentVariant kGxmFragmentVariants[] = {
+    { 0x000004442ull, 0, "fixed_f_000004442_t0", GXM_GXP(fixed_f_000004442_t0), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010000001ull, 2, "fixed_f_010000001_t2", GXM_GXP(fixed_f_010000001_t2), { GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010004424ull, 2, "fixed_f_010004424_t2", GXM_GXP(fixed_f_010004424_t2), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010004464ull, 2, "fixed_f_010004464_t2", GXM_GXP(fixed_f_010004464_t2), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
@@ -77,25 +79,26 @@ static const GxmFragmentVariant kGxmFragmentVariants[] = {
 };
 
 static const GxmPipelineTriple kGxmPipelineTriples[] = {
-    { 0, 5, 6, false },
-    { 0, 5, 6, true },
-    { 1, 2, 2, false },
-    { 1, 2, 2, true },
-    { 2, 5, 6, true },
-    { 3, 5, 2, true },
-    { 3, 5, 6, false },
+    { 0, 0, 0, true },
+    { 1, 5, 6, false },
+    { 1, 5, 6, true },
+    { 2, 2, 2, false },
+    { 2, 2, 2, true },
     { 3, 5, 6, true },
+    { 4, 5, 2, true },
+    { 4, 5, 6, false },
     { 4, 5, 6, true },
     { 5, 5, 6, true },
     { 6, 5, 6, true },
-    { 7, 2, 2, true },
-    { 8, 5, 6, true },
+    { 7, 5, 6, true },
+    { 8, 2, 2, true },
     { 9, 5, 6, true },
-    { 10, 5, 6, false },
-    { 11, 2, 2, false },
-    { 12, 0, 0, false },
-    { 13, 5, 2, false },
-    { 13, 5, 6, false },
+    { 10, 5, 6, true },
+    { 11, 5, 6, false },
+    { 12, 2, 2, false },
+    { 13, 0, 0, false },
+    { 14, 5, 2, false },
+    { 14, 5, 6, false },
 };
 
 #endif
