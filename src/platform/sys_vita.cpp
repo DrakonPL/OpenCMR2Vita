@@ -351,6 +351,52 @@ void SysVita_FramePresented(void)
     periodFrames = 0;
     sumMs = maxMs = 0.0;
 }
+
+// A diagnosis of the stage load (VP-3.1 run 1: the race does not start): an
+// allocation that fails is logged with the heap in use. The link wraps
+// malloc, calloc and realloc (src/CMakeLists.txt). Removed when the cause is
+// known.
+extern "C" {
+void *__real_malloc(size_t bytes);
+void *__real_calloc(size_t count, size_t bytes);
+void *__real_realloc(void *memory, size_t bytes);
+
+static void LogFailedAllocation(const char *call, size_t bytes)
+{
+    static bool reporting;
+    if (reporting)
+        return;
+    reporting = true;
+    const struct mallinfo heap = mallinfo();
+    Sys_Log("out of memory: %s(%u bytes) failed, heap used %d KB of %d KB, free %d KB", call, (unsigned)bytes,
+            heap.uordblks / 1024, heap.arena / 1024, heap.fordblks / 1024);
+    reporting = false;
+}
+
+void *__wrap_malloc(size_t bytes)
+{
+    void *memory = __real_malloc(bytes);
+    if (memory == NULL && bytes != 0)
+        LogFailedAllocation("malloc", bytes);
+    return memory;
+}
+
+void *__wrap_calloc(size_t count, size_t bytes)
+{
+    void *memory = __real_calloc(count, bytes);
+    if (memory == NULL && count != 0 && bytes != 0)
+        LogFailedAllocation("calloc", count * bytes);
+    return memory;
+}
+
+void *__wrap_realloc(void *old, size_t bytes)
+{
+    void *memory = __real_realloc(old, bytes);
+    if (memory == NULL && bytes != 0)
+        LogFailedAllocation("realloc", bytes);
+    return memory;
+}
+}
 #endif
 
 // ---- platform -------------------------------------------------------------------
@@ -580,6 +626,11 @@ extern "C" SysFile *Sys_OpenFile(const char *path, int mode)
     SysFile *file = new SysFile;
     file->fd = fd;
     s_openFiles++;
+#ifdef OPENCMR2_DEV
+    // The stage load diagnosis (see __wrap_malloc): where the load is.
+    const struct mallinfo heap = mallinfo();
+    Sys_Log("file: %s, heap used %d KB", path, heap.uordblks / 1024);
+#endif
     return file;
 }
 
