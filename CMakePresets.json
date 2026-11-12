@@ -53,6 +53,15 @@
       "displayName": "Windows, x64 (clang++ from LLVM or Visual Studio, MSVC runtime)",
       "architecture": { "value": "x64", "strategy": "external" },
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "vita",
+      "displayName": "PS Vita (vitasdk GCC, in the vitasdk Docker image)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "${sourceDir}/cmake/vita.cmake",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" },
+      "condition": { "type": "notEquals", "lhs": "$env{VITASDK}", "rhs": "" }
     }
   ],
   "buildPresets": [
@@ -61,7 +70,8 @@
     { "name": "linux", "configurePreset": "linux" },
     { "name": "linux-debug", "configurePreset": "linux-debug" },
     { "name": "macos", "configurePreset": "macos" },
-    { "name": "windows-x64", "configurePreset": "windows-x64" }
+    { "name": "windows-x64", "configurePreset": "windows-x64" },
+    { "name": "vita", "configurePreset": "vita" }
   ],
   "testPresets": [
     { "name": "linux-x86", "configurePreset": "linux-x86", "output": { "outputOnFailure": true } },
