@@ -25,6 +25,10 @@ from uniforms: the general variant. An "args <key> <arguments key>" line
 as constants, for each form of the key. It is much shorter, and the executor
 draws with it where the draw's arguments are those.
 
+The executor draws a draw whose vertices are all nearer than the start of the
+distance fade with the key without the fade. The script refuses a triple or
+an args line of a fade key that lacks the same line of the key without it.
+
 Files are written only when their text changes, so a second run changes
 nothing (and leaves the .gxp files current). --check writes nothing and
 fails when an output differs.
@@ -48,6 +52,7 @@ KIND_NONE, KIND_2D, KIND_CUBE, KIND_BUMP, KIND_FIELD, KIND_DOT, KIND_ICON = rang
 # GFX_BLEND_*: destination factors that are 1 for a source of colour and alpha 0.
 BLEND_ONE, BLEND_INVSRCCOLOR, BLEND_INVSRCALPHA = 2, 4, 6
 FORM2_DEST_FACTORS = (BLEND_ONE, BLEND_INVSRCCOLOR, BLEND_INVSRCALPHA)
+FADE_BIT = 1 << 32   # the distance fade of a fragment key
 
 # Texture slots in the SDL GPU executor's binding order (gfx_gpu.cpp
 # TextureBindings): the index is the slot.
@@ -114,6 +119,15 @@ def read_variants(path):
     for key, _ in args:
         if key not in keys:
             raise SystemExit(f"{path.name}: args of key {key:09x} without its fragment line")
+    # The executor draws a draw that is too near for the distance fade with
+    # the key without the fade: each triple and args line of a fade key also
+    # has that key.
+    for key, blend, transformed in triples:
+        if key & FADE_BIT and (key & ~FADE_BIT, blend, transformed) not in triples:
+            raise SystemExit(f"{path.name}: triple of fade key {key:09x} without the triple of {key & ~FADE_BIT:09x}")
+    for key, value in args:
+        if key & FADE_BIT and (key & ~FADE_BIT, value) not in args:
+            raise SystemExit(f"{path.name}: args of fade key {key:09x} without the args of {key & ~FADE_BIT:09x}")
     return keys, triples, args
 
 

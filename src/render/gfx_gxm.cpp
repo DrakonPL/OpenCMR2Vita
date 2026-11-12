@@ -8,6 +8,7 @@
 #include "render/gfx_executor_shared.h"
 #include "render/gfx_internal.h"
 #include "render/gxm_device.h"
+#include "render/gxm_bounds.h"
 #include "render/gxm_dialog.h"
 #include "render/gxm_readback.h"
 #include "render/gxm_textures.h"
@@ -47,6 +48,7 @@ constexpr size_t kLoggedUnknownKeys = 64;    // different missing variants logge
 // divides by zero, and on the device each faded pixel then showed the
 // backdrop.
 constexpr float kNoFadeStart = 1e18f;
+constexpr uint64_t kFadeKeyBit = 1ull << 32;    // the distance fade of a fragment key (shader_key.h)
 constexpr float kNoFadeEnd = 2e18f;
 // Dev builds time the backdrop copy once in this many frames (it waits for
 // the GPU before and after it).
@@ -227,6 +229,10 @@ struct GxmVertexBuffer {
     void *memory = nullptr;     // from the static pool
     uint32_t version = 0;
     uint32_t noRoomVersion = 0; // the version the pool had no room for (0: none)
+    // The boxes of the vertex ranges drawn from boundsVersion of the buffer,
+    // by first vertex << 32 | count.
+    std::unordered_map<uint64_t, GxmBounds> bounds;
+    uint32_t boundsVersion = 0;
 };
 
 // A fragment program variant: its patcher id and its fu[] parameter.
@@ -260,6 +266,7 @@ struct Bound {
 
 struct Stats {
     unsigned draws = 0, misses = 0, vertexFills = 0, textureBinds = 0, dropped = 0, depthPasses = 0;
+    unsigned fadeDraws = 0, nearDraws = 0;  // draws of a key with the fade: with it, and too near for it
 };
 
 // The frame time probe of dev builds. A tap on the front touch screen starts
@@ -275,10 +282,16 @@ struct Stats {
 //   no depth pass     normal, without the depth pass of blended draws
 //   general           normal, with the general variants only: what the
 //                     variants made for the arguments keys save
+//   fade always       normal, with the fade also in the draws that are too
+//                     near for it: what the near test saves
+// Each line also has the CPU time of an Execute up to the present: the cost
+// of the draw calls without the wait for the GPU.
 enum ProbeMode {
-    PROBE_OFF, PROBE_NORMAL, PROBE_QUARTER, PROBE_TILE, PROBE_NO_3D, PROBE_NO_DEPTH_PASS, PROBE_GENERAL, PROBE_END
+    PROBE_OFF, PROBE_NORMAL, PROBE_QUARTER, PROBE_TILE, PROBE_NO_3D, PROBE_NO_DEPTH_PASS, PROBE_GENERAL,
+    PROBE_FADE_ALWAYS, PROBE_END
 };
-const char *const kProbeNames[PROBE_END] = { "off", "normal", "quarter", "tile", "no 3D", "no depth pass", "general" };
+const char *const kProbeNames[PROBE_END] = { "off",           "normal",  "quarter",    "tile", "no 3D",
+                                             "no depth pass", "general", "fade always" };
 constexpr uint64_t kProbeModeMicros = 3000000;
 constexpr uint64_t kProbeSettleMicros = 500000;     // at the start of a mode: not counted
 
@@ -286,6 +299,7 @@ struct Probe {
     int mode = PROBE_OFF;
     uint64_t modeStart = 0, lastPresent = 0;
     uint64_t frameMicros = 0, frameMax = 0;
+    uint64_t submitMicros = 0;      // in Execute, up to the present
     unsigned frames = 0, draws = 0;
     bool touchStarted = false, touchDown = false;
 };
@@ -979,6 +993,37 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                                               identityIndices, 4));
     }
 
+    // The largest eye distance of the vertices of a 3D draw (the vertex
+    // uniforms are those of its state), from the CPU copy of its vertices.
+    // The box of a range of a vertex buffer is kept while the buffer does
+    // not change. A draw without readable vertices is as far as can be.
+    float FarthestEyeDistance(const GfxCommand &c, const GfxFrame &frame)
+    {
+        const float (*worldView)[4] = &vertexUniforms[VU_WORLD_VIEW];
+        if (c.vertexCount == 0)
+            return kNoFadeStart;
+        if (c.buffer == nullptr) {
+            if ((size_t)c.firstVertexByte + (size_t)c.vertexCount * sizeof(GfxVertex) > frame.vertices.size())
+                return kNoFadeStart;
+            return Gxm_FarthestEyeDistance(
+                Gxm_VertexBounds(frame.vertices.data() + c.firstVertexByte, sizeof(GfxVertex), c.vertexCount), worldView);
+        }
+        GxmVertexBuffer *g = (GxmVertexBuffer *)c.buffer->gpu;
+        const size_t first = c.firstVertexByte / sizeof(GfxVertex);
+        if (g == nullptr || first + c.vertexCount > c.buffer->vertices.size())
+            return kNoFadeStart;
+        if (g->boundsVersion != c.buffer->version) {
+            g->bounds.clear();
+            g->boundsVersion = c.buffer->version;
+        }
+        const uint64_t range = (uint64_t)first << 32 | c.vertexCount;
+        auto it = g->bounds.find(range);
+        if (it == g->bounds.end())
+            it = g->bounds.emplace(range, Gxm_VertexBounds(&c.buffer->vertices[first], sizeof(GfxVertex), c.vertexCount))
+                     .first;
+        return Gxm_FarthestEyeDistance(it->second, worldView);
+    }
+
     // vertexOffset, indexOffset: the Execute's data in the ring (kFull: none).
     void Draw(const GfxCommand &c, const GfxFrame &frame, unsigned vertexOffset, unsigned indexOffset,
               bool backBuffer, int targetW, int targetH)
@@ -993,9 +1038,33 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         if (probe.mode == PROBE_NO_3D && !c.transformed)
             return;
         const GfxDrawState &s = frame.states[c.state];
-        const uint64_t key = Gfx_FragmentKey(s, backBuffer && !c.transformed);
+        const GfxViewport viewport = ToTarget(s.viewport, s.screenW, s.screenH, backBuffer, targetW, targetH);
+        if (!c.transformed && (vertexUniformState == nullptr || vertexUniformW != targetW || vertexUniformH != targetH ||
+                               (vertexUniformState != &s && !SameVertexUniforms(*vertexUniformState, s)))) {
+            FillVertexUniforms(s, viewport, vertexUniforms);
+            vertexUniformState = &s;
+            vertexUniformW = targetW;
+            vertexUniformH = targetH;
+            stats.vertexFills++;
+        }
+        uint64_t key = Gfx_FragmentKey(s, backBuffer && !c.transformed);
         const uint64_t args = Gfx_FragmentArgsKey(s);
-        const int variant = FindVariant(key, args, s, c.transformed);
+        int variant = -1;
+        // The fade changes no pixel of a draw whose vertices are all nearer
+        // than its start: such a draw takes the variant of its key without
+        // the fade, which is much shorter.
+        if ((key & kFadeKeyBit) != 0) {
+            if (probe.mode != PROBE_FADE_ALWAYS && FarthestEyeDistance(c, frame) < s.fadeStart)
+                variant = FindVariant(key & ~kFadeKeyBit, args, s, c.transformed);
+            if (variant >= 0) {
+                key &= ~kFadeKeyBit;
+                stats.nearDraws++;
+            } else {
+                stats.fadeDraws++;
+            }
+        }
+        if (variant < 0)
+            variant = FindVariant(key, args, s, c.transformed);
         if (variant < 0)
             return;
         SceGxmFragmentProgram *fragment = FragmentProgram(variant, s.alphaBlend, s.srcBlend, s.destBlend,
@@ -1039,21 +1108,12 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         }
 
         const bool scaled = backBuffer && s.screenW > 0 && s.screenH > 0;
-        const GfxViewport viewport = ToTarget(s.viewport, s.screenW, s.screenH, backBuffer, targetW, targetH);
         if (c.transformed)
             SetViewport(0.0f, 0.0f, (float)targetW, (float)targetH, 0.0f, 1.0f, viewport);
         else
             SetViewport((float)viewport.x, (float)viewport.y, (float)viewport.width, (float)viewport.height,
                         viewport.minZ, viewport.maxZ, viewport);
         SceGxmContext *context = device.Context();
-        if (!c.transformed && (vertexUniformState == nullptr || vertexUniformW != targetW || vertexUniformH != targetH ||
-                               (vertexUniformState != &s && !SameVertexUniforms(*vertexUniformState, s)))) {
-            FillVertexUniforms(s, viewport, vertexUniforms);
-            vertexUniformState = &s;
-            vertexUniformW = targetW;
-            vertexUniformH = targetH;
-            stats.vertexFills++;
-        }
 
         // One pass of the draw with a variant's program.
         auto pass = [&](int index, SceGxmFragmentProgram *program, SceGxmDepthFunc func, bool depthWrite) {
@@ -1221,6 +1281,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                 t->dirty = false;
             return;
         }
+        const uint64_t entered = sceKernelGetProcessTimeWide();
         if (!frameStarted)
             StartFrame();
         // The read of a display buffer is taken before it is drawn again.
@@ -1283,6 +1344,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         }
         // The frame's states go with this Execute.
         vertexUniformState = nullptr;
+        probe.submitMicros += sceKernelGetProcessTimeWide() - entered;
         if (!present)
             return;
 
@@ -1354,15 +1416,16 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                 probe.frames++;
             } else {
                 probe.draws = 0;
+                probe.submitMicros = 0;
             }
             probe.lastPresent = now;
         }
         if (now - probe.modeStart < kProbeModeMicros)
             return;
         const unsigned frames = probe.frames > 0 ? probe.frames : 1;
-        Sys_Log("gxm probe: %s: frame ms avg %.2f max %.2f over %u frames, %u draws per frame",
+        Sys_Log("gxm probe: %s: frame ms avg %.2f max %.2f over %u frames, %u draws per frame, draw calls %.2f ms",
                 kProbeNames[probe.mode], probe.frameMicros / 1000.0 / frames, probe.frameMax / 1000.0, probe.frames,
-                probe.draws / frames);
+                probe.draws / frames, probe.submitMicros / 1000.0 / frames);
         const bool touchDown = probe.touchDown;
         const int next = probe.mode + 1;
         probe = Probe();
@@ -1397,8 +1460,10 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             statsStart = now;
         if (now - statsStart < kStatsMicros)
             return;
-        Sys_Log("gxm: per s draws %u (depth passes %u), patcher misses %u, vertex fills %u, texture binds %u, dropped %u",
-                stats.draws, stats.depthPasses, stats.misses, stats.vertexFills, stats.textureBinds, stats.dropped);
+        Sys_Log("gxm: per s draws %u (depth passes %u, fade %u, near %u), patcher misses %u, vertex fills %u, "
+                "texture binds %u, dropped %u",
+                stats.draws, stats.depthPasses, stats.fadeDraws, stats.nearDraws, stats.misses, stats.vertexFills,
+                stats.textureBinds, stats.dropped);
         stats = Stats();
         statsStart = now;
 #endif

@@ -173,6 +173,21 @@ int main(int argc, char **argv)
         REQUIRE(found);
     }
 
+    // A draw too near for the distance fade draws with the key without it:
+    // each triple and args line of a fade key has that key's line too.
+    for (const ListedTriple &t : triples) {
+        if ((t.key & kFadeBit) == 0)
+            continue;
+        bool found = false;
+        for (const ListedTriple &o : triples)
+            found = found || (o.key == (t.key & ~kFadeBit) && o.srcBlend == t.srcBlend && o.destBlend == t.destBlend &&
+                              o.transformed == t.transformed);
+        REQUIRE(found);
+    }
+    for (const ListedArgs &a : args)
+        if ((a.first & kFadeBit) != 0)
+            REQUIRE(args.count({ a.first & ~kFadeBit, a.second }) == 1);
+
     printf("shader_variants: %d variants of %d keys, %d triples\n", kVariantCount, (int)keys.size(), kTripleCount);
     return 0;
 }
