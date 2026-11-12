@@ -21,6 +21,7 @@ triple 010000001 5/6 tl  # preliminary-map
 triple 010004424 2/2 3d  # preliminary-map
 triple 010004424 2/2 tl  # preliminary-map
 triple 010004464 5/6 tl  # preliminary-map
+triple 010004484 off 3d  # a frontend screen on the device, 3D at 34 s (no PC run drew it)
 triple 010004484 5/2 tl  # preliminary-map
 triple 010004484 5/6 3d  # preliminary-map
 triple 010004484 5/6 tl  # preliminary-map

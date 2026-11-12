@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include <unordered_map>
+#include <unordered_set>
 
 extern "C" {
 extern const SceGxmProgram clear_v_gxp_start;
@@ -34,7 +35,7 @@ using namespace GfxShared;
 
 constexpr int kVariantCount = (int)(sizeof(kGxmFragmentVariants) / sizeof(kGxmFragmentVariants[0]));
 constexpr unsigned kIdentityIndices = 65536;    // a non-indexed draw indexes through these
-constexpr int kLoggedUnknownKeys = 16;
+constexpr size_t kLoggedUnknownKeys = 64;    // different missing variants logged, at most
 // The distance fade waits for the backdrop copy (VP-2.6). Until then its range
 // starts beyond any eye distance, so no pixel fades. The start and the end
 // are different: smoothstep with equal edges divides by zero, and on the
@@ -258,7 +259,7 @@ struct Executor : GfxExecutor {
     Variant variants[kVariantCount];
     std::unordered_map<uint64_t, int> variantIndex;     // fragment key and alpha test form -> variant
     std::unordered_map<uint32_t, SceGxmFragmentProgram *> fragmentPrograms;
-    int loggedUnknownKeys = 0;
+    std::unordered_set<uint64_t> loggedUnknownKeys;     // FindVariant's lookups, with the vertex program
 
     uint16_t *identityIndices = nullptr;
     GxmTexture white;   // for a slot a program reads but the draw has no texture for
@@ -480,16 +481,23 @@ struct Executor : GfxExecutor {
     }
 
     // The variant of a fragment key drawn with or without blending, or -1.
-    int FindVariant(uint64_t key, bool blend)
+    // A missing one is logged once for each blend pair and vertex program,
+    // as its triple line in variants.txt.
+    int FindVariant(uint64_t key, const GfxDrawState &s, bool transformed)
     {
+        const bool blend = s.alphaBlend;
         const uint64_t form = (key & 1ull << 28) == 0 ? 0 : blend ? 2 : 1;
         auto it = variantIndex.find(key << 2 | form);
         if (it != variantIndex.end())
             return it->second;
-        if (loggedUnknownKeys < kLoggedUnknownKeys) {
-            Sys_Log("gxm: no variant for fragment key %09llx with blending %d: add it to variants.txt",
-                    (unsigned long long)key, blend ? 1 : 0);
-            loggedUnknownKeys++;
+        const unsigned src = blend ? s.srcBlend & 15 : 0, dst = blend ? s.destBlend & 15 : 0;
+        const uint64_t logged = key << 10 | src << 6 | dst << 2 | (blend ? 2u : 0u) | (transformed ? 1u : 0u);
+        if (loggedUnknownKeys.size() < kLoggedUnknownKeys && loggedUnknownKeys.insert(logged).second) {
+            char pair[8] = "off";
+            if (blend)
+                snprintf(pair, sizeof(pair), "%u/%u", src, dst);
+            Sys_Log("gxm: no variant: add \"triple %09llx %s %s\" to variants.txt", (unsigned long long)key, pair,
+                    transformed ? "tl" : "3d");
         }
         return -1;
     }
@@ -739,7 +747,7 @@ struct Executor : GfxExecutor {
             return;
         }
         const GfxDrawState &s = frame.states[c.state];
-        const int variant = FindVariant(Gfx_FragmentKey(s, backBuffer && !c.transformed), s.alphaBlend);
+        const int variant = FindVariant(Gfx_FragmentKey(s, backBuffer && !c.transformed), s, c.transformed);
         if (variant < 0)
             return;
         SceGxmFragmentProgram *fragment = FragmentProgram(variant, s.alphaBlend, s.srcBlend, s.destBlend,
