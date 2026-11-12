@@ -41,6 +41,14 @@
 #include <thread>
 #include <utility>
 
+#ifdef __vita__
+#include <cstdio>
+#include <psp2/kernel/threadmgr.h>
+#endif
+#ifdef __ARM_NEON
+#include <arm_neon.h>
+#endif
+
 namespace Bink {
 namespace {
 void Require(bool valid, const char *message) {
@@ -51,11 +59,82 @@ double NowMs() {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-// A thread that runs one job at a time for the decoder (Decoder::SetWorkers).
-// A job keeps to a small stack: the Vita gives a thread 32 KB.
+#ifdef __vita__
+// A thread that runs one job at a time for the decoder (Decoder::SetWorkers),
+// on sceKernel threads and semaphores: vitasdk's pthread does not start a
+// thread here. Worker n runs on core n + 1; the game's thread has core 0.
 class Worker {
 public:
-    Worker() : thread([this] { Run(); }) {}
+    explicit Worker(unsigned index) {
+        static const int cores[] = {SCE_KERNEL_CPU_MASK_USER_1, SCE_KERNEL_CPU_MASK_USER_2};
+        start = sceKernelCreateSema("bink_start", 0, 0, 1, nullptr);
+        done = sceKernelCreateSema("bink_done", 0, 0, 1, nullptr);
+        thread = sceKernelCreateThread("bink_worker", Entry, kDefaultUserPriority, kStackBytes, 0, cores[index % 2],
+                                       nullptr);
+        Worker *self = this;
+        const int started = thread < 0 ? thread : sceKernelStartThread(thread, sizeof(self), &self);
+        if (start < 0 || done < 0 || thread < 0 || started < 0) {
+            char message[96];
+            std::snprintf(message, sizeof(message), "no worker thread (sema %08x %08x, thread %08x, start %08x)",
+                          unsigned(start), unsigned(done), unsigned(thread), unsigned(started));
+            if (thread >= 0) sceKernelDeleteThread(thread);
+            if (start >= 0) sceKernelDeleteSema(start);
+            if (done >= 0) sceKernelDeleteSema(done);
+            throw std::runtime_error(message);
+        }
+    }
+    ~Worker() {
+        quit = true;
+        sceKernelSignalSema(start, 1);
+        sceKernelWaitThreadEnd(thread, nullptr, nullptr);
+        sceKernelDeleteThread(thread);
+        sceKernelDeleteSema(start);
+        sceKernelDeleteSema(done);
+    }
+    void Start(std::function<void()> next) {
+        job = std::move(next);
+        failure = nullptr;
+        busy = true;
+        sceKernelSignalSema(start, 1);
+    }
+    // Waits for the job; its exception comes out here.
+    void Wait() {
+        WaitQuietly();
+        std::exception_ptr error = failure;
+        failure = nullptr;
+        if (error) std::rethrow_exception(error);
+    }
+    // For a thread that is already throwing; also the error is dropped.
+    void WaitQuietly() {
+        if (busy) sceKernelWaitSema(done, 1, nullptr);
+        busy = false;
+    }
+private:
+    static constexpr SceSize kStackBytes = 64 * 1024;
+    static constexpr int kDefaultUserPriority = 0x10000100;  // the SDK's default for user threads
+    static int Entry(SceSize, void *argument) {
+        (*static_cast<Worker **>(argument))->Run();
+        return 0;
+    }
+    void Run() {
+        for (;;) {
+            sceKernelWaitSema(start, 1, nullptr);
+            if (quit) return;
+            try { job(); } catch (...) { failure = std::current_exception(); }
+            sceKernelSignalSema(done, 1);
+        }
+    }
+    SceUID start = -1, done = -1, thread = -1;
+    std::function<void()> job;
+    std::exception_ptr failure;
+    bool busy = false;          // the caller's thread only
+    volatile bool quit = false;
+};
+#else
+// A thread that runs one job at a time for the decoder (Decoder::SetWorkers).
+class Worker {
+public:
+    explicit Worker(unsigned) : thread([this] { Run(); }) {}
     ~Worker() {
         { std::lock_guard<std::mutex> lock(mutex); quit = true; }
         wake.notify_all();
@@ -105,6 +184,7 @@ private:
     bool busy = false, quit = false;
     std::thread thread;     // last: it starts after the members above exist
 };
+#endif
 
 template<class T, size_t N> struct CheckedArray {
     T values[N] = {};
@@ -967,7 +1047,42 @@ void ConvertRows(const VideoState &s, uint8_t *bgrx, unsigned y0, unsigned y1) {
         const uint8_t *uRow = pu.current.data() + size_t(y / 2) * pu.stride;
         const uint8_t *vRow = pv.current.data() + size_t(y / 2) * pv.stride;
         uint8_t *dst = bgrx + size_t(y) * s.width * 4;
-        for (unsigned x = 0; x < s.width; ++x, dst += 4) {
+        unsigned x = 0;
+#ifdef __ARM_NEON
+        // 16 pixels at a time, in 32 bits as below; the saturating narrows
+        // clamp to 0..255 as Clamp does.
+        for (; x + 16 <= s.width; x += 16, dst += 64) {
+            const uint16x8_t luma16[2] = {vqsubq_u16(vmovl_u8(vld1_u8(lumaRow + x)), vdupq_n_u16(16)),
+                                          vqsubq_u16(vmovl_u8(vld1_u8(lumaRow + x + 8)), vdupq_n_u16(16))};
+            const uint8x8x2_t u8 = vzip_u8(vld1_u8(uRow + x / 2), vld1_u8(uRow + x / 2));
+            const uint8x8x2_t v8 = vzip_u8(vld1_u8(vRow + x / 2), vld1_u8(vRow + x / 2));
+            uint8x8_t b[2], g[2], r[2];
+            for (int half = 0; half < 2; ++half) {
+                const int16x8_t u = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(u8.val[half])), vdupq_n_s16(128));
+                const int16x8_t v = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(v8.val[half])), vdupq_n_s16(128));
+                uint16x4_t bq[2], gq[2], rq[2];
+                for (int quarter = 0; quarter < 2; ++quarter) {
+                    const uint16x4_t l16 = quarter ? vget_high_u16(luma16[half]) : vget_low_u16(luma16[half]);
+                    const int32x4_t luma = vmlaq_n_s32(vdupq_n_s32(128), vreinterpretq_s32_u32(vmovl_u16(l16)), 298);
+                    const int32x4_t uq = vmovl_s16(quarter ? vget_high_s16(u) : vget_low_s16(u));
+                    const int32x4_t vq = vmovl_s16(quarter ? vget_high_s16(v) : vget_low_s16(v));
+                    bq[quarter] = vqmovun_s32(vshrq_n_s32(vmlaq_n_s32(luma, uq, 516), 8));
+                    gq[quarter] = vqmovun_s32(vshrq_n_s32(vmlaq_n_s32(vmlaq_n_s32(luma, uq, -100), vq, -208), 8));
+                    rq[quarter] = vqmovun_s32(vshrq_n_s32(vmlaq_n_s32(luma, vq, 409), 8));
+                }
+                b[half] = vqmovn_u16(vcombine_u16(bq[0], bq[1]));
+                g[half] = vqmovn_u16(vcombine_u16(gq[0], gq[1]));
+                r[half] = vqmovn_u16(vcombine_u16(rq[0], rq[1]));
+            }
+            uint8x16x4_t out;
+            out.val[0] = vcombine_u8(b[0], b[1]);
+            out.val[1] = vcombine_u8(g[0], g[1]);
+            out.val[2] = vcombine_u8(r[0], r[1]);
+            out.val[3] = vdupq_n_u8(255);
+            vst4q_u8(dst, out);
+        }
+#endif
+        for (; x < s.width; ++x, dst += 4) {
             const int luma = 298 * std::max(int(lumaRow[x]) - 16, 0) + 128;
             const int u = int(uRow[x / 2]) - 128, v = int(vRow[x / 2]) - 128;
             dst[0] = Clamp((luma + 516 * u) >> 8);
@@ -1307,11 +1422,11 @@ unsigned Decoder::SetWorkers(unsigned count) {
     while (impl->workers.size() > count) impl->workers.pop_back();
     try {
         while (impl->workers.size() < count) {
-            std::unique_ptr<Worker> worker(new Worker);
+            std::unique_ptr<Worker> worker(new Worker(unsigned(impl->workers.size())));
             impl->workers.push_back(std::move(worker));
         }
-    } catch (const std::exception &) {
-        // No thread (the Vita fails when its memory budget is spent): fewer workers.
+    } catch (const std::exception &e) {
+        impl->error = e.what();     // no thread: fewer workers
     }
     return unsigned(impl->workers.size());
 }
