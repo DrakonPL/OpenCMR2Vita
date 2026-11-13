@@ -30,6 +30,7 @@ struct SlowExecutor : GfxExecutor {
     std::vector<size_t> preparedCounts;     // of each frame Prepare saw
     std::atomic<int> batchesSeen{ 0 };      // GFX_CMD_SMALL_BATCH commands that reached Execute
     std::atomic<int> destroyed{ 0 };
+    std::atomic<int> finished{ 0 };         // frames whose Execute ended
     // The threaded executor: Execute calls its Wait, as a system dialog does
     // from the GXM executor (Gfx_WaitForExecutor). It returns at once there.
     GfxExecutor *owner = nullptr;
@@ -68,6 +69,7 @@ struct SlowExecutor : GfxExecutor {
             owner->Wait();
         std::this_thread::sleep_for(std::chrono::milliseconds(30));
         commandCounts.push_back(frame.commands.size());
+        finished++;
         running = false;
     }
     void DestroyTexture(GfxTexture *) override
@@ -111,15 +113,13 @@ int main()
     std::vector<GfxTexture *> textures;
     GfxReadback readback;
 
-    // A frame runs on the worker: the call returns after the 10 ms of
-    // Prepare and before the 30 ms of Execute, and the caller's frame has the
-    // contents the worker ran before (none).
+    // A frame runs on the worker: the call returns after Prepare and before
+    // the 30 ms of Execute end (no frame has ended), and the caller's frame
+    // has the contents the worker ran before (none).
     GfxFrame frame = FrameOf(3);
-    const auto start = std::chrono::steady_clock::now();
     threaded->Prepare(frame, textures, readback, true);
     threaded->Execute(frame, textures, readback, true, false, false);
-    const auto returned = std::chrono::steady_clock::now() - start;
-    REQUIRE(returned < std::chrono::milliseconds(25));
+    REQUIRE(slow->finished == 0);
     REQUIRE(frame.commands.empty());
     REQUIRE(slow->preparedCounts.size() == 1 && slow->preparedCounts[0] == 3);
 

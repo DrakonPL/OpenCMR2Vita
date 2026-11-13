@@ -99,8 +99,94 @@ extern "C" void Audio_SetPaused(BOOL paused)
     s_paused = paused != 0;
 }
 
+// ---- the music thread ----
+// The game's streamed music refills its buffer here: a 16 KB block of the
+// file read and decoded for each part of the buffer that played (some 0.4
+// s of music). On the game's thread that was a hitch at times. The thread
+// takes the music lock for each refill; the game takes it while it opens,
+// starts, pauses or closes the music.
+
+namespace {
+
+constexpr int kMusicPriority = 128;     // below the output (96), above the game (160)
+constexpr SceSize kMusicStackBytes = 64 * 1024;     // the refill has a 16 KB block on its stack
+
+SceUID s_musicLock = -1;
+SceUID s_musicThread = -1;
+volatile bool s_musicQuit;
+void (*s_musicRefill)(void);
+SceUInt s_musicPeriodMicros;
+
+int MusicEntry(SceSize, void *)
+{
+    while (!s_musicQuit) {
+        sceKernelDelayThread(s_musicPeriodMicros);
+        if (s_musicQuit)
+            break;
+        Audio_LockMusic();
+        s_musicRefill();
+        Audio_UnlockMusic();
+    }
+    return 0;
+}
+
+} // namespace
+
+extern "C" BOOL Audio_StartMusicThread(void (*refill)(void), DWORD periodMs)
+{
+    if (s_musicThread >= 0)
+        return TRUE;
+    if (refill == NULL || s_port < 0)
+        return FALSE;
+    if (s_musicLock < 0)
+        s_musicLock = sceKernelCreateMutex("audio_music", SCE_KERNEL_MUTEX_ATTR_RECURSIVE, 0, NULL);
+    if (s_musicLock < 0) {
+        Sys_Log("audio: no music lock (0x%08x): the music refills on the game's thread", (unsigned)s_musicLock);
+        return FALSE;
+    }
+    s_musicRefill = refill;
+    s_musicPeriodMicros = (SceUInt)(periodMs > 0 ? periodMs : 20) * 1000;
+    s_musicQuit = false;
+    s_musicThread = sceKernelCreateThread("audio_music", MusicEntry, kMusicPriority, kMusicStackBytes, 0,
+                                          SCE_KERNEL_CPU_MASK_USER_1, NULL);
+    const int started = s_musicThread < 0 ? s_musicThread : sceKernelStartThread(s_musicThread, 0, NULL);
+    if (started < 0) {
+        Sys_Log("audio: no music thread (thread %08x, start %08x): the music refills on the game's thread",
+                (unsigned)s_musicThread, (unsigned)started);
+        if (s_musicThread >= 0)
+            sceKernelDeleteThread(s_musicThread);
+        s_musicThread = -1;
+        return FALSE;
+    }
+    Sys_Log("audio: the music refills on a thread of its own, every %u ms", (unsigned)(s_musicPeriodMicros / 1000));
+    return TRUE;
+}
+
+extern "C" void Audio_StopMusicThread(void)
+{
+    if (s_musicThread < 0)
+        return;
+    s_musicQuit = true;
+    sceKernelWaitThreadEnd(s_musicThread, NULL, NULL);
+    sceKernelDeleteThread(s_musicThread);
+    s_musicThread = -1;
+}
+
+extern "C" void Audio_LockMusic(void)
+{
+    if (s_musicLock >= 0)
+        sceKernelLockMutex(s_musicLock, 1, NULL);
+}
+
+extern "C" void Audio_UnlockMusic(void)
+{
+    if (s_musicLock >= 0)
+        sceKernelUnlockMutex(s_musicLock, 1);
+}
+
 extern "C" void Audio_Shutdown(void)
 {
+    Audio_StopMusicThread();
     if (s_thread >= 0) {
         s_quit = true;
         sceKernelWaitThreadEnd(s_thread, NULL, NULL);

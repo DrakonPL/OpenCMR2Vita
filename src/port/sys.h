@@ -131,6 +131,11 @@ DWORD Sys_SeekFile(SysFile *file, LONG offset, int origin);
 /* Returns the size in bytes, or 0xffffffff on failure. */
 DWORD Sys_GetFileSize(SysFile *file);
 void Sys_FlushFile(SysFile *file);
+/* A file read from its start to its end in parts (the streamed music): the
+   platform keeps two blocks of bytes in memory and reads the next block
+   while the game takes the one before (asynchronous reads on the PS Vita;
+   nothing changes elsewhere). Reads and seeks keep their meaning. */
+void Sys_SetFileReadAhead(SysFile *file, DWORD blockBytes);
 
 BOOL Sys_FileExists(const char *path);
 BOOL Sys_DeleteFile(const char *path);

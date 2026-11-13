@@ -346,6 +346,7 @@ else()
         ${SHADER_HEADER}
         ${ICON_HEADER}
         audio/audio_sdl.cpp
+        platform/streaming_none.cpp
         input/bindings.cpp
         input/input_math.cpp
         input/input_sdl.cpp
