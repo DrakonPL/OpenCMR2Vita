@@ -37,10 +37,14 @@
 #else
 
 #include <math.h>
+#include <stdint.h>
+#include <string.h>
 
 // Rounds an exact result to a 24-bit mantissa, nearest even. hi is the double
-// nearest to it and lo has the sign of the rest (exact result - hi).
-static inline double X87s_Round(double hi, double lo)
+// nearest to it and lo has the sign of the rest (exact result - hi). The
+// general way, through frexp and ldexp: for a zero, a subnormal, an infinity
+// and a NaN, and the reference of tests/x87_round.cpp.
+static inline double X87s_RoundGeneral(double hi, double lo)
 {
     int exponent;
     double m, rounded, other;
@@ -59,6 +63,30 @@ static inline double X87s_Round(double hi, double lo)
             rounded = lo > 0.0 ? fmax(rounded, other) : fmin(rounded, other);
     }
     return ldexp(rounded, exponent);
+}
+
+// PORT: the same result from the bits of hi, without a call into the maths
+// library. The game also computes each vertex it draws with these
+// operations, some ten thousand in a frame, and frexp, nextafterf and ldexp
+// were most of their time on the PS Vita. A normal double has 52 mantissa
+// bits below its leading one, and 23 of them stay. The 29 below are cut, and
+// the result goes one step up when they are above the half, or at the half
+// with the rest on the far side of hi (no rest: to the even neighbour). A
+// step that fills the mantissa carries into the exponent, as it must.
+// tests/x87_round.cpp compares it with X87s_RoundGeneral.
+static inline double X87s_Round(double hi, double lo)
+{
+    uint64_t bits;
+    memcpy(&bits, &hi, sizeof(bits));
+    const unsigned exponent = (unsigned)(bits >> 52) & 0x7ff;
+    if (exponent == 0 || exponent == 0x7ff)
+        return X87s_RoundGeneral(hi, lo);
+    const uint64_t cut = bits & 0x1fffffffull, half = 0x10000000ull, step = 0x20000000ull;
+    bits &= ~0x1fffffffull;
+    if (cut > half || (cut == half && (lo != 0.0 ? (lo > 0.0) == (hi > 0.0) : (bits & step) != 0)))
+        bits += step;
+    memcpy(&hi, &bits, sizeof(hi));
+    return hi;
 }
 
 // Dekker's exact product: a * b == *pHi + *pLo.
@@ -84,10 +112,27 @@ static inline double X87s_Add(double a, double b)
     return X87s_Round(s, (a - (s - bb)) + (b - bb));
 }
 
+// The count of mantissa bits of a normal double, from its leading one to its
+// last one.
+static inline int X87s_MantissaBits(uint64_t bits)
+{
+    return 53 - __builtin_ctzll((bits & 0xfffffffffffffull) | 0x10000000000000ull);
+}
+
+// PORT: most products of the game are of two floats, or of an integer and a
+// float: their mantissas have 53 bits or fewer together, so the double
+// product is exact and has no rest. Only a product of longer mantissas needs
+// the exact product of Dekker (17 operations).
 static inline double X87s_Mul(double a, double b)
 {
     double hi, lo;
+    uint64_t x, y;
 
+    memcpy(&x, &a, sizeof(x));
+    memcpy(&y, &b, sizeof(y));
+    // Two normal numbers (an exponent field of 0 is a zero or a subnormal).
+    if ((x >> 52 & 0x7ff) != 0 && (y >> 52 & 0x7ff) != 0 && X87s_MantissaBits(x) + X87s_MantissaBits(y) <= 53)
+        return X87s_Round(a * b, 0.0);
     X87s_TwoProduct(a, b, &hi, &lo);
     return X87s_Round(hi, lo);
 }
