@@ -11,17 +11,21 @@
 // is. A function that is called more than kTimedCalls times in a frame is
 // timed for its first calls only, and its time is scaled to all its calls.
 //
-// The game runs on one thread: the hooks keep no lock.
+// The hooks time the game's thread only, the thread of the frame function,
+// and keep no lock. Game code also runs on other threads (the music refills
+// of Sound.cpp): the hooks return at once there.
 
 #include "port/sys.h"
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include <algorithm>
 
 #ifdef VITA
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/threadmgr.h>
 static inline uint64_t Now()
 {
     return sceKernelGetProcessTimeWide();
@@ -65,6 +69,52 @@ Open s_stack[kMaxDepth];
 int s_depth = -1;           // below the frame function; -1: not in a frame
 uint32_t s_frame, s_frames;
 uint64_t s_frameStart, s_frameMicros;
+
+// The game's thread, noted at the first call of the frame function. Until
+// then each hook but that of the frame function returns at once.
+#ifdef VITA
+// Its stack: a call with a local outside it is on another thread. (The
+// thread id is a system call for each hook.)
+uintptr_t s_stackLow, s_stackHigh;      // 0: not known
+
+bool OnOtherThread()
+{
+    const char here = 0;
+    const uintptr_t address = (uintptr_t)&here;
+    return s_stackHigh != 0 && (address < s_stackLow || address >= s_stackHigh);
+}
+
+void NoteGameThread()
+{
+    if (s_stackHigh != 0)
+        return;
+    SceKernelThreadInfo info;
+    memset(&info, 0, sizeof(info));
+    info.size = sizeof(info);
+    const int result = sceKernelGetThreadInfo(0, &info);
+    if (result < 0) {
+        Sys_Log("profile: no thread info (0x%08x): the calls of other threads go into the profile",
+                (unsigned)result);
+        return;
+    }
+    s_stackLow = (uintptr_t)info.stack;
+    s_stackHigh = s_stackLow + info.stackSize;
+}
+#else
+thread_local bool t_gameThread;
+bool s_gameThreadKnown;
+
+bool OnOtherThread()
+{
+    return s_gameThreadKnown && !t_gameThread;
+}
+
+void NoteGameThread()
+{
+    t_gameThread = true;
+    s_gameThreadKnown = true;
+}
+#endif
 
 Entry *Find(void *function)
 {
@@ -111,9 +161,12 @@ void Report()
 
 extern "C" void __cyg_profile_func_enter(void *function, void *)
 {
+    if (OnOtherThread())
+        return;
     if (s_depth < 0) {
         if (function != (void *)&_ZN5CGame29DispatchFrontendResourceStateEv)
             return;
+        NoteGameThread();
         s_depth = 0;
         s_frame++;
         s_frameStart = Now();
@@ -140,7 +193,7 @@ extern "C" void __cyg_profile_func_enter(void *function, void *)
 
 extern "C" void __cyg_profile_func_exit(void *function, void *)
 {
-    if (s_depth < 0)
+    if (OnOtherThread() || s_depth < 0)
         return;
     if (s_depth == 0) {
         // The frame function returns.
