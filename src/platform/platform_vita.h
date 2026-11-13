@@ -35,6 +35,8 @@ void SysVita_FramePresented(bool stats);
 constexpr unsigned kRecorderSampleEvery = 16;
 unsigned long long SysVita_Micros(void);
 void SysVita_RecorderSample(unsigned long long micros);
+// The time of one Gfx_DrawBatch call of the game, with its draws.
+void SysVita_BatchSample(unsigned long long micros, unsigned draws);
 // What the recorder got and made since the start: the draw calls of the
 // game, the draw commands they became, and the bytes of vertices copied into
 // the frames. The heartbeat gives them for each part of the scene.

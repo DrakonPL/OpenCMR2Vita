@@ -6291,7 +6291,9 @@ void RallyData_UpdateViewFrameAndDebugOverlay(CallbackStateMachine *param1, int 
                 (int)g_pGraphics->field917_0x3c0 + 1);
         Font_DrawText(1, CFrontend::m_stringDest, 0, 0x69, (int *)colour, 9);
     }
+    Diagnostics::ScenePart(Diagnostics::SCENE_PART_OFF_ROAD);
     CarDamage_UpdateOrderedCarsOffRoadState(pOrder, (short)orderCount, g_viewScreenRect, maskedView);
+    Diagnostics::ScenePart(Diagnostics::SCENE_PART_VIEW);
     if (CGameInfo::GetGameModeOptionBit19() != 0) {
         if (CGameInfo::GetConfiguredGameMode() != 0xa) {
             if ((char)((CallbackStateMachine *)StageUI_GetRaceResultTable())->records[0].packedState == '\n')
@@ -6305,11 +6307,13 @@ void RallyData_UpdateViewFrameAndDebugOverlay(CallbackStateMachine *param1, int 
     }
     if (RallyData_GetSelectionFlag28() != 0 && CGameInfo::GetSoundOptionBit30() != 0)
         StageObject_UpdateProjectedDistanceFade(maskedView);
+    Diagnostics::ScenePart(Diagnostics::SCENE_PART_TYRE_MARKS);
     if (CGameInfo::IsInRaceMenuOpen() == 0) {
         StageObject_RebuildCarExhaustPoints(maskedView);
         StageObject_UpdateSkidTrails(maskedView);
     }
     StageObject_UpdateRaceSkidTrails(maskedView);
+    Diagnostics::ScenePart(Diagnostics::SCENE_PART_VIEW);
     Race_ClearMessageDrawLatch();
     if (CGameInfo::IsInRaceMenuOpen() != 0 && InRaceMenu_IsPlayerEditingCarSetup(maskedView) == 0)
         return;

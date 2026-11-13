@@ -1757,11 +1757,8 @@ void RecordSmallItem(const GfxVertex *vertices, DWORD vertexCount, const WORD *i
     s_counts.batched++;
 }
 
-} // namespace
-
-extern "C" void Gfx_DrawBatch(const GfxBatchDraw *draws, DWORD count)
+void DrawBatchNow(const GfxBatchDraw *draws, DWORD count, const void *caller)
 {
-    const void *caller = __builtin_return_address(0);
     // The small draws go into the frame as a batch where the executor takes
     // joined draws. Otherwise, and with the trace (a line for each draw),
     // each draw is recorded as the game makes it alone.
@@ -1783,6 +1780,23 @@ extern "C" void Gfx_DrawBatch(const GfxBatchDraw *draws, DWORD count)
         s_traceCaller = caller;
         RecordDraw(GFX_TRIANGLELIST, false, vertices, d.vertexCount, d.indices, d.indexCount, buffer, d.firstVertex);
     }
+}
+
+} // namespace
+
+extern "C" void Gfx_DrawBatch(const GfxBatchDraw *draws, DWORD count)
+{
+    const void *caller = __builtin_return_address(0);
+#if defined(VITA) && defined(OPENCMR2_DEV)
+    // The heartbeat's batch time: a few tens of calls in a frame.
+    if (s_perfStatsSetting != 0) {
+        const unsigned long long start = SysVita_Micros();
+        DrawBatchNow(draws, count, caller);
+        SysVita_BatchSample(SysVita_Micros() - start, (unsigned)count);
+        return;
+    }
+#endif
+    DrawBatchNow(draws, count, caller);
 }
 
 extern "C" void Gfx_DrawPrimitive(int primitive, const GfxVertex *vertices, DWORD vertexCount)

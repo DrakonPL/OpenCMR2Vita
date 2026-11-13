@@ -15,6 +15,7 @@
 #include "render/gxm_fragment_uniforms.h"
 #include "render/gxm_key_cache.h"
 #include "render/gxm_readback.h"
+#include "render/gxm_snapshot_stage.h"
 #include "render/gxm_textures.h"
 #include "render/gxm_vertex_uniforms.h"
 #include "render/gxm_viewport.h"
@@ -442,6 +443,8 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     bool keepUniforms = false, keepUniformsTested = false;
     bool loggedSplit = false, loggedRing = false, loggedPrimitive = false, loggedStaticFull = false;
     uint32_t executeCount = 0;      // Execute calls (GxmVertexBuffer::snapshotExecute)
+    // The snapshots that Prepare copied, for the ring in Execute.
+    GxmSnapshotStage snapshotStage;
 
     // Textures made or destroyed in this frame; in an earlier one, not logged yet.
     bool texturesChanged = false, texturesLogPending = false;
@@ -1751,7 +1754,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     // ---- frame execution ----
 
     // What reads the recorder's objects: the textures and the vertex buffers
-    // go to the GPU, the snapshots of the buffers into the ring, and the
+    // go to the GPU, the snapshots of the buffers into the stage, and the
     // readback is taken and asked for. With the threaded executor this runs
     // on the game's thread while no Execute runs, and Execute reads only the
     // frame (gfx_threaded.cpp).
@@ -1779,25 +1782,22 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         gpuTextures.Upload(textures, presented);
         texturesChanged = gpuTextures.TakeChanged() || texturesChanged;
         UploadVertexBuffers(frame);
-        // The part of each buffer locked recently that the frame draws, once.
+        // The part of each buffer locked recently that the frame draws, once:
+        // into the stage here, into the ring in Execute (gxm_snapshot_stage.h).
         executeCount++;
-        GxmFrameRing &ring = memory.FrameRing();
         for (const GfxSnapshot &snapshot : frame.snapshots) {
             GfxVertexBuffer *b = snapshot.buffer;
             GxmVertexBuffer *g = (GxmVertexBuffer *)b->gpu;
             if (g == nullptr)
                 b->gpu = g = new GxmVertexBuffer;
-            const unsigned bytes = (snapshot.end - snapshot.first) * (unsigned)sizeof(GfxVertex);
             g->snapshotExecute = executeCount;
             g->snapshotFirst = snapshot.first;
-            g->snapshotOffset = snapshot.end <= b->vertices.size() ? ring.Alloc(bytes, 16) : GxmFrameRing::kFull;
-            if (g->snapshotOffset != GxmFrameRing::kFull) {
-                memcpy(ring.At(g->snapshotOffset), &b->vertices[snapshot.first], bytes);
-                stats.snapshotBytes += bytes;
-            } else if (!loggedRing) {
-                Sys_Log("gxm: a frame is larger than its ring slot: its draws are dropped");
-                loggedRing = true;
-            }
+            g->snapshotOffset = GxmFrameRing::kFull;
+            if (snapshot.end > b->vertices.size())
+                continue;
+            const unsigned bytes = (snapshot.end - snapshot.first) * (unsigned)sizeof(GfxVertex);
+            snapshotStage.Add(&b->vertices[snapshot.first], bytes, &g->snapshotOffset);
+            stats.snapshotBytes += bytes;
         }
         // The readback of this frame: a rectangle of its display buffer, read
         // when the GPU has done it (the lens flare test of a later frame
@@ -1822,15 +1822,25 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         if (!ready)
             return;
         const uint64_t entered = sceKernelGetProcessTimeWide();
-        // The frame's vertices and indices, after those of its earlier Execute calls.
+        // The snapshots of Prepare, then the frame's vertices and indices,
+        // after those of its earlier Execute calls.
         GxmFrameRing &ring = memory.FrameRing();
+        unsigned snapshotOffset = 0;
+        if (snapshotStage.Bytes() > 0) {
+            snapshotOffset = ring.Alloc(snapshotStage.Bytes(), GxmSnapshotStage::kAlign);
+            if (snapshotOffset != GxmFrameRing::kFull)
+                memcpy(ring.At(snapshotOffset), snapshotStage.Data(), snapshotStage.Bytes());
+        }
+        snapshotStage.Publish(snapshotOffset);
         const unsigned vertexOffset = ring.Alloc((unsigned)frame.vertices.size(), 16);
         const unsigned indexOffset = ring.Alloc((unsigned)(frame.indices.size() * 2), 4);
         if (vertexOffset != GxmFrameRing::kFull)
             memcpy(ring.At(vertexOffset), frame.vertices.data(), frame.vertices.size());
         if (indexOffset != GxmFrameRing::kFull)
             memcpy(ring.At(indexOffset), frame.indices.data(), frame.indices.size() * 2);
-        if ((vertexOffset == GxmFrameRing::kFull || indexOffset == GxmFrameRing::kFull) && !loggedRing) {
+        if ((snapshotOffset == GxmFrameRing::kFull || vertexOffset == GxmFrameRing::kFull ||
+             indexOffset == GxmFrameRing::kFull) &&
+            !loggedRing) {
             Sys_Log("gxm: a frame is larger than its ring slot: its draws are dropped");
             loggedRing = true;
         }
