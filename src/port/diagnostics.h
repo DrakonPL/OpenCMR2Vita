@@ -22,6 +22,8 @@ enum {
     SCENE_PART_CAR_SHADOWS, // the shadow geometry of the cars
     SCENE_PART_REFLECTIONS, // the cube maps of the car reflections, and the view masks of the cars
     SCENE_PART_HUD,         // the dash and the HUD of the view
+    SCENE_PART_OFF_ROAD,    // the off-road state of the cars in the view (a part of the view)
+    SCENE_PART_TYRE_MARKS,  // the skid trails and the tyre marks (a part of the view)
     SCENE_PART_COUNT
 };
 

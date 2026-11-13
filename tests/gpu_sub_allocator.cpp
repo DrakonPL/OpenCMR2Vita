@@ -1,14 +1,16 @@
 // The GPU memory bookkeeping of the GXM executor without GXM: the
 // sub-allocator (render/gpu_sub_allocator.h), the pool over it
-// (render/gpu_pool.h) with heap arenas, and the frame ring's clamp
-// (render/gxm_frame_ring.h).
+// (render/gpu_pool.h) with heap arenas, the frame ring's clamp
+// (render/gxm_frame_ring.h), and the snapshot stage (render/gxm_snapshot_stage.h).
 
 #include "render/gpu_pool.h"
 #include "render/gxm_frame_ring.h"
+#include "render/gxm_snapshot_stage.h"
 
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <new>
 #include <vector>
 
@@ -154,11 +156,53 @@ int FrameRing()
     return 0;
 }
 
+int SnapshotStage()
+{
+    GxmSnapshotStage stage;
+    unsigned char a[20], b[7], c[32];
+    for (unsigned i = 0; i < sizeof(a); i++)
+        a[i] = (unsigned char)(i + 1);
+    for (unsigned i = 0; i < sizeof(b); i++)
+        b[i] = (unsigned char)(100 + i);
+    for (unsigned i = 0; i < sizeof(c); i++)
+        c[i] = (unsigned char)(200 + i);
+    unsigned offsetA = 1, offsetB = 1, offsetC = 1;
+
+    // Each snapshot starts at an offset of kAlign; Publish gives each its
+    // ring offset, and its bytes are there after one copy of the stage.
+    stage.Add(a, sizeof(a), &offsetA);
+    stage.Add(b, sizeof(b), &offsetB);
+    stage.Add(c, sizeof(c), &offsetC);
+    REQUIRE(stage.Bytes() == 48 + sizeof(c));
+    std::vector<unsigned char> ring(1024);
+    const unsigned base = 256;
+    memcpy(ring.data() + base, stage.Data(), stage.Bytes());
+    stage.Publish(base);
+    REQUIRE(offsetA == base && offsetB == base + 32 && offsetC == base + 48);
+    REQUIRE(offsetB % GxmSnapshotStage::kAlign == 0 && offsetC % GxmSnapshotStage::kAlign == 0);
+    REQUIRE(memcmp(ring.data() + offsetA, a, sizeof(a)) == 0);
+    REQUIRE(memcmp(ring.data() + offsetB, b, sizeof(b)) == 0);
+    REQUIRE(memcmp(ring.data() + offsetC, c, sizeof(c)) == 0);
+
+    // After Publish the stage is empty: the next frame starts at offset 0.
+    REQUIRE(stage.Bytes() == 0);
+    stage.Add(b, sizeof(b), &offsetB);
+    stage.Publish(base);
+    REQUIRE(offsetB == base);
+
+    // A ring with no room: each snapshot gets kFull, and its draws are dropped.
+    stage.Add(a, sizeof(a), &offsetA);
+    stage.Add(c, sizeof(c), &offsetC);
+    stage.Publish(GxmFrameRing::kFull);
+    REQUIRE(offsetA == GxmFrameRing::kFull && offsetC == GxmFrameRing::kFull && stage.Bytes() == 0);
+    return 0;
+}
+
 } // namespace
 
 int main()
 {
-    if (SubAllocator() || Pool() || FrameRing())
+    if (SubAllocator() || Pool() || FrameRing() || SnapshotStage())
         return 1;
     printf("gpu_sub_allocator: ok\n");
     return 0;
