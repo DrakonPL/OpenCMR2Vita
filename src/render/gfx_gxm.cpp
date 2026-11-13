@@ -348,6 +348,11 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     // The back buffer as it was at GFX_CMD_BACKDROP: the distance fade reads it.
     GxmTexture backdrop;
     int backdropW = 0, backdropH = 0;
+    // The back buffer's size divided by this is the backdrop's
+    // (video.backdrop_scale, 2 by default, 1 for the full size). The copy
+    // cost 2.9 ms of the GPU in each frame at 960x544; the scenery that
+    // fades shows a backdrop of half the size, filtered, behind it.
+    int backdropScale = 2;
     unsigned nextBackdropTiming = 0;
     // The readback: the notification word the GPU writes after a frame that
     // has one, the last value asked for, and the read not collected yet.
@@ -674,6 +679,8 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         showFps = Platform_GetSettingInt("video.show_fps", 0) != 0;
 #endif
         // Without it the scenery does not fade, and the game still runs.
+        const int scale = Platform_GetSettingInt("video.backdrop_scale", 2);
+        backdropScale = scale < 1 ? 1 : scale > 4 ? 4 : scale;
         CreateBackdrop();
         return true;
     }
@@ -743,11 +750,13 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                 keepUniforms ? "yes" : "no", (unsigned)a, (unsigned)b, (unsigned)c, drawn ? "ok" : "failed");
     }
 
-    // The backdrop target, the size of the back buffer, from the texture pool.
-    // SetMode waited for the GPU before a size change.
+    // The backdrop target, from the texture pool: the size of the back buffer
+    // divided by backdropScale. SetMode waited for the GPU before a size
+    // change.
     void CreateBackdrop()
     {
-        const int w = device.Width(), h = device.Height();
+        const int w = (device.Width() + backdropScale - 1) / backdropScale;
+        const int h = (device.Height() + backdropScale - 1) / backdropScale;
         if (backdrop.target != nullptr && w == backdropW && h == backdropH)
             return;
         ReleaseBackdrop();
@@ -775,8 +784,10 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             ReleaseBackdrop();
             return;
         }
-        // Read pixel for pixel (copy_f and the fade both sample texel centres).
-        gpuTextures.SetSampler(backdrop, GFX_FILTER_POINT, GFX_FILTER_POINT, GFX_MIPFILTER_NONE, GFX_ADDRESS_CLAMP);
+        // Read pixel for pixel at the size of the back buffer (copy_f and the
+        // fade both sample texel centres); smaller, between its texels.
+        const int filter = backdropScale > 1 ? GFX_FILTER_LINEAR : GFX_FILTER_POINT;
+        gpuTextures.SetSampler(backdrop, filter, filter, GFX_MIPFILTER_NONE, GFX_ADDRESS_CLAMP);
         backdropW = w;
         backdropH = h;
     }
@@ -1644,8 +1655,12 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         SceGxmTexture source;
         if (!device.BackBufferTexture(&source))
             return;
-        sceGxmTextureSetMinFilter(&source, SCE_GXM_TEXTURE_FILTER_POINT);
-        sceGxmTextureSetMagFilter(&source, SCE_GXM_TEXTURE_FILTER_POINT);
+        // A smaller backdrop: each of its pixels reads the middle of its 2x2
+        // pixels of the back buffer, which the linear filter averages.
+        const SceGxmTextureFilter filter =
+            backdropScale > 1 ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT;
+        sceGxmTextureSetMinFilter(&source, filter);
+        sceGxmTextureSetMagFilter(&source, filter);
         bool timed = false;
         uint64_t start = 0;
 #ifdef OPENCMR2_DEV
