@@ -393,6 +393,10 @@ inline void VertexBox(const GfxVertex *vertices, DWORD count, float low[3], floa
 // (then on with an executor that takes joined draws). Read again at each
 // present.
 int s_cullSetting = -2, s_snapshotSetting = -2, s_mergeGroundSetting = -2;
+// video.range_locks: 0 makes a lock of a part of a vertex buffer a lock of
+// the whole buffer (Gfx_LockVertexBufferRange), as it is for an executor
+// that takes no joined draws.
+int s_rangeLockSetting = 1;
 // video.alpha_blend and video.alpha_test: 0 draws each 3D draw without
 // blending, or without the alpha test, for a test of what they cost on the
 // GPU. The transparent objects (the trees, the fences, the shadows, the
@@ -418,6 +422,7 @@ void ReadDrawSettings()
     s_cullSetting = Platform_GetSettingInt("video.cull_draws", -1);
     s_snapshotSetting = Platform_GetSettingInt("video.buffer_snapshots", -1);
     s_mergeGroundSetting = Platform_GetSettingInt("video.merge_ground", -1);
+    s_rangeLockSetting = Platform_GetSettingInt("video.range_locks", 1);
     s_alphaBlendSetting = Platform_GetSettingInt("video.alpha_blend", 1);
     s_alphaTestSetting = Platform_GetSettingInt("video.alpha_test", 1);
     s_perfStatsSetting = Platform_GetSettingInt("video.perf_stats", 1);
@@ -448,6 +453,15 @@ bool SnapshotsWanted()
     if (s_snapshotSetting == -2)
         ReadDrawSettings();
     return s_executor->JoinsDraws() && s_snapshotSetting != 0;
+}
+
+// Whether a lock of a part of a vertex buffer is such a lock
+// (gfx_range_locks.h): the executor writes the patches of a frame.
+bool RangeLocksWanted()
+{
+    if (s_cullSetting == -2)
+        ReadDrawSettings();
+    return s_executor != NULL && s_executor->JoinsDraws() && s_rangeLockSetting != 0;
 }
 
 // The matrix from a draw's own space to the clip space (world, view and
@@ -492,17 +506,22 @@ bool BoxOutsideView(const float *m, const GfxBox &b)
 
 // A hash of the positions of a buffer: the boxes of its ranges stay while
 // it is the same.
-uint64_t PositionHash(const GfxVertexBuffer *b)
+uint64_t PositionHash(const GfxVertex *vertices, size_t count)
 {
     uint64_t h = 0x9e3779b97f4a7c15ull;
-    for (const GfxVertex &v : b->vertices) {
+    for (size_t i = 0; i < count; i++) {
         uint32_t w[3];
-        memcpy(w, &v.x, sizeof(w));
+        memcpy(w, &vertices[i].x, sizeof(w));
         h = (h ^ w[0]) * 0x100000001b3ull;
         h = (h ^ w[1]) * 0x100000001b3ull;
         h = (h ^ w[2]) * 0x100000001b3ull;
     }
     return h;
+}
+
+uint64_t PositionHash(const GfxVertexBuffer *b)
+{
+    return PositionHash(b->vertices.data(), b->vertices.size());
 }
 
 // The box of the positions of a range of a buffer. A streaming buffer
@@ -918,19 +937,27 @@ void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD 
     cmd.primitive = primitive;
     cmd.transformed = transformed;
     cmd.vertexCount = vertexCount;
-    if (buffer != NULL && s_presentedFrames - buffer->lastLockFrame >= kStaticAfterFrames) {
+    const bool rested = buffer != NULL && s_presentedFrames - buffer->lastLockFrame >= kStaticAfterFrames;
+    if (rested && !buffer->rangeLocks.Recent(firstVertex, vertexCount, s_presentedFrames)) {
         cmd.buffer = buffer;
         cmd.firstVertexByte = firstVertex * (uint32_t)sizeof(GfxVertex);
         if (buffer->referencedRecord != s_record) {
             buffer->referencedRecord = s_record;
             s_frame.buffers.push_back(buffer);
+            // The parts that rested go into the GPU copy before the draws
+            // of this recording (gfx_range_locks.h).
+            buffer->rangeLocks.TakeRested(s_presentedFrames, (uint32_t)buffer->vertices.size(),
+                                          [buffer](uint32_t first, uint32_t end) {
+                                              s_frame.patches.push_back({ buffer, first, end });
+                                              buffer->patchRecord = s_record;
+                                          });
         }
         if (box && knownBox != NULL) {
             cmd.hasBox = true;
             memcpy(cmd.boxLow, knownBox->low, sizeof(cmd.boxLow));
             memcpy(cmd.boxHigh, knownBox->high, sizeof(cmd.boxHigh));
         }
-    } else if (buffer != NULL && !buffer->streaming && SnapshotsWanted()) {
+    } else if (buffer != NULL && !rested && !buffer->streaming && SnapshotsWanted()) {
         // A buffer locked recently, before its draws: the executor copies
         // the part that the frame draws once. The recorder copied each draw
         // range, and the executor copied the frame again: with the stage
@@ -1673,11 +1700,49 @@ extern "C" GfxVertex *Gfx_LockVertexBuffer(GfxVertexBuffer *buffer)
     buffer->version++;
     buffer->lastLockFrame = s_presentedFrames;
     buffer->positionsUnknown = true;
+    buffer->openCount = 0;
     return buffer->vertices.data();
 }
 
-extern "C" void Gfx_UnlockVertexBuffer(GfxVertexBuffer *)
+extern "C" GfxVertex *Gfx_LockVertexBufferRange(GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount)
 {
+    if (buffer == NULL)
+        return NULL;
+    // Only a buffer whose draws refer to its GPU copy has parts: a buffer
+    // that was locked whole a short time ago has a snapshot or copies.
+    if (!RangeLocksWanted() || buffer->streaming || vertexCount == 0 ||
+        firstVertex + vertexCount > buffer->vertices.size() ||
+        s_presentedFrames - buffer->lastLockFrame < kStaticAfterFrames)
+        return Gfx_LockVertexBuffer(buffer);
+    // The draws recorded so far that refer to the GPU copy keep its
+    // contents: the copy changes only with a patch. A patch of this frame
+    // for these vertices would take what the game writes now: the draws
+    // recorded so far run first.
+    if (buffer->patchRecord == s_record) {
+        bool patched = false;
+        for (const GfxPatch &p : s_frame.patches)
+            patched = patched || (p.buffer == buffer && p.first < firstVertex + vertexCount && p.end > firstVertex);
+        if (patched)
+            Flush(FLUSH_BUFFER_LOCK);
+    }
+    if (s_copied.buffer == buffer)
+        s_copied = CopiedRange();
+    buffer->rangeLocks.Lock(firstVertex, vertexCount, s_presentedFrames);
+    buffer->openFirst = firstVertex;
+    buffer->openCount = vertexCount;
+    buffer->openHash = PositionHash(&buffer->vertices[firstVertex], vertexCount);
+    return buffer->vertices.data();
+}
+
+extern "C" void Gfx_UnlockVertexBuffer(GfxVertexBuffer *buffer)
+{
+    // After a range lock: the boxes of the buffer stay while the game wrote
+    // the positions that were there (the stage lighting writes colours).
+    if (buffer == NULL || buffer->openCount == 0)
+        return;
+    if (PositionHash(&buffer->vertices[buffer->openFirst], buffer->openCount) != buffer->openHash)
+        buffer->positionsUnknown = true;
+    buffer->openCount = 0;
 }
 
 extern "C" BOOL Gfx_IsRangeVisible(GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount)

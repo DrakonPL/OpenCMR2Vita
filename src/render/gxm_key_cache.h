@@ -70,7 +70,44 @@ template <typename T, unsigned kBits> struct GxmKeyCache {
         used = 0;
     }
 
+    // Takes the key out. Returns whether it was there.
+    bool Remove(uint64_t key)
+    {
+        if (slots.empty())
+            return false;
+        const unsigned mask = (unsigned)slots.size() - 1;
+        unsigned i = Hash(key) & mask;
+        while (slots[i].key != key) {
+            if (slots[i].key == kNoKey)
+                return false;
+            i = (i + 1) & mask;
+        }
+        slots[i].key = kNoKey;
+        used--;
+        // The keys after it in its run of slots find their slots again: a
+        // find stops at the first empty slot.
+        for (unsigned j = (i + 1) & mask; slots[j].key != kNoKey; j = (j + 1) & mask) {
+            const Slot moved = slots[j];
+            slots[j].key = kNoKey;
+            used--;
+            Put(moved.key) = moved.value;
+        }
+        return true;
+    }
+
+    // Takes out each key for which stale(key) is true.
+    template <typename Stale> void RemoveIf(Stale stale)
+    {
+        removed.clear();
+        for (const Slot &s : slots)
+            if (s.key != kNoKey && stale(s.key))
+                removed.push_back(s.key);
+        for (const uint64_t key : removed)
+            Remove(key);
+    }
+
 private:
+    std::vector<uint64_t> removed;  // the keys of a RemoveIf, kept for the next one
     void Grow()
     {
         if (slots.empty()) {

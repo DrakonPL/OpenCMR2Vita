@@ -80,6 +80,35 @@ int main()
     }
     REQUIRE(found == (int)cache.used && cache.Find((uint64_t)12 << 32 | 5) == nullptr);
 
+    // A key that is taken out is not found, and each other key is: the keys
+    // behind it in a full run of slots (a small table, half in use) stay.
+    static GxmKeyCache<int, 4> small;
+    for (int i = 0; i < 8; i++)
+        small.Put((uint64_t)i * 7) = i;
+    REQUIRE(small.slots.size() == 16 && small.used == 8);
+    for (int gone = 0; gone < 8; gone++) {
+        REQUIRE(small.Remove((uint64_t)gone * 7) && !small.Remove((uint64_t)gone * 7));
+        REQUIRE(small.Find((uint64_t)gone * 7) == nullptr && small.used == 7);
+        for (int i = 0; i < 8; i++) {
+            const int *value = small.Find((uint64_t)i * 7);
+            REQUIRE(i == gone || (value != nullptr && *value == i));
+        }
+        small.Put((uint64_t)gone * 7) = gone;
+    }
+    REQUIRE(!small.Remove(999));
+
+    // The keys that a test names go, the others stay (the ranges that a
+    // patch of a vertex buffer touches).
+    cache.Clear();
+    for (int i = 0; i < 1000; i++)
+        cache.Put((uint64_t)i << 32 | 4) = i;
+    cache.RemoveIf([](uint64_t key) { return (key >> 32) % 3 == 0; });
+    REQUIRE(cache.used == 666);
+    for (int i = 0; i < 1000; i++) {
+        const int *value = cache.Find((uint64_t)i << 32 | 4);
+        REQUIRE(i % 3 == 0 ? value == nullptr : (value != nullptr && *value == i));
+    }
+
     printf("gxm_key_cache: ok\n");
     return 0;
 }
