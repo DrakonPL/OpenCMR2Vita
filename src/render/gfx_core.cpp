@@ -26,6 +26,7 @@ enum {
     FLUSH_ATLAS,            // a texture of the atlas goes or changes
     FLUSH_BUFFER_GONE,      // a vertex buffer that the draws use goes
     FLUSH_BUFFER_LOCK,      // a vertex buffer that the draws use is locked
+    FLUSH_BATCH_LOCK,       // vertices that the small batches refer to are locked
     FLUSH_TEXTURE_LOCK,     // a texture that the draws use is locked
     FLUSH_REPLACEMENT,      // a texture gets another replacement
     FLUSH_COUNT
@@ -185,7 +186,7 @@ const char *const kChangedNames[CHANGED_COUNT] = { "none", "first", "world", "vi
                                                    "material", "lighting", "fog", "fade", "depth", "cull", "blend",
                                                    "alpha test", "factor", "stage 0", "stage 1", "viewport" };
 
-const char *const kFlushNames[FLUSH_COUNT] = { "atlas", "buffer gone", "buffer lock", "texture lock",
+const char *const kFlushNames[FLUSH_COUNT] = { "atlas", "buffer gone", "buffer lock", "batch lock", "texture lock",
                                                "replacement" };
 
 struct RecorderCounts {
@@ -286,39 +287,59 @@ const AtlasEntry *AtlasEntryOf(GfxTexture *t)
     return &s_atlasEntries.back();
 }
 
+// Whether the state gives a small draw in world space the atlas: one clamped
+// texture, with the coordinates of the vertex.
+bool AtlasStateFits()
+{
+    if (s_atlasWanted < 0)
+        s_atlasWanted = Platform_GetSettingInt("video.quad_atlas", 1) != 0 ? 1 : 0;
+    s_noAtlas = NO_ATLAS_OFF;
+    if (s_atlasWanted == 0)
+        return false;
+    const GfxStageState &stage = s_state.stages[0];
+    s_noAtlas = NO_ATLAS_TEXTURE;
+    if (stage.texture == NULL)
+        return false;
+    // A second stage that is off reads no texture.
+    s_noAtlas = NO_ATLAS_STAGE1;
+    if (s_state.stages[1].texture != NULL && s_state.stages[1].colorOp != GFX_TOP_DISABLE)
+        return false;
+    s_noAtlas = NO_ATLAS_ADDRESS;
+    if (stage.address != GFX_ADDRESS_CLAMP)
+        return false;
+    s_noAtlas = NO_ATLAS_SOURCE;
+    return stage.texCoordIndex == 0 && stage.textureTransform == GFX_TTFF_DISABLE;
+}
+
+// The place of the texture of the state in the atlas, or NULL.
+const AtlasEntry *AtlasEntryOfState()
+{
+    const AtlasEntry *e = AtlasEntryOf(s_state.stages[0].texture);
+    if (e != NULL)
+        s_atlasRecord = s_record;
+    return e;
+}
+
 // The place in the atlas of the texture of a small draw in world space (stage
 // 0 of the state), or NULL where the draw stays with its texture. A draw goes
 // to the atlas with one clamped texture and coordinates inside it: the atlas
 // then gives each pixel what the texture gave.
 const AtlasEntry *AtlasPlaceOf(const GfxVertex *vertices, DWORD count)
 {
-    if (s_atlasWanted < 0)
-        s_atlasWanted = Platform_GetSettingInt("video.quad_atlas", 1) != 0 ? 1 : 0;
-    s_noAtlas = NO_ATLAS_OFF;
-    if (s_atlasWanted == 0)
-        return NULL;
-    const GfxStageState &stage = s_state.stages[0];
-    s_noAtlas = NO_ATLAS_TEXTURE;
-    if (stage.texture == NULL)
-        return NULL;
-    // A second stage that is off reads no texture.
-    s_noAtlas = NO_ATLAS_STAGE1;
-    if (s_state.stages[1].texture != NULL && s_state.stages[1].colorOp != GFX_TOP_DISABLE)
-        return NULL;
-    s_noAtlas = NO_ATLAS_ADDRESS;
-    if (stage.address != GFX_ADDRESS_CLAMP)
-        return NULL;
-    s_noAtlas = NO_ATLAS_SOURCE;
-    if (stage.texCoordIndex != 0 || stage.textureTransform != GFX_TTFF_DISABLE)
+    if (!AtlasStateFits())
         return NULL;
     s_noAtlas = NO_ATLAS_RANGE;
-    for (DWORD i = 0; i < count; i++)
-        if (!(vertices[i].u0 >= 0.0f && vertices[i].u0 <= 1.0f && vertices[i].v0 >= 0.0f && vertices[i].v0 <= 1.0f))
-            return NULL;
-    const AtlasEntry *e = AtlasEntryOf(stage.texture);
-    if (e != NULL)
-        s_atlasRecord = s_record;
-    return e;
+    if (!Gfx_AtlasCoordinatesFit(vertices, count))
+        return NULL;
+    return AtlasEntryOfState();
+}
+
+// The place for a draw of a small batch, whose vertices the recorder does
+// not read: the place of its texture, for the case that its coordinates are
+// inside the texture (Gfx_ExpandSmallBatches looks at them).
+const AtlasEntry *AtlasPlaceOfBatchDraw()
+{
+    return AtlasStateFits() ? AtlasEntryOfState() : NULL;
 }
 
 // The atlas for a small draw in world space, with the draw's texture
@@ -1674,8 +1695,10 @@ extern "C" void Gfx_DestroyVertexBuffer(GfxVertexBuffer *buffer)
 {
     if (buffer == NULL)
         return;
-    // Draws recorded this frame may still use it.
-    if (buffer->referencedRecord == s_record || buffer->snapshotRecord == s_record)
+    // Draws recorded this frame may still use it. The executor waits for
+    // its worker, which reads the vertices of the small batches.
+    if (buffer->referencedRecord == s_record || buffer->snapshotRecord == s_record ||
+        buffer->batchBlocks.Latest() == s_record)
         Flush(FLUSH_BUFFER_GONE);
     if (s_executor != NULL)
         s_executor->DestroyVertexBuffer(buffer);
@@ -1685,10 +1708,31 @@ extern "C" void Gfx_DestroyVertexBuffer(GfxVertexBuffer *buffer)
     delete buffer;
 }
 
+// The recordings before this one have no small batch that is not draws yet
+// (GfxExecutor::WaitForBatches returned after they went to the executor).
+static uint32_t s_batchesSettledBefore;
+
+// Before the game writes count vertices of a buffer from first: the small
+// batches that refer to them are draws (GfxSmallItem::buffer). Those of this
+// recording run first, and the worker of the threaded executor is done with
+// those of the frames before. Rare: the game writes a mesh (the stage
+// lighting) before it draws it, and mostly a mesh that was not in the view.
+static void SettleBatches(GfxVertexBuffer *buffer, uint32_t first, uint32_t count)
+{
+    const uint32_t latest = buffer->batchBlocks.Latest(first, count);
+    if (latest == 0 || latest < s_batchesSettledBefore || s_executor == NULL)
+        return;
+    if (latest == s_record)
+        Flush(FLUSH_BATCH_LOCK);
+    s_executor->WaitForBatches();
+    s_batchesSettledBefore = s_record;
+}
+
 extern "C" GfxVertex *Gfx_LockVertexBuffer(GfxVertexBuffer *buffer)
 {
     if (buffer == NULL)
         return NULL;
+    SettleBatches(buffer, 0, (uint32_t)buffer->vertices.size());
     // Draws recorded this frame refer to the contents before this lock: run
     // them first. It is rare: buffers drawn by reference are rarely locked.
     // A buffer that the frame has a snapshot of is streaming from now on:
@@ -1714,6 +1758,7 @@ extern "C" GfxVertex *Gfx_LockVertexBufferRange(GfxVertexBuffer *buffer, DWORD f
         firstVertex + vertexCount > buffer->vertices.size() ||
         s_presentedFrames - buffer->lastLockFrame < kStaticAfterFrames)
         return Gfx_LockVertexBuffer(buffer);
+    SettleBatches(buffer, firstVertex, vertexCount);
     // The draws recorded so far that refer to the GPU copy keep its
     // contents: the copy changes only with a patch. A patch of this frame
     // for these vertices would take what the game writes now: the draws
@@ -1787,8 +1832,10 @@ namespace {
 // matrix and the stage 0 texture of the state. The batch command at the end
 // of the frame's commands takes it while the state it recorded is the state;
 // else a new batch command starts. The atlas place is found here: the atlas
-// belongs to the recorder.
-void RecordSmallItem(const GfxVertex *vertices, DWORD vertexCount, const WORD *indices, DWORD indexCount)
+// belongs to the recorder. The vertices stay in the buffer
+// (GfxSmallItem::buffer): the recorder does not read them.
+void RecordSmallItem(GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount, const WORD *indices,
+                     DWORD indexCount)
 {
 #if defined(VITA) && defined(OPENCMR2_DEV)
     g_sysVitaDrawCounts.calls++;
@@ -1810,29 +1857,33 @@ void RecordSmallItem(const GfxVertex *vertices, DWORD vertexCount, const WORD *i
         g_sysVitaDrawCounts.commands++;
 #endif
     }
-    GfxSmallItem item = {};
+    s_frame.smallItems.emplace_back();
+    GfxSmallItem &item = s_frame.smallItems.back();
     item.world = s_state.world;
-    if (const AtlasEntry *e = AtlasPlaceOf(vertices, vertexCount)) {
-        item.texture = s_atlas;
+    item.buffer = buffer;
+    item.texture = s_state.stages[0].texture;
+    item.atlas = NULL;
+    item.atlasScale = 0.0f;
+    if (const AtlasEntry *e = AtlasPlaceOfBatchDraw()) {
+        item.atlas = s_atlas;
         item.atlasX = e->x;
         item.atlasY = e->y;
         item.textureWidth = e->texture->width;
         item.textureHeight = e->texture->height;
         item.atlasScale = 1.0f / (float)s_atlasSize;
-    } else {
-        item.texture = s_state.stages[0].texture;
     }
-    item.firstVertex = (uint32_t)s_frame.smallVertices.size();
+    item.firstVertex = firstVertex;
     item.vertexCount = vertexCount;
-    s_frame.smallVertices.insert(s_frame.smallVertices.end(), vertices, vertices + vertexCount);
     item.firstIndex = (uint32_t)s_frame.smallIndices.size();
     item.indexCount = indexCount;
     s_frame.smallIndices.insert(s_frame.smallIndices.end(), indices, indices + indexCount);
-    s_frame.smallItems.push_back(item);
     s_frame.commands.back().itemCount++;
+    buffer->batchBlocks.Mark(firstVertex, vertexCount, s_record);
+    // The executor makes ready each texture that the draw can have.
     std::vector<GfxTexture *> &read = s_frame.smallTextures;
-    if (item.texture != NULL && std::find(read.begin(), read.end(), item.texture) == read.end())
-        read.push_back(item.texture);
+    for (GfxTexture *t : { item.texture, item.atlas })
+        if (t != NULL && std::find(read.begin(), read.end(), t) == read.end())
+            read.push_back(t);
     s_counts.batched++;
 }
 
@@ -1850,14 +1901,14 @@ void DrawBatchNow(const GfxBatchDraw *draws, DWORD count, const void *caller)
         GfxVertexBuffer *buffer = d.buffer;
         if (buffer == NULL || d.firstVertex + d.vertexCount > buffer->vertices.size())
             continue;
-        const GfxVertex *vertices = buffer->vertices.data() + d.firstVertex;
         if (batch && d.vertexCount > 0 && d.vertexCount <= kSmallDrawVertices && d.indices != NULL &&
             d.indexCount > 0 && Gfx_SmallDrawWorld(s_state.world, kIdentityMatrix)) {
-            RecordSmallItem(vertices, d.vertexCount, d.indices, d.indexCount);
+            RecordSmallItem(buffer, d.firstVertex, d.vertexCount, d.indices, d.indexCount);
             continue;
         }
         s_traceCaller = caller;
-        RecordDraw(GFX_TRIANGLELIST, false, vertices, d.vertexCount, d.indices, d.indexCount, buffer, d.firstVertex);
+        RecordDraw(GFX_TRIANGLELIST, false, buffer->vertices.data() + d.firstVertex, d.vertexCount, d.indices,
+                   d.indexCount, buffer, d.firstVertex);
     }
 }
 

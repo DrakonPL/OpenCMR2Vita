@@ -89,6 +89,9 @@ struct GfxVertexBuffer {
     // hash of their positions before the game wrote them.
     uint32_t openFirst = 0, openCount = 0;
     uint64_t openHash = 0;
+    // The recordings whose small batches refer to its vertices
+    // (GfxSmallItem::buffer).
+    GfxBlockStamps batchBlocks;
 };
 
 // Bytes of one level, given its size, for a format.
@@ -227,14 +230,23 @@ struct GfxPatch {
 
 // A small 3D draw of a batch (GFX_CMD_SMALL_BATCH), as the game made it: its
 // vertices in their own space, its world matrix, and the texture of stage 0.
-// A draw from the atlas has its place in the atlas (atlasScale is 1 / the
-// size of the atlas, 0 for a draw with its own texture).
+//
+// The vertices stay in the game's vertex buffer: the recorder copied them
+// (some 500 KB in a frame of a wood on the PS Vita, on the game's thread).
+// Gfx_ExpandSmallBatches reads them, on the worker of the threaded executor.
+// The recorder runs the batches of the vertices that the game locks before
+// the game writes them (GfxVertexBuffer::batchBlocks).
+//
+// atlas: the atlas with the texture in it at atlasX, atlasY (atlasScale is 1
+// / the size of the atlas), for a draw whose texture coordinates are inside
+// its texture. NULL: the draw has its own texture.
 struct GfxSmallItem {
     GfxMatrix world;
-    GfxTexture *texture;
+    const GfxVertexBuffer *buffer;
+    GfxTexture *texture, *atlas;
     int atlasX, atlasY, textureWidth, textureHeight;
     float atlasScale;
-    uint32_t firstVertex, vertexCount;      // into GfxFrame::smallVertices
+    uint32_t firstVertex, vertexCount;      // of the buffer
     uint32_t firstIndex, indexCount;        // into GfxFrame::smallIndices
 };
 
@@ -250,7 +262,6 @@ struct GfxFrame {
     // the draws read (each once), for the executor to make ready before the
     // batches are draws.
     std::vector<GfxSmallItem> smallItems;
-    std::vector<GfxVertex> smallVertices;
     std::vector<uint16_t> smallIndices;
     std::vector<GfxTexture *> smallTextures;
     void Reset()
@@ -263,7 +274,6 @@ struct GfxFrame {
         snapshots.clear();
         patches.clear();
         smallItems.clear();
-        smallVertices.clear();
         smallIndices.clear();
         smallTextures.clear();
     }
@@ -311,6 +321,10 @@ struct GfxExecutor {
                          bool vsync, bool stretch = false) = 0;
     // Returns when no Execute runs (the threaded executor's worker is idle).
     virtual void Wait() {}
+    // Returns when the small batches of each frame given to Execute are
+    // draws: nothing reads the vertex buffers of the recorder then. An
+    // executor without a worker has no such frame.
+    virtual void WaitForBatches() {}
     // For the logs, from the threaded executor before each Prepare: what
     // happened since the call before.
     virtual void NoteWorkerTimes(const GfxWorkerTimes &) {}

@@ -1,9 +1,10 @@
 // The small batches of a frame made draws (gfx_internal.h,
 // Gfx_ExpandSmallBatches). The recorder keeps the small draws of a batch as
-// the game made them (Gfx_DrawBatch). Here each one gets what the recorder
-// gives a small draw made alone: its vertices in world space, the view test,
-// its distance, the coordinates of the atlas, and a join with the draw before
-// it. With the threaded executor this runs on the worker thread.
+// the game made them (Gfx_DrawBatch), with their vertices in the game's
+// vertex buffers. Here each one gets what the recorder gives a small draw
+// made alone: its vertices in world space, the view test, its distance, the
+// coordinates of the atlas, and a join with the draw before it. With the
+// threaded executor this runs on the worker thread.
 
 #include "render/gfx_internal.h"
 #include "render/gfx_small_draw.h"
@@ -51,24 +52,31 @@ void Gfx_ExpandSmallBatches(GfxFrame &frame)
         for (uint32_t k = c.firstItem; k < c.firstItem + c.itemCount && k < frame.smallItems.size(); k++) {
             const GfxSmallItem &item = frame.smallItems[k];
             const DWORD count = item.vertexCount;
-            if (count == 0 || count > kGfxSmallDrawVertices ||
-                item.firstVertex + count > frame.smallVertices.size() ||
+            if (count == 0 || count > kGfxSmallDrawVertices || item.buffer == NULL ||
+                item.firstVertex + count > item.buffer->vertices.size() ||
                 item.firstIndex + item.indexCount > frame.smallIndices.size())
                 continue;
+            // The vertices of the game's buffer: the recorder runs this
+            // before the game writes them again.
+            const GfxVertex *source = &item.buffer->vertices[item.firstVertex];
             GfxVertex v[kGfxSmallDrawVertices];
-            Gfx_SmallDrawToWorld(item.world, &frame.smallVertices[item.firstVertex], count, v);
+            Gfx_SmallDrawToWorld(item.world, source, count, v);
             if (c.cull && Gfx_PointsOutsideView(clip, v, count))
                 continue;
             const float reach = Gfx_SmallDrawReach(s.view, v, count);
-            if (item.atlasScale != 0.0f)
+            // The atlas, for coordinates inside the texture.
+            GfxTexture *texture = item.texture;
+            if (item.atlas != NULL && Gfx_AtlasCoordinatesFit(v, count)) {
                 Gfx_AtlasRemap(v, count, item.atlasX, item.atlasY, item.textureWidth, item.textureHeight,
                                item.atlasScale);
+                texture = item.atlas;
+            }
             float low[3], high[3];
             Gfx_VertexBox(v, count, low, high);
             const uint16_t *indices = &frame.smallIndices[item.firstIndex];
             if (run < commands.size()) {
                 GfxCommand &last = commands[run];
-                if (last.textures[0] == item.texture && last.vertexCount + count <= kGfxJoinedVertices &&
+                if (last.textures[0] == texture && last.vertexCount + count <= kGfxJoinedVertices &&
                     last.indexCount % 3 == 0) {
                     AppendVertices(frame, v, count);
                     for (uint32_t i = 0; i < item.indexCount; i++)
@@ -94,7 +102,7 @@ void Gfx_ExpandSmallBatches(GfxFrame &frame)
             draw.indexCount = item.indexCount;
             frame.indices.insert(frame.indices.end(), indices, indices + item.indexCount);
             draw.state = c.state;
-            draw.textures[0] = item.texture;
+            draw.textures[0] = texture;
             draw.textures[1] = c.textures[1];
             draw.hasBox = true;
             memcpy(draw.boxLow, low, sizeof(draw.boxLow));
@@ -106,6 +114,5 @@ void Gfx_ExpandSmallBatches(GfxFrame &frame)
     }
     frame.commands.swap(commands);
     frame.smallItems.clear();
-    frame.smallVertices.clear();
     frame.smallIndices.clear();
 }

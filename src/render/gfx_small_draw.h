@@ -112,6 +112,16 @@ inline void Gfx_VertexBox(const GfxVertex *vertices, DWORD count, float low[3], 
     }
 }
 
+// Whether the texture coordinates of a draw are inside its texture: the
+// atlas then gives each pixel what the texture gave.
+inline bool Gfx_AtlasCoordinatesFit(const GfxVertex *vertices, DWORD count)
+{
+    for (DWORD i = 0; i < count; i++)
+        if (!(vertices[i].u0 >= 0.0f && vertices[i].u0 <= 1.0f && vertices[i].v0 >= 0.0f && vertices[i].v0 <= 1.0f))
+            return false;
+    return true;
+}
+
 // The texture coordinates of a draw moved into the place of its texture in
 // the atlas: the texel x, y of the atlas where the texture starts, the size
 // of the texture, and 1 / the size of the atlas.
