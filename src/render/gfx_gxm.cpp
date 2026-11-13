@@ -362,6 +362,12 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     const GfxDrawState *vertexUniformState = nullptr;
     int vertexUniformW = 0, vertexUniformH = 0;
     bool vertexUniformBackBuffer = false;
+    // The viewport of the state drawn last, in the target's pixels: the
+    // draws of one state on one target have one viewport.
+    const GfxDrawState *viewportState = nullptr;
+    int viewportW = 0, viewportH = 0;
+    bool viewportBackBuffer = false;
+    GfxViewport viewportOfState = {};
     unsigned vertexUniformVersion = 1;
     float vertexUniforms[VU_ROWS][4];
     // The variant and the programs of the keys of the draws before. Most
@@ -1287,7 +1293,14 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         drawState.stages[0].texture = c.textures[0];
         drawState.stages[1].texture = c.textures[1];
         const GfxDrawState &s = drawState;
-        const GfxViewport viewport = ToTarget(s.viewport, s.screenW, s.screenH, backBuffer, targetW, targetH);
+        if (viewportState != &s || viewportW != targetW || viewportH != targetH || viewportBackBuffer != backBuffer) {
+            viewportOfState = ToTarget(s.viewport, s.screenW, s.screenH, backBuffer, targetW, targetH);
+            viewportState = &s;
+            viewportW = targetW;
+            viewportH = targetH;
+            viewportBackBuffer = backBuffer;
+        }
+        const GfxViewport &viewport = viewportOfState;
         // The vertex uniforms of the state: all rows at first, then only the
         // rows that differ from the 3D draw before.
         if (!c.transformed && (vertexUniformState != &s || vertexUniformW != targetW || vertexUniformH != targetH ||
@@ -1690,6 +1703,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         }
         // The frame's states go with this Execute.
         vertexUniformState = nullptr;
+        viewportState = nullptr;
         probe.submitMicros += sceKernelGetProcessTimeWide() - entered;
         if (!present)
             return;

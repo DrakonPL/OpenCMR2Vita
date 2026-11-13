@@ -19,13 +19,15 @@ struct GfxTexture {
     DWORD flags;
     GfxTexture *cube;           // a face view: the cube it belongs to
     int face;                   // a face view: its face
-    GfxTexture *faceViews[6];   // a cube: its face views (1..5; 0 is itself)
-    // CPU copy of every level of every face, tightly packed rows.
-    std::vector<uint8_t> levels[6][16];
+    // What an executor reads for each draw is here, before the levels: one
+    // cache line for a texture, not two a kilobyte apart.
     bool dirty;                 // CPU copy newer than the GPU's
     bool renderedTo;            // the GPU copy is newer (render targets)
     void *gpu;                  // executor's object
     GfxTexture *replacement;    // drawn instead (Gfx_SetTextureReplacement)
+    GfxTexture *faceViews[6];   // a cube: its face views (1..5; 0 is itself)
+    // CPU copy of every level of every face, tightly packed rows.
+    std::vector<uint8_t> levels[6][16];
 };
 
 // The texture a draw reads for t: its cube, or its replacement.
