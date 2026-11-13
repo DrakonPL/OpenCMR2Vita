@@ -30,7 +30,7 @@ add_test(NAME movie_playback COMMAND movie_playback_test)
 
 add_executable(movie_render_state_test movie_render_state.cpp
     ${PROJECT_SOURCE_DIR}/src/diagnostics/observer.cpp
-    ${PROJECT_SOURCE_DIR}/src/video/movie.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_core.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_small_batch.cpp)
+    ${PROJECT_SOURCE_DIR}/src/video/movie.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_core.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_small_batch.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_threaded.cpp)
 target_link_libraries(movie_render_state_test PRIVATE opencmr2_bink SDL3::SDL3)
 add_test(NAME movie_render_state COMMAND movie_render_state_test)
 
@@ -193,10 +193,17 @@ target_include_directories(gxm_fragment_uniforms_test PRIVATE ${PROJECT_SOURCE_D
 add_test(NAME gxm_fragment_uniforms COMMAND gxm_fragment_uniforms_test)
 # The recorder: the states, the joined draws and the vertex copies of a frame.
 add_executable(gfx_record_test gfx_record.cpp
-    ${PROJECT_SOURCE_DIR}/src/diagnostics/observer.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_core.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_small_batch.cpp)
+    ${PROJECT_SOURCE_DIR}/src/diagnostics/observer.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_core.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_small_batch.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_threaded.cpp)
 target_include_directories(gfx_record_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
-target_link_libraries(gfx_record_test PRIVATE SDL3::SDL3)
+find_package(Threads REQUIRED)
+target_link_libraries(gfx_record_test PRIVATE SDL3::SDL3 Threads::Threads)
 add_test(NAME gfx_record COMMAND gfx_record_test)
+# The threaded executor: the frames on a worker, one at a time, in their order.
+add_executable(gfx_threaded_test gfx_threaded.cpp
+    ${PROJECT_SOURCE_DIR}/src/render/gfx_threaded.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_small_batch.cpp)
+target_include_directories(gfx_threaded_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(gfx_threaded_test PRIVATE SDL3::SDL3 Threads::Threads)
+add_test(NAME gfx_threaded COMMAND gfx_threaded_test)
 add_executable(readback_pack_test readback_pack.cpp)
 target_include_directories(readback_pack_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME readback_pack COMMAND readback_pack_test)

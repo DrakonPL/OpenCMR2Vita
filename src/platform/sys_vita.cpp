@@ -148,6 +148,10 @@ char s_logBuffer[kLogBufferBytes];
 size_t s_logUsed;
 uint64_t s_logLastFlush;
 SceUID s_logFile = -1;
+// The renderer's worker thread logs too (render/gfx_threaded.cpp): a line
+// goes into the buffer with this mutex held. Made in Platform_Init, before
+// that thread starts.
+SceUID s_logMutex = -1;
 
 void FlushLog()
 {
@@ -527,6 +531,8 @@ void SysVita_FramePresented(bool stats)
 
 bool Platform_Init(int, char **)
 {
+    if (s_logMutex < 0)
+        s_logMutex = sceKernelCreateMutex("opencmr2_log", 0, 0, NULL);
     s_settings.clear();
     SysSettings::Parse(kVitaDefaults, s_settings);
     s_dirs.Clear();
@@ -673,12 +679,18 @@ extern "C" void Sys_Log(const char *format, ...)
     char stamped[sizeof(line) + 16];
     snprintf(stamped, sizeof(stamped), "[%8.2f] %s", (double)sceKernelGetProcessTimeWide() / 1e6, line);
     sceClibPrintf("%s\n", stamped);
+    if (s_logMutex >= 0)
+        sceKernelLockMutex(s_logMutex, 1, NULL);
     AppendLog(stamped);
     FlushLog();
 #else
     sceClibPrintf("%s\n", line);
+    if (s_logMutex >= 0)
+        sceKernelLockMutex(s_logMutex, 1, NULL);
     AppendLog(line);
 #endif
+    if (s_logMutex >= 0)
+        sceKernelUnlockMutex(s_logMutex, 1);
 }
 
 extern "C" void Sys_Fatal(const char *format, ...)

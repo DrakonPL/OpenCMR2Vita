@@ -26,6 +26,7 @@ static void Flush(void);
 namespace {
 
 GfxExecutor *s_executor;
+bool s_threaded;        // s_executor runs its frames on a worker thread
 GfxDrawState s_state;
 bool s_stateDirty = true;
 // A part of the state that a vertex program reads changed since the state
@@ -1184,6 +1185,16 @@ extern "C" BOOL Gfx_SetVideoMode(int width, int height, BOOL fullscreen)
             break;
 #endif
         }
+        // The frames on a worker thread where the executor permits it (the
+        // GXM one: the OpenGL and SDL_GPU ones draw from the main thread).
+        const bool gxm = ChooseBackend() == BACKEND_GXM;
+        if (Platform_GetSettingInt("video.threaded_render", gxm ? 1 : 0) != 0) {
+            GfxExecutor *inner = s_executor;
+            s_executor = Gfx_CreateThreadedExecutor(inner);
+            s_threaded = s_executor != inner;
+            if (s_threaded)
+                Sys_Log("gfx: the frames run on a worker thread (video.threaded_render)");
+        }
     }
     s_width = width;
     s_height = height;
@@ -1207,6 +1218,7 @@ extern "C" void Gfx_Shutdown(void)
         Gfx_DestroyTexture(s_textures.back());
     delete s_executor;
     s_executor = NULL;
+    s_threaded = false;
 }
 
 extern "C" int Gfx_GetDisplayModeCount(void)
@@ -1240,14 +1252,23 @@ extern "C" void Gfx_EndScene(void)
 {
 }
 
-// Runs the frame recorded so far on the executor: the small batches become
-// draws first.
+// Runs the frame recorded so far on the executor. The small batches become
+// draws first: here, or on the worker of the threaded executor. That one
+// takes the frame's contents; the caller resets what it leaves.
 static void Submit(bool present, bool vsync, bool stretch)
 {
     if (s_executor == NULL)
         return;
-    Gfx_ExpandSmallBatches(s_frame);
+    if (!s_threaded)
+        Gfx_ExpandSmallBatches(s_frame);
+    s_executor->Prepare(s_frame, s_textures, s_readback, present);
     s_executor->Execute(s_frame, s_textures, s_readback, present, vsync, stretch);
+}
+
+void Gfx_WaitForExecutor(void)
+{
+    if (s_executor != NULL)
+        s_executor->Wait();
 }
 
 static void Present(BOOL vsync, bool stretch)
@@ -1874,8 +1895,10 @@ extern "C" void Gfx_SetTextureReplacement(GfxTexture *texture, GfxTexture *repla
     texture = Root(texture);
     if (texture == NULL || texture->replacement == replacement)
         return;
-    // Draws recorded so far read the previous one.
+    // Draws recorded so far read the previous one. They have run (the worker
+    // of the threaded executor reads the replacement too).
     Flush();
+    Gfx_WaitForExecutor();
     Gfx_DestroyTexture(texture->replacement);
     texture->replacement = replacement;
 }
