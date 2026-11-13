@@ -28,6 +28,7 @@ endif()
 
 option(OPENCMR2_SANITIZE "Build with AddressSanitizer and UBSan" OFF)
 option(OPENCMR2_DEV "Dev build: probe and heartbeat lines in the log" OFF)
+option(OPENCMR2_PROFILE_FUNCTIONS "Profiling build: the time of each function of the game in the log (slow)" OFF)
 option(OPENCMR2_VENDORED_SDL "Download and build SDL3 instead of using an installed one" ${ANDROID})
 
 set(CMAKE_CXX_STANDARD 17)
