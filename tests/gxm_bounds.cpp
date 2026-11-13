@@ -49,25 +49,25 @@ int main()
 
     // The eye at the origin, no transform: the farthest corner of the box.
     const float identity[4][4] = { { 1, 0, 0, 0 }, { 0, 1, 0, 0 }, { 0, 0, 1, 0 }, { 0, 0, 0, 1 } };
-    REQUIRE(Near(Gxm_FarthestEyeDistance(b, identity), sqrtf(16 + 36 + 25)));
-    REQUIRE(Near(Gxm_FarthestEyeDistance(point, identity), sqrtf(16 + 0 + 25)));
+    REQUIRE(Near(Gxm_EyeDistanceBound(b, identity), sqrtf(16 + 36 + 25)));
+    REQUIRE(Near(Gxm_EyeDistanceBound(point, identity), sqrtf(16 + 0 + 25)));
     // A translation (row 3) moves the box away from the eye.
     const float away[4][4] = { { 1, 0, 0, 0 }, { 0, 1, 0, 0 }, { 0, 0, 1, 0 }, { 0, 0, 100, 1 } };
-    REQUIRE(Near(Gxm_FarthestEyeDistance(point, away), sqrtf(16 + 105 * 105)));
+    REQUIRE(Near(Gxm_EyeDistanceBound(point, away), sqrtf(16 + 105 * 105)));
 
     // No vertex is farther than the bound: a rotation about y with a scale of
     // 2 and a translation.
     const float c = cosf(0.7f) * 2.0f, s = sinf(0.7f) * 2.0f;
     const float turned[4][4] = { { c, 0, -s, 0 }, { 0, 2, 0, 0 }, { s, 0, c, 0 }, { 3, -7, 40, 1 } };
-    const float bound = Gxm_FarthestEyeDistance(b, turned);
+    const float bound = Gxm_EyeDistanceBound(b, turned);
     float farthest = 0.0f;
     for (int i = 0; i < 4; i++) {
         const float d = EyeDistance(positions[i], turned);
         REQUIRE(d <= bound * 1.0001f);
         farthest = d > farthest ? d : farthest;
     }
-    // And the bound is that of the box, not a looser one: its farthest corner.
-    REQUIRE(bound >= farthest);
+    // The bound is not below the farthest corner of the box, and not far
+    // above it: at most the box's half diagonal after the matrix's scale.
     float cornerMax = 0.0f;
     for (int k = 0; k < 8; k++) {
         const float p[3] = { (k & 1) ? b.high[0] : b.low[0], (k & 2) ? b.high[1] : b.low[1],
@@ -75,7 +75,9 @@ int main()
         const float d = EyeDistance(p, turned);
         cornerMax = d > cornerMax ? d : cornerMax;
     }
-    REQUIRE(Near(bound, cornerMax));
+    REQUIRE(bound >= farthest && bound >= cornerMax * 0.9999f);
+    const float halfDiagonal = 0.5f * sqrtf(6 * 6 + 8 * 8 + 7 * 7) * 2.0f;
+    REQUIRE(bound <= cornerMax + halfDiagonal);
 
     printf("gxm_bounds: ok\n");
     return 0;

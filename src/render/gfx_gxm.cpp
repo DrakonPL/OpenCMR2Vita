@@ -13,6 +13,7 @@
 #include "render/gxm_dialog.h"
 #include "render/gxm_readback.h"
 #include "render/gxm_textures.h"
+#include "render/gxm_vertex_uniforms.h"
 #include "render/gxm_viewport.h"
 #include "render/shader_key.h"
 #include "render/shader_variants_gen.h"
@@ -119,75 +120,6 @@ bool Check(const char *call, int err)
     return err >= 0;
 }
 
-// The source a stage's texture coordinate index names (VU_TEX_COORD).
-float TexCoordSource(DWORD index)
-{
-    if ((index & 0xffff0000) == 0x30000)
-        return 2.0f;    // camera-space reflection vector
-    return (index & 0xffff) == 1 ? 1.0f : 0.0f;
-}
-
-// The rows of vu[] in fixed3d_v.cg (shaders/cg/uniforms.h).
-void FillVertexUniforms(const GfxDrawState &s, const GfxViewport &viewport, float u[VU_ROWS][4])
-{
-    memset(u, 0, sizeof(float) * 4 * VU_ROWS);
-    Multiply(s.world, s.view, u[VU_WORLD_VIEW]);
-    memcpy(u[VU_PROJECTION], &s.projection, 64);
-    memcpy(u[VU_TEXTURE_MATRIX0], &s.texture[0], 64);
-    memcpy(u[VU_TEXTURE_MATRIX1], &s.texture[1], 64);
-    Copy4(s.material.diffuse, u[VU_MATERIAL_DIFFUSE]);
-    Copy4(s.material.ambient, u[VU_MATERIAL_AMBIENT]);
-    Copy4(s.material.specular, u[VU_MATERIAL_SPECULAR]);
-    Copy4(s.material.emissive, u[VU_MATERIAL_EMISSIVE]);
-    Color(s.ambient, u[VU_GLOBAL_AMBIENT]);
-    u[VU_GLOBAL_AMBIENT][3] = s.material.power;
-    // The rows of a light that is off stay 0: fixed3d_v.cg skips it by its
-    // enabled flag, and reads no light when the lighting is off.
-    for (int i = 0; i < 8; i++) {
-        if (!s.lighting || !s.lightEnabled[i])
-            continue;
-        const GfxLight &l = s.lights[i];
-        float(*row)[4] = &u[VU_LIGHTS + i * VU_LIGHT_ROWS];
-        Copy4(l.diffuse, row[VU_LIGHT_DIFFUSE]);
-        Copy4(l.specular, row[VU_LIGHT_SPECULAR]);
-        Copy4(l.ambient, row[VU_LIGHT_AMBIENT]);
-        TransformPoint(l.position, 1.0f, s.view, row[VU_LIGHT_POSITION]);
-        row[VU_LIGHT_POSITION][3] = (float)l.type;
-        TransformPoint(l.direction, 0.0f, s.view, row[VU_LIGHT_DIRECTION]);
-        row[VU_LIGHT_DIRECTION][3] = l.range > 0.0f ? l.range : 1e30f;
-        row[VU_LIGHT_ATTENUATION][0] = l.attenuation0;
-        row[VU_LIGHT_ATTENUATION][1] = l.attenuation1;
-        row[VU_LIGHT_ATTENUATION][2] = l.attenuation2;
-        row[VU_LIGHT_ATTENUATION][3] = l.falloff;
-        row[VU_LIGHT_SPOT][0] = cosf(l.theta * 0.5f);
-        row[VU_LIGHT_SPOT][1] = cosf(l.phi * 0.5f);
-        row[VU_LIGHT_SPOT][2] = 1.0f;
-    }
-    u[VU_LIGHT_FLAGS][0] = s.lighting;
-    u[VU_LIGHT_FLAGS][1] = s.colorVertex;
-    u[VU_LIGHT_FLAGS][2] = s.specular;
-    u[VU_LIGHT_FLAGS][3] = s.localViewer;
-    u[VU_SOURCES][0] = (float)s.diffuseSource;
-    u[VU_SOURCES][1] = (float)s.specularSource;
-    u[VU_SOURCES][2] = (float)s.ambientSource;
-    u[VU_SOURCES][3] = (float)s.emissiveSource;
-    const bool vertexFog = s.fog && s.fogTableMode == GFX_FOG_NONE;
-    u[VU_FOG_FLAGS][0] = vertexFog && s.fogVertexMode == GFX_FOG_LINEAR;
-    u[VU_FOG_FLAGS][1] = s.normalizeNormals;
-    // Direct3D takes the fog factor from the vertex's specular alpha when
-    // fog is on with neither vertex nor table fog (the backdrop of a foggy stage).
-    u[VU_FOG_FLAGS][2] = vertexFog && s.fogVertexMode == GFX_FOG_NONE;
-    u[VU_FOG_PARAMS][0] = s.fogStart;
-    u[VU_FOG_PARAMS][1] = s.fogEnd;
-    u[VU_TEX_COORD][0] = TexCoordSource(s.stages[0].texCoordIndex);
-    u[VU_TEX_COORD][1] = TexCoordSource(s.stages[1].texCoordIndex);
-    u[VU_TEX_COORD][2] = s.stages[0].textureTransform != GFX_TTFF_DISABLE;
-    u[VU_TEX_COORD][3] = s.stages[1].textureTransform != GFX_TTFF_DISABLE;
-    // Direct3D 7's half-pixel offset of the viewport transform.
-    u[VU_TARGET][2] = viewport.width ? 1.0f / viewport.width : 0.0f;
-    u[VU_TARGET][3] = viewport.height ? -1.0f / viewport.height : 0.0f;
-}
-
 // The rows of fu[] in the fixed_f variants (shaders/cg/uniforms.h). fade:
 // the frame has its backdrop copy.
 void FillFragmentUniforms(const GfxDrawState &s, int targetW, int targetH, bool fade, float u[FU_ROWS][4])
@@ -236,14 +168,17 @@ struct DrawRange {
     uint8_t diffuseAlpha = 0, specularAlpha = 0;
 };
 
-inline DrawRange MeasureRange(const GfxVertex *vertices, unsigned count)
+// box, alpha: what to measure (the other part stays as it is).
+inline void MeasureRange(const GfxVertex *vertices, unsigned count, bool box, bool alpha, DrawRange &r)
 {
-    DrawRange r;
-    r.box = Gxm_VertexBounds(vertices, sizeof(GfxVertex), count);
-    r.diffuseAlpha = (uint8_t)Gxm_MinVertexByte(vertices, sizeof(GfxVertex), count, offsetof(GfxVertex, diffuse) + 3);
-    r.specularAlpha =
-        (uint8_t)Gxm_MinVertexByte(vertices, sizeof(GfxVertex), count, offsetof(GfxVertex, specular) + 3);
-    return r;
+    if (box)
+        r.box = Gxm_VertexBounds(vertices, sizeof(GfxVertex), count);
+    if (alpha) {
+        r.diffuseAlpha =
+            (uint8_t)Gxm_MinVertexByte(vertices, sizeof(GfxVertex), count, offsetof(GfxVertex, diffuse) + 3);
+        r.specularAlpha =
+            (uint8_t)Gxm_MinVertexByte(vertices, sizeof(GfxVertex), count, offsetof(GfxVertex, specular) + 3);
+    }
 }
 
 // The copy of a GfxVertexBuffer the GPU draws from, as of a version of it.
@@ -1043,16 +978,19 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     }
 
     // The vertices of a 3D draw, measured from their CPU copy, or nullptr
-    // where they cannot be read. The range of a vertex buffer is kept while
-    // the buffer does not change. scratch holds that of the frame's vertices.
-    const DrawRange *RangeOf(const GfxCommand &c, const GfxFrame &frame, DrawRange &scratch)
+    // where they cannot be read. The range of a vertex buffer is measured
+    // once and kept while the buffer does not change. That of the frame's
+    // vertices is measured for each draw, into scratch: only its box or its
+    // alpha, as the draw needs.
+    const DrawRange *RangeOf(const GfxCommand &c, const GfxFrame &frame, bool box, bool alpha, DrawRange &scratch)
     {
         if (c.transformed || c.vertexCount == 0)
             return nullptr;
         if (c.buffer == nullptr) {
             if ((size_t)c.firstVertexByte + (size_t)c.vertexCount * sizeof(GfxVertex) > frame.vertices.size())
                 return nullptr;
-            scratch = MeasureRange((const GfxVertex *)(frame.vertices.data() + c.firstVertexByte), c.vertexCount);
+            MeasureRange((const GfxVertex *)(frame.vertices.data() + c.firstVertexByte), c.vertexCount, box, alpha,
+                         scratch);
             return &scratch;
         }
         GxmVertexBuffer *g = (GxmVertexBuffer *)c.buffer->gpu;
@@ -1065,8 +1003,10 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         }
         const uint64_t key = (uint64_t)first << 32 | c.vertexCount;
         auto it = g->ranges.find(key);
-        if (it == g->ranges.end())
-            it = g->ranges.emplace(key, MeasureRange(&c.buffer->vertices[first], c.vertexCount)).first;
+        if (it == g->ranges.end()) {
+            it = g->ranges.emplace(key, DrawRange()).first;
+            MeasureRange(&c.buffer->vertices[first], c.vertexCount, true, true, it->second);
+        }
         return &it->second;
     }
 
@@ -1131,9 +1071,13 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         }
         const GfxDrawState &s = frame.states[c.state];
         const GfxViewport viewport = ToTarget(s.viewport, s.screenW, s.screenH, backBuffer, targetW, targetH);
-        if (!c.transformed && (vertexUniformState == nullptr || vertexUniformW != targetW || vertexUniformH != targetH ||
-                               (vertexUniformState != &s && !SameVertexUniforms(*vertexUniformState, s)))) {
-            FillVertexUniforms(s, viewport, vertexUniforms);
+        // The vertex uniforms of the state: all rows at first, then only the
+        // rows that differ from the 3D draw before.
+        if (!c.transformed && (vertexUniformState != &s || vertexUniformW != targetW || vertexUniformH != targetH)) {
+            if (vertexUniformState == nullptr || vertexUniformW != targetW || vertexUniformH != targetH)
+                Gxm_FillVertexUniforms(s, viewport, vertexUniforms);
+            else
+                Gxm_UpdateVertexUniforms(*vertexUniformState, s, viewport, vertexUniforms);
             vertexUniformState = &s;
             vertexUniformW = targetW;
             vertexUniformH = targetH;
@@ -1147,14 +1091,17 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         // The fade changes no pixel of a draw whose vertices are all nearer
         // than its start: such a draw takes the variant of its key without
         // the fade, which is much shorter.
+        // The range of the draw's vertices: its box for the fade, its alpha
+        // for the depth pass.
+        const bool fadeKey = (key & kFadeKeyBit) != 0 && probe.mode != PROBE_FADE_ALWAYS;
+        const bool depthCandidate = s.alphaBlend && s.alphaTest && s.depthTest && s.depthWrite &&
+                                    probe.mode != PROBE_NO_DEPTH_PASS;
+        const bool needAlpha = depthCandidate && probe.mode != PROBE_DEPTH_PASS_ALWAYS;
         DrawRange scratch;
-        const DrawRange *range = nullptr;
-        bool measured = false;
+        const DrawRange *range = fadeKey || needAlpha ? RangeOf(c, frame, fadeKey, needAlpha, scratch) : nullptr;
         if ((key & kFadeKeyBit) != 0) {
-            range = RangeOf(c, frame, scratch);
-            measured = true;
-            const bool tooNear = probe.mode != PROBE_FADE_ALWAYS && range != nullptr &&
-                                 Gxm_FarthestEyeDistance(range->box, &vertexUniforms[VU_WORLD_VIEW]) < s.fadeStart;
+            const bool tooNear = fadeKey && range != nullptr &&
+                                 Gxm_EyeDistanceBound(range->box, &vertexUniforms[VU_WORLD_VIEW]) < s.fadeStart;
             step(PROFILE_RANGE);
             if (tooNear)
                 variant = FindVariant(key & ~kFadeKeyBit, args, s, c.transformed);
@@ -1182,11 +1129,8 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         // depth pass: its blended pass writes the same depth.
         int depthVariant = -1;
         SceGxmFragmentProgram *depthProgram = nullptr;
-        if (s.alphaBlend && kGxmFragmentVariants[variant].alphaTest == 2 && s.depthTest && s.depthWrite &&
-            probe.mode != PROBE_NO_DEPTH_PASS) {
-            if (!measured)
-                range = RangeOf(c, frame, scratch);
-            if (range != nullptr && probe.mode != PROBE_DEPTH_PASS_ALWAYS && AlphaTestAlwaysPasses(s, *range)) {
+        if (depthCandidate && kGxmFragmentVariants[variant].alphaTest == 2) {
+            if (needAlpha && range != nullptr && AlphaTestAlwaysPasses(s, *range)) {
                 stats.depthSkipped++;
             } else {
                 depthVariant = LookupVariant(key, 1, args);
@@ -1243,7 +1187,9 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                                           (float)(scaled ? s.screenH : targetH), 0.0f, 0.0f };
                 sceGxmSetUniformDataF(buffer, targetParam, 0, 4, target);
             } else {
-                sceGxmSetUniformDataF(buffer, vertexUniformsParam, 0, vertexUniformRows * 4, vertexUniforms[0]);
+                // A draw without lighting reads only the rows before the lights.
+                const unsigned rows = s.lighting ? vertexUniformRows : std::min<unsigned>(vertexUniformRows, VU_UNLIT_ROWS);
+                sceGxmSetUniformDataF(buffer, vertexUniformsParam, 0, rows * 4, vertexUniforms[0]);
             }
             const Variant &v = variants[index];
             if (v.uniforms != nullptr) {
