@@ -5,6 +5,7 @@
 
 #include "platform/platform_vita.h"
 #include "port/sys.h"
+#include "render/gfx_batch_worker.h"
 #include "render/gfx_executor_shared.h"
 #include "render/gfx_internal.h"
 #include "render/gxm_device.h"
@@ -2182,11 +2183,17 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         // the expand, execute (the ring copy in it) and the present's wait.
         Sys_Log("gxm: per frame ms: prepare parts: textures %.2f, vertex buffers %.2f, snapshots %.2f; game thread "
                 "waited for the worker %.2f at the present, %.2f at a flush, %.2f else, %.2f executes; worker: "
-                "batches expanded %.2f, ring copy %.2f, present wait %.2f",
+                "batches spliced %.2f, ring copy %.2f, present wait %.2f",
                 stats.textureMicros * msPerFrame, stats.bufferMicros * msPerFrame, stats.snapshotMicros * msPerFrame,
                 stats.gameWaits.presentWait * msPerFrame, stats.gameWaits.flushWait * msPerFrame,
                 stats.gameWaits.otherWait * msPerFrame, stats.executes / frames, stats.expandMicros * msPerFrame,
                 stats.ringCopyMicros * msPerFrame, stats.presentWaitMicros * msPerFrame);
+        // The batch thread (core 1): the time of its jobs, and the waits for
+        // them: of the game's thread (a lock of vertices that a job reads,
+        // a full queue) and of the worker (the jobs of its frame).
+        const GfxBatchTimes batches = Gfx_TakeBatchTimes();
+        Sys_Log("gxm: per frame ms: batch thread: jobs %.2f; waited for it: game thread %.2f, worker %.2f",
+                batches.jobs * msPerFrame, batches.waited[0] * msPerFrame, batches.waited[1] * msPerFrame);
         stats = Stats();
         statsStart = now;
 #endif

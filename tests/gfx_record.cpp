@@ -11,6 +11,7 @@
 // which the executor copies. A draw outside the view is left out.
 
 #include "port/sys.h"
+#include "render/gfx_batch_worker.h"
 #include "render/gfx_internal.h"
 #include "render/gxm_vertex_uniforms.h"
 
@@ -46,10 +47,8 @@ namespace {
 
 bool s_joins;
 GfxFrame s_frame;       // the frame of the last present
-int s_batchWaits;       // the calls of WaitForBatches
 
 struct CaptureExecutor : GfxExecutor {
-    void WaitForBatches() override { s_batchWaits++; }
     bool SetVideoMode(int, int, bool) override { return true; }
     void SetFullscreen(bool) override {}
     void Execute(GfxFrame &frame, std::vector<GfxTexture *> &, GfxReadback &, bool, bool, bool) override
@@ -1466,43 +1465,70 @@ int main()
         Gfx_Present(FALSE);
 
         // The small draws of a batch refer to the vertices of the buffer:
-        // the recorder does not copy them. The game writes such vertices
-        // again (a lock): the batch so far runs first, with the vertices as
-        // they were, and the executor is asked for its batches (the worker
-        // of the threaded executor reads the vertices). A lock of other
-        // vertices runs nothing.
+        // the recorder does not copy them. A batch job makes the draws of
+        // them (here when the game gives the batch). The game writes such
+        // vertices again: the draws of the batch before have the vertices as
+        // they were, and no draw runs for the lock.
         const auto worldX = [&](float x) { return x * m[0]._11 + m[0]._41; };
         start();
         Gfx_DrawBatch(two, 1);      // the oak quad: vertices 0 to 3
         s_frame = GfxFrame();
-        s_batchWaits = 0;
-        GfxVertex *w = Gfx_LockVertexBufferRange(buffer, 36, 4);
-        Gfx_UnlockVertexBuffer(buffer);
-        REQUIRE(Draws() == 0 && s_batchWaits == 0);
-        w = Gfx_LockVertexBufferRange(buffer, 0, 4);
-        REQUIRE(Draws() == 1 && s_batchWaits == 1 && Vertex3D(Draw(0), 1).x == worldX(0.5f));
+        GfxVertex *w = Gfx_LockVertexBufferRange(buffer, 0, 4);
+        REQUIRE(Draws() == 0);
         w[1].x = 0.4f;
         Gfx_UnlockVertexBuffer(buffer);
         Gfx_DrawBatch(two, 1);
         Gfx_Present(FALSE);
-        REQUIRE(Draws() == 1 && Vertex3D(Draw(0), 1).x == worldX(0.4f));
-        // A lock in a later frame: the batch of the frame before is with the
-        // executor, which is asked once.
-        w = Gfx_LockVertexBufferRange(buffer, 0, 4);
-        w[1].x = 0.5f;
-        Gfx_UnlockVertexBuffer(buffer);
-        REQUIRE(s_batchWaits == 2);
-        Gfx_LockVertexBufferRange(buffer, 0, 4);
-        Gfx_UnlockVertexBuffer(buffer);
-        REQUIRE(s_batchWaits == 2);
-        // A lock of the whole buffer, and a buffer that goes, the same.
-        Gfx_DrawBatch(two, 1);
-        s_frame = GfxFrame();
-        w = Gfx_LockVertexBuffer(buffer);
-        REQUIRE(Draws() == 1 && s_batchWaits == 3 && Vertex3D(Draw(0), 1).x == worldX(0.5f));
+        // Both quads from the atlas, joined: the first as it was.
+        REQUIRE(Draws() == 1 && Draw(0).vertexCount == 8);
+        REQUIRE(Vertex3D(Draw(0), 1).x == worldX(0.5f) && Vertex3D(Draw(0), 5).x == worldX(0.4f));
+        // The same with the batch jobs on a thread of their own: the lock
+        // waits for the job that reads the vertices. 4,000 draws in one job,
+        // so that it runs for some time.
+        {
+            REQUIRE(Gfx_StartBatchThread());
+            std::vector<GfxBatchDraw> many(4000, two[0]);
+            start();
+            Gfx_DrawBatch(many.data(), (DWORD)many.size());
+            w = Gfx_LockVertexBufferRange(buffer, 0, 4);
+            w[1].x = 0.5f;
+            Gfx_UnlockVertexBuffer(buffer);
+            Gfx_Present(FALSE);
+            unsigned vertices = 0;
+            for (unsigned d = 0; d < Draws(); d++) {
+                for (unsigned v = 1; v < Draw(d).vertexCount; v += 4)
+                    REQUIRE(Vertex3D(Draw(d), v).x == worldX(0.4f));
+                vertices += Draw(d).vertexCount;
+            }
+            REQUIRE(vertices == 16000);
+            // A frame of batches is the frame of the same draws made alone,
+            // with the thread. (Some frames first: the vertices that the
+            // lock wrote are at rest then, in both frames.)
+            for (int i = 0; i < 3; i++)
+                Gfx_Present(FALSE);
+            // A sprite first: the frame has vertices and indices of its own
+            // before those of the batches.
+            const auto sprite = [&] {
+                Gfx_SetTransform(GFX_TRANSFORM_WORLD, &identity);
+                Gfx_SetTexture(0, NULL);
+                Sprite(1.0f);
+            };
+            sprite();
+            start();
+            alone();
+            Gfx_Present(FALSE);
+            const std::string made = FrameText();
+            sprite();
+            start();
+            Gfx_DrawBatch(draws, 6);
+            Gfx_Present(FALSE);
+            REQUIRE(FrameText() == made && Draw(1).firstVertexByte != 0 && Draw(1).firstIndex != 0);
+            Gfx_StopBatchThread();
+        }
         // A small draw with texture coordinates outside its texture keeps
-        // its texture, in a batch as alone: the batch finds it when its
-        // vertices are read.
+        // its texture, in a batch as alone: the batch job finds it when it
+        // reads the vertices.
+        w = Gfx_LockVertexBuffer(buffer);
         w[1].u0 = 2.0f;
         Gfx_UnlockVertexBuffer(buffer);
         start();
@@ -1516,12 +1542,12 @@ int main()
         Gfx_DrawBatch(two, 1);
         Gfx_Present(FALSE);
         REQUIRE(FrameText() == outside && Draws() == 1 && Draw(0).textures[0] == oak);
+        // A buffer that goes: the draws of its batch are made already.
         Gfx_DrawBatch(two, 1);
-        s_frame = GfxFrame();
         s_cullDraws = 0;
         Gfx_DestroyVertexBuffer(buffer);
-        REQUIRE(Draws() == 1);
         Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && Draw(0).vertexCount == 4);
         Gfx_Present(FALSE);
         // A texture of the atlas goes: the atlas starts again, and all of it
         // is the part that changed (the textures that come take the places

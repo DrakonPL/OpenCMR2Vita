@@ -21,12 +21,16 @@
 
 #include <algorithm>
 
+#include "render/gfx_batch_worker.h"
+
+static void AddPendingBatchJob();
+static void SettleBatches(GfxVertexBuffer *buffer, uint32_t first, uint32_t count);
+
 // Why the recorder runs the draws recorded so far in the middle of a frame.
 enum {
     FLUSH_ATLAS,            // a texture of the atlas goes or changes
     FLUSH_BUFFER_GONE,      // a vertex buffer that the draws use goes
     FLUSH_BUFFER_LOCK,      // a vertex buffer that the draws use is locked
-    FLUSH_BATCH_LOCK,       // vertices that the small batches refer to are locked
     FLUSH_TEXTURE_LOCK,     // a texture that the draws use is locked
     FLUSH_REPLACEMENT,      // a texture gets another replacement
     FLUSH_COUNT
@@ -186,7 +190,7 @@ const char *const kChangedNames[CHANGED_COUNT] = { "none", "first", "world", "vi
                                                    "material", "lighting", "fog", "fade", "depth", "cull", "blend",
                                                    "alpha test", "factor", "stage 0", "stage 1", "viewport" };
 
-const char *const kFlushNames[FLUSH_COUNT] = { "atlas", "buffer gone", "buffer lock", "batch lock", "texture lock",
+const char *const kFlushNames[FLUSH_COUNT] = { "atlas", "buffer gone", "buffer lock", "texture lock",
                                                "replacement" };
 
 struct RecorderCounts {
@@ -336,7 +340,7 @@ const AtlasEntry *AtlasPlaceOf(const GfxVertex *vertices, DWORD count)
 
 // The place for a draw of a small batch, whose vertices the recorder does
 // not read: the place of its texture, for the case that its coordinates are
-// inside the texture (Gfx_ExpandSmallBatches looks at them).
+// inside the texture (Gfx_RunBatchJob looks at them).
 const AtlasEntry *AtlasPlaceOfBatchDraw()
 {
     return AtlasStateFits() ? AtlasEntryOfState() : NULL;
@@ -1283,6 +1287,11 @@ extern "C" BOOL Gfx_SetVideoMode(int width, int height, BOOL fullscreen)
             if (s_threaded)
                 Sys_Log("gfx: the frames run on a worker thread (video.threaded_render)");
         }
+        // The small batches on a thread of their own, with the frames on a
+        // worker (gfx_batch_worker.h). [video] batch_thread = 0: on the
+        // game's thread, when the game gives a batch.
+        if (s_threaded && Platform_GetSettingInt("video.batch_thread", 1) != 0 && Gfx_StartBatchThread())
+            Sys_Log("gfx: the small batches run on a thread of their own (video.batch_thread)");
     }
     s_width = width;
     s_height = height;
@@ -1307,6 +1316,7 @@ extern "C" void Gfx_Shutdown(void)
     delete s_executor;
     s_executor = NULL;
     s_threaded = false;
+    Gfx_StopBatchThread();
 }
 
 extern "C" int Gfx_GetDisplayModeCount(void)
@@ -1340,15 +1350,20 @@ extern "C" void Gfx_EndScene(void)
 {
 }
 
-// Runs the frame recorded so far on the executor. The small batches become
-// draws first: here, or on the worker of the threaded executor. That one
-// takes the frame's contents; the caller resets what it leaves.
+// Runs the frame recorded so far on the executor. The draws of the small
+// batches go in their place first: here, or on the worker of the threaded
+// executor. That one takes the frame's contents; the caller resets what it
+// leaves.
 static void Submit(bool present, bool vsync, bool stretch)
 {
     if (s_executor == NULL)
         return;
-    if (!s_threaded)
-        Gfx_ExpandSmallBatches(s_frame);
+    AddPendingBatchJob();
+    s_frame.batchSequence = Gfx_BatchJobsAdded();
+    if (!s_threaded) {
+        Gfx_WaitForBatchJobs(s_frame.batchSequence, 0);
+        Gfx_SpliceSmallBatches(s_frame);
+    }
     s_executor->Prepare(s_frame, s_textures, s_readback, present);
     s_executor->Execute(s_frame, s_textures, s_readback, present, vsync, stretch);
 }
@@ -1705,10 +1720,10 @@ extern "C" void Gfx_DestroyVertexBuffer(GfxVertexBuffer *buffer)
 {
     if (buffer == NULL)
         return;
-    // Draws recorded this frame may still use it. The executor waits for
-    // its worker, which reads the vertices of the small batches.
-    if (buffer->referencedRecord == s_record || buffer->snapshotRecord == s_record ||
-        buffer->batchBlocks.Latest() == s_record)
+    // The batch jobs that read its vertices are done first. Draws recorded
+    // this frame may still use it.
+    SettleBatches(buffer, 0, (uint32_t)buffer->vertices.size());
+    if (buffer->referencedRecord == s_record || buffer->snapshotRecord == s_record)
         Flush(FLUSH_BUFFER_GONE);
     if (s_executor != NULL)
         s_executor->DestroyVertexBuffer(buffer);
@@ -1718,24 +1733,17 @@ extern "C" void Gfx_DestroyVertexBuffer(GfxVertexBuffer *buffer)
     delete buffer;
 }
 
-// The recordings before this one have no small batch that is not draws yet
-// (GfxExecutor::WaitForBatches returned after they went to the executor).
-static uint32_t s_batchesSettledBefore;
-
-// Before the game writes count vertices of a buffer from first: the small
-// batches that refer to them are draws (GfxSmallItem::buffer). Those of this
-// recording run first, and the worker of the threaded executor is done with
-// those of the frames before. Rare: the game writes a mesh (the stage
-// lighting) before it draws it, and mostly a mesh that was not in the view.
+// Before the game writes count vertices of a buffer from first: the batch
+// jobs that read them are done (GfxSmallItem::buffer). The blocks of the
+// buffer have the numbers of those jobs. Most are done already: they run
+// while the game records.
 static void SettleBatches(GfxVertexBuffer *buffer, uint32_t first, uint32_t count)
 {
     const uint32_t latest = buffer->batchBlocks.Latest(first, count);
-    if (latest == 0 || latest < s_batchesSettledBefore || s_executor == NULL)
+    if (latest == 0 || (int32_t)(Gfx_BatchJobsDone() - latest) >= 0)
         return;
-    if (latest == s_record)
-        Flush(FLUSH_BATCH_LOCK);
-    s_executor->WaitForBatches();
-    s_batchesSettledBefore = s_record;
+    AddPendingBatchJob();
+    Gfx_WaitForBatchJobs(latest, 0);
 }
 
 extern "C" GfxVertex *Gfx_LockVertexBuffer(GfxVertexBuffer *buffer)
@@ -1880,6 +1888,61 @@ extern "C" void Gfx_DrawIndexedPrimitiveVB(int primitive, GfxVertexBuffer *buffe
 
 namespace {
 
+// The small draws of the frame that no batch job has yet: those from
+// s_pendingFirst of the frame's batches, of the batch command
+// s_pendingPlaceholder.
+uint32_t s_pendingPlaceholder, s_pendingFirst;
+bool s_pending;
+
+// The batches of the frame, with room for count more draws and their
+// indices. The jobs read the draws where they are: before the draws move to
+// more room, the jobs are done.
+GfxBatchData &BatchRoom(size_t draws, size_t indices)
+{
+    constexpr size_t kDraws = 4096, kIndices = 4096 * 12;   // a frame of a wood has some 1,300 draws
+    if (s_frame.batch == nullptr) {
+        s_frame.batch = std::make_shared<GfxBatchData>();
+        s_frame.batch->items.reserve(kDraws);
+        s_frame.batch->indices.reserve(kIndices);
+    }
+    GfxBatchData &data = *s_frame.batch;
+    if (data.items.size() + draws > data.items.capacity() || data.indices.size() + indices > data.indices.capacity()) {
+        Gfx_WaitForBatchJobs(Gfx_BatchJobsAdded(), 0);
+        data.items.reserve((data.items.size() + draws) * 2);
+        data.indices.reserve((data.indices.size() + indices) * 2);
+    }
+    return data;
+}
+
+} // namespace
+
+// Gives the small draws that no batch job has yet to a job: at the end of a
+// batch command, of a call of the game, and of the frame.
+static void AddPendingBatchJob()
+{
+    if (!s_pending)
+        return;
+    s_pending = false;
+    GfxBatchData &data = *s_frame.batch;
+    const GfxCommand &batch = s_frame.commands[s_pendingPlaceholder];
+    const GfxDrawState &state = s_frame.states[batch.state];
+    GfxBatchJob job = {};
+    job.data = &data;
+    job.items = data.items.data() + s_pendingFirst;
+    job.itemCount = (uint32_t)data.items.size() - s_pendingFirst;
+    job.indices = data.indices.data();
+    job.indexCount = (uint32_t)data.indices.size();
+    job.placeholder = s_pendingPlaceholder;
+    job.state = batch.state;
+    job.texture1 = batch.textures[1];
+    job.cull = batch.cull;
+    job.view = state.view;
+    job.projection = state.projection;
+    Gfx_AddBatchJob(job);
+}
+
+namespace {
+
 // Adds a small draw of a batch to the frame (Gfx_DrawBatch), with the world
 // matrix and the stage 0 texture of the state. The batch command at the end
 // of the frame's commands takes it while the state it recorded is the state;
@@ -1897,20 +1960,28 @@ void RecordSmallItem(GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCou
                       StateIsRecorded(true) && s_frame.commands.back().state == s_frame.states.size() - 1 &&
                       s_frame.commands.back().textures[1] == s_state.stages[1].texture;
     if (!open) {
+        // The draws of the batch before go to their job.
+        AddPendingBatchJob();
         GfxCommand cmd = {};
         cmd.type = GFX_CMD_SMALL_BATCH;
         cmd.reach = -1.0f;
         cmd.state = RecordState(true);
         cmd.textures[1] = s_state.stages[1].texture;
         cmd.cull = CullWanted();
-        cmd.firstItem = (uint32_t)s_frame.smallItems.size();
+        cmd.firstItem = s_frame.batch != nullptr ? (uint32_t)s_frame.batch->items.size() : 0;
         s_frame.commands.push_back(cmd);
 #if defined(VITA) && defined(OPENCMR2_DEV)
         g_sysVitaDrawCounts.commands++;
 #endif
     }
-    s_frame.smallItems.emplace_back();
-    GfxSmallItem &item = s_frame.smallItems.back();
+    GfxBatchData &data = BatchRoom(1, indexCount);
+    if (!s_pending) {
+        s_pending = true;
+        s_pendingPlaceholder = (uint32_t)s_frame.commands.size() - 1;
+        s_pendingFirst = (uint32_t)data.items.size();
+    }
+    data.items.emplace_back();
+    GfxSmallItem &item = data.items.back();
     item.world = s_state.world;
     item.buffer = buffer;
     item.texture = s_state.stages[0].texture;
@@ -1926,11 +1997,12 @@ void RecordSmallItem(GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCou
     }
     item.firstVertex = firstVertex;
     item.vertexCount = vertexCount;
-    item.firstIndex = (uint32_t)s_frame.smallIndices.size();
+    item.firstIndex = (uint32_t)data.indices.size();
     item.indexCount = indexCount;
-    s_frame.smallIndices.insert(s_frame.smallIndices.end(), indices, indices + indexCount);
+    data.indices.insert(data.indices.end(), indices, indices + indexCount);
     s_frame.commands.back().itemCount++;
-    buffer->batchBlocks.Mark(firstVertex, vertexCount, s_record);
+    // The number of the job that reads the vertices: the next one.
+    buffer->batchBlocks.Mark(firstVertex, vertexCount, Gfx_BatchJobsAdded() + 1);
     // The executor makes ready each texture that the draw can have.
     std::vector<GfxTexture *> &read = s_frame.smallTextures;
     for (GfxTexture *t : { item.texture, item.atlas })
@@ -1962,6 +2034,9 @@ void DrawBatchNow(const GfxBatchDraw *draws, DWORD count, const void *caller)
         RecordDraw(GFX_TRIANGLELIST, false, buffer->vertices.data() + d.firstVertex, d.vertexCount, d.indices,
                    d.indexCount, buffer, d.firstVertex);
     }
+    // The small draws of this call go to their job now: it runs while the
+    // game makes the next ones.
+    AddPendingBatchJob();
 }
 
 } // namespace

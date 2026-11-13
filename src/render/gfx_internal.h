@@ -171,8 +171,9 @@ enum GfxCommandType {
     GFX_CMD_TARGET,
     GFX_CMD_BACKDROP,           // copy the back buffer for the distance fade
     // Small 3D draws of a batch (Gfx_DrawBatch), as the game made them:
-    // Gfx_ExpandSmallBatches makes them draws before an executor runs the
-    // frame. An executor never gets this command.
+    // batch jobs make them draws, and Gfx_SpliceSmallBatches puts those in
+    // the place of this command before an executor runs the frame. An
+    // executor never gets this command.
     GFX_CMD_SMALL_BATCH
 };
 
@@ -209,8 +210,8 @@ struct GfxCommand {
     bool hasBox;
     float boxLow[3], boxHigh[3];
     float reach;
-    // small batch: the items firstItem.. of the frame's smallItems, all with
-    // the state (in world space) and textures[1]. cull: they are tested
+    // small batch: the items firstItem.. of the frame's batch draws, all
+    // with the state (in world space) and textures[1]. cull: they are tested
     // against the view.
     uint32_t firstItem, itemCount;
     bool cull;
@@ -244,9 +245,9 @@ struct GfxPatch {
 //
 // The vertices stay in the game's vertex buffer: the recorder copied them
 // (some 500 KB in a frame of a wood on the PS Vita, on the game's thread).
-// Gfx_ExpandSmallBatches reads them, on the worker of the threaded executor.
-// The recorder runs the batches of the vertices that the game locks before
-// the game writes them (GfxVertexBuffer::batchBlocks).
+// A batch job reads them (Gfx_RunBatchJob), on the batch thread. The
+// recorder waits for the jobs of the vertices that the game locks before the
+// game writes them (GfxVertexBuffer::batchBlocks).
 //
 // atlas: the atlas with the texture in it at atlasX, atlasY (atlasScale is 1
 // / the size of the atlas), for a draw whose texture coordinates are inside
@@ -258,7 +259,57 @@ struct GfxSmallItem {
     int atlasX, atlasY, textureWidth, textureHeight;
     float atlasScale;
     uint32_t firstVertex, vertexCount;      // of the buffer
-    uint32_t firstIndex, indexCount;        // into GfxFrame::smallIndices
+    uint32_t firstIndex, indexCount;        // into GfxBatchData::indices
+};
+
+// A draw that a batch job made, for the place of its batch: the index of the
+// GFX_CMD_SMALL_BATCH command among the frame's commands.
+struct GfxBatchOutput {
+    uint32_t placeholder;
+    GfxCommand draw;
+};
+
+// The small batches of a frame. The recorder adds the draws and their
+// indices and gives runs of them to batch jobs. The jobs, one at a time and
+// in their order, make the draws (Gfx_RunBatchJob): no other thread reads
+// what they make before they are done. A frame refers to its batches: the
+// jobs keep them while frames change places (the threaded executor).
+struct GfxBatchData {
+    std::vector<GfxSmallItem> items;        // the recorder
+    std::vector<uint16_t> indices;
+    std::vector<GfxBatchOutput> draws;      // the jobs
+    std::vector<GfxVertex> vertices;        // of the draws, in world space
+    std::vector<uint16_t> drawIndices;
+    // The jobs: the batch of the job before, and its last draw, which a
+    // draw of the same batch can join (~0: none).
+    uint32_t runPlaceholder = ~0u;
+    size_t run = ~(size_t)0;
+    void Reset()
+    {
+        items.clear();
+        indices.clear();
+        draws.clear();
+        vertices.clear();
+        drawIndices.clear();
+        runPlaceholder = ~0u;
+        run = ~(size_t)0;
+    }
+};
+
+// A run of the small draws of one batch, for the batch thread
+// (gfx_batch_worker.h): what the job reads of the frame is in it, because
+// the recorder goes on with the frame.
+struct GfxBatchJob {
+    GfxBatchData *data;
+    const GfxSmallItem *items;      // of data->items; they do not move before the job is done
+    uint32_t itemCount;
+    const uint16_t *indices;        // data->indices, and how many there are
+    uint32_t indexCount;
+    uint32_t placeholder;           // the batch: its command among the frame's commands
+    uint32_t state;                 // of the batch
+    GfxTexture *texture1;
+    bool cull;                      // the draws are tested against the view
+    GfxMatrix view, projection;     // of the state
 };
 
 struct GfxFrame {
@@ -269,11 +320,12 @@ struct GfxFrame {
     std::vector<GfxVertexBuffer *> buffers;     // drawn from, each once
     std::vector<GfxSnapshot> snapshots;         // each buffer once
     std::vector<GfxPatch> patches;              // of the buffers in buffers
-    // The small batches: their draws, vertices and indices, and the textures
-    // the draws read (each once), for the executor to make ready before the
-    // batches are draws.
-    std::vector<GfxSmallItem> smallItems;
-    std::vector<uint16_t> smallIndices;
+    // The small batches, and the number of their last job (a frame is
+    // whole when the jobs up to it are done). The textures that their draws
+    // read (each once), for the executor to make ready before the batches
+    // are draws.
+    std::shared_ptr<GfxBatchData> batch;
+    uint32_t batchSequence = 0;
     std::vector<GfxTexture *> smallTextures;
     void Reset()
     {
@@ -284,18 +336,22 @@ struct GfxFrame {
         buffers.clear();
         snapshots.clear();
         patches.clear();
-        smallItems.clear();
-        smallIndices.clear();
+        if (batch != nullptr)
+            batch->Reset();
         smallTextures.clear();
     }
 };
 
-// Makes the small batches of a frame (GFX_CMD_SMALL_BATCH) draws of the
-// frame's vertex data, in their place among the commands: the vertices in
-// world space, the draws outside the view left out, the coordinates of the
-// atlas, and the draws of one texture joined, as the recorder does it for a
-// small draw made alone (gfx_small_draw.h). Reads only the frame.
-void Gfx_ExpandSmallBatches(GfxFrame &frame);
+// Makes the small draws of a batch job draws of the vertex data of its
+// batches (GfxBatchData): the vertices in world space, the draws outside the
+// view left out, the coordinates of the atlas, and the draws of one texture
+// joined, as the recorder does it for a small draw made alone
+// (gfx_small_draw.h). Reads the job, and the vertex buffers of its draws.
+void Gfx_RunBatchJob(const GfxBatchJob &job);
+// Puts the draws of the frame's batches in the place of the batches among
+// its commands, and their vertices and indices after those of the frame.
+// The jobs of the frame are done. Reads only the frame.
+void Gfx_SpliceSmallBatches(GfxFrame &frame);
 
 struct GfxReadback {
     bool requested = false;
@@ -313,7 +369,7 @@ struct GfxWorkerTimes {
     // present, before an Execute in the middle of a frame (the recorder ran
     // the draws so far: a lock of what they use), and in other calls.
     unsigned presentWait = 0, flushWait = 0, otherWait = 0;
-    unsigned expand = 0;    // the worker's expand of the small batches of the last Execute
+    unsigned expand = 0;    // the worker's splice of the small batches of the last Execute
 };
 
 struct GfxExecutor {
@@ -332,10 +388,6 @@ struct GfxExecutor {
                          bool vsync, bool stretch = false) = 0;
     // Returns when no Execute runs (the threaded executor's worker is idle).
     virtual void Wait() {}
-    // Returns when the small batches of each frame given to Execute are
-    // draws: nothing reads the vertex buffers of the recorder then. An
-    // executor without a worker has no such frame.
-    virtual void WaitForBatches() {}
     // For the logs, from the threaded executor before each Prepare: what
     // happened since the call before.
     virtual void NoteWorkerTimes(const GfxWorkerTimes &) {}

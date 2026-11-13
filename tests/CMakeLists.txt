@@ -30,7 +30,7 @@ add_test(NAME movie_playback COMMAND movie_playback_test)
 
 add_executable(movie_render_state_test movie_render_state.cpp
     ${PROJECT_SOURCE_DIR}/src/diagnostics/observer.cpp
-    ${PROJECT_SOURCE_DIR}/src/video/movie.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_core.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_small_batch.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_threaded.cpp)
+    ${PROJECT_SOURCE_DIR}/src/video/movie.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_core.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_small_batch.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_batch_worker.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_threaded.cpp)
 target_link_libraries(movie_render_state_test PRIVATE opencmr2_bink SDL3::SDL3)
 add_test(NAME movie_render_state COMMAND movie_render_state_test)
 
@@ -193,7 +193,7 @@ target_include_directories(gxm_fragment_uniforms_test PRIVATE ${PROJECT_SOURCE_D
 add_test(NAME gxm_fragment_uniforms COMMAND gxm_fragment_uniforms_test)
 # The recorder: the states, the joined draws and the vertex copies of a frame.
 add_executable(gfx_record_test gfx_record.cpp
-    ${PROJECT_SOURCE_DIR}/src/diagnostics/observer.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_core.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_small_batch.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_threaded.cpp
+    ${PROJECT_SOURCE_DIR}/src/diagnostics/observer.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_core.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_small_batch.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_batch_worker.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_threaded.cpp
     ${PROJECT_SOURCE_DIR}/src/render/texture_mips.cpp)
 target_include_directories(gfx_record_test PRIVATE ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/third_party/stb)
 find_package(Threads REQUIRED)
@@ -213,7 +213,7 @@ target_include_directories(log_buffer_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME log_buffer COMMAND log_buffer_test)
 # The threaded executor: the frames on a worker, one at a time, in their order.
 add_executable(gfx_threaded_test gfx_threaded.cpp
-    ${PROJECT_SOURCE_DIR}/src/render/gfx_threaded.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_small_batch.cpp)
+    ${PROJECT_SOURCE_DIR}/src/render/gfx_threaded.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_small_batch.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_batch_worker.cpp)
 target_include_directories(gfx_threaded_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(gfx_threaded_test PRIVATE SDL3::SDL3 Threads::Threads)
 add_test(NAME gfx_threaded COMMAND gfx_threaded_test)
@@ -222,6 +222,12 @@ add_executable(function_profile_test function_profile.cpp ${PROJECT_SOURCE_DIR}/
 target_include_directories(function_profile_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(function_profile_test PRIVATE Threads::Threads)
 add_test(NAME function_profile COMMAND function_profile_test)
+# The batch jobs of the recorder on a thread of their own.
+add_executable(gfx_batch_worker_test gfx_batch_worker.cpp
+    ${PROJECT_SOURCE_DIR}/src/render/gfx_small_batch.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_batch_worker.cpp)
+target_include_directories(gfx_batch_worker_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(gfx_batch_worker_test PRIVATE SDL3::SDL3 Threads::Threads)
+add_test(NAME gfx_batch_worker COMMAND gfx_batch_worker_test)
 add_executable(readback_pack_test readback_pack.cpp)
 target_include_directories(readback_pack_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME readback_pack COMMAND readback_pack_test)
