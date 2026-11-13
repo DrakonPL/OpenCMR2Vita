@@ -145,12 +145,9 @@ int main()
     REQUIRE(slow->noted.presentWait >= 20000 && slow->noted.flushWait == 0 && slow->noted.otherWait == 0);
     REQUIRE(slow->notesBeforePrepare.size() == 2 && slow->notesBeforePrepare[1] == 2);
     UntilRunning(*slow);
-    // The wait of another call (most of the 30 ms of the second frame) goes
-    // with the next Execute, apart from the waits of the Execute calls.
     threaded->DestroyTexture(nullptr);
     frame = FrameOf(2);
     threaded->Execute(frame, textures, readback, false, false, false);
-    REQUIRE(slow->noted.otherWait >= 15000 && slow->noted.flushWait < 5000);
     UntilRunning(*slow);
     threaded->ReadTexture(nullptr);
     frame = FrameOf(4);
@@ -201,6 +198,13 @@ int main()
     frame = FrameOf(1);
     threaded->Execute(frame, textures, readback, false, false, false);
     REQUIRE(slow->noted.flushWait - flushBefore >= 20000);
+    // The wait of another call, right after an Execute (most of its 30 ms),
+    // goes with the next Execute, apart from the waits of the Execute calls.
+    const unsigned otherBefore = slow->noted.otherWait;
+    threaded->DestroyTexture(nullptr);
+    frame = FrameOf(1);
+    threaded->Execute(frame, textures, readback, false, false, false);
+    REQUIRE(slow->noted.otherWait - otherBefore >= 20000);
 
     // Each Execute called the wait of its own worker, which returned (else
     // the first frame would never have ended). A frame that runs when the
