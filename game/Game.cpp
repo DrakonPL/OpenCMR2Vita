@@ -2534,6 +2534,13 @@ void Game_DrawStaticStageObjects(void)
     // (Game_StageMeshOutsideView): drawn after the walk, so that the state
     // after it is the original's.
     StageObjectDraw *pTrailing = NULL;
+    // PORT: the objects whose meshes draw their parts and nothing more go
+    // into batches, as the trees do (Game_AddTreeToBatch), with the world
+    // matrix that is set: their vertices are in world space. The renderer
+    // leaves out those outside the view. The matrix is read again while the
+    // batch is empty: a mesh drawn alone can change it.
+    const bool batches = Sys_GetOption("video.tree_batch", 1) != 0;
+    static GfxMatrix world;
 
     for (i = 0; i < (unsigned int)g_sectorCullEnabled; i++) {
         pObject = (StageObjectDraw *)g_sectors[g_visibleSectorIndices[i]]->pObjects;
@@ -2567,9 +2574,15 @@ void Game_DrawStaticStageObjects(void)
                     delta.z = g_unk0x0059be6c->world.position.z - pObject->position.z;
                     pObject->pMesh->field_0x114 = FixVecLength(&delta);
                     CGame::QueuePrimaryDrawObject(pObject);
+                } else if (batches && Game_TreeBatchable(pObject->pMesh)) {
+                    if (g_treeBatchCount == 0)
+                        Gfx_GetTransform(GFX_TRANSFORM_WORLD, &world);
+                    Game_AddTreeToBatch(pObject->pMesh, &world._11);
+                    pTrailing = NULL;
                 } else if (Game_StageMeshOutsideView(pObject->pMesh)) {
                     pTrailing = pObject;
                 } else {
+                    Game_FlushTreeBatch();
                     Graphics_DrawMeshLOD(pObject->pMesh, 1, 0, 0);
                     pTrailing = NULL;
                 }
@@ -2577,6 +2590,7 @@ void Game_DrawStaticStageObjects(void)
             pObject = pObject->pNext;
         }
     }
+    Game_FlushTreeBatch();
     if (pTrailing != NULL)
         Graphics_DrawMeshLOD(pTrailing->pMesh, 1, 0, 0);
 }
