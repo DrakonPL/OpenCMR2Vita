@@ -148,6 +148,11 @@ struct GxmVertexBuffer {
     // that lost its slot to another range is measured again.
     std::unique_ptr<GxmKeyCache<DrawRange, 8>> ranges;
     uint32_t rangesVersion = 0;
+    // The snapshot of the Execute call snapshotExecute (GfxFrame::snapshots):
+    // the ring offset of its vertex snapshotFirst.
+    uint32_t snapshotExecute = 0;
+    unsigned snapshotOffset = 0;
+    uint32_t snapshotFirst = 0;
 };
 
 // A fragment program variant: its patcher id and its fu[] parameter.
@@ -194,6 +199,7 @@ struct Stats {
     unsigned depthSkipped = 0;              // blended draws whose alpha test passes for each pixel: no depth pass
     unsigned vertexUploads = 0, fragmentUploads = 0;    // default uniform buffers reserved and filled
     unsigned rangesMeasured = 0, rangeVertices = 0;     // vertex buffer ranges that the cache did not have
+    unsigned snapshotBytes = 0;                         // vertices of buffers copied into the ring
     unsigned ownDraws = 0, ownVertices = 0;             // draws of the frame's vertices that were walked for the fade
 };
 
@@ -423,6 +429,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     // reserves its buffers, as GXM always permits.
     bool keepUniforms = false, keepUniformsTested = false;
     bool loggedSplit = false, loggedRing = false, loggedPrimitive = false, loggedStaticFull = false;
+    uint32_t executeCount = 0;      // Execute calls (GxmVertexBuffer::snapshotExecute)
 
     // Textures made or destroyed in this frame; in an earlier one, not logged yet.
     bool texturesChanged = false, texturesLogPending = false;
@@ -1360,7 +1367,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         // a run of small draws (GfxCommand::hasBox). Without them, their
         // farthest vertex is measured.
         const bool ownVertices = c.buffer == nullptr;
-        const bool ownKnown = ownVertices && c.hasBox;
+        const bool ownKnown = c.hasBox;
         const DrawRange *range = (fadeKey && !ownKnown) || needAlpha
                                      ? RangeOf(c, frame, fadeKey && !ownVertices, needAlpha, scratch)
                                      : nullptr;
@@ -1441,7 +1448,14 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         step(PROFILE_DEPTH);
         // Where the vertices and the indices are.
         const unsigned char *vertices = nullptr;
-        if (c.buffer != nullptr) {
+        if (c.snapshot) {
+            // The snapshot starts at its first vertex: the buffer's vertex 0
+            // would be before it.
+            const GxmVertexBuffer *g = (const GxmVertexBuffer *)c.buffer->gpu;
+            if (g != nullptr && g->snapshotExecute == executeCount && g->snapshotOffset != GxmFrameRing::kFull &&
+                c.firstVertexByte >= g->snapshotFirst * sizeof(GfxVertex))
+                vertices = memory.FrameRing().At(g->snapshotOffset) - g->snapshotFirst * sizeof(GfxVertex);
+        } else if (c.buffer != nullptr) {
             const GxmVertexBuffer *g = (const GxmVertexBuffer *)c.buffer->gpu;
             if (g != nullptr)
                 vertices = (const unsigned char *)g->memory;
@@ -1703,6 +1717,25 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             memcpy(ring.At(vertexOffset), frame.vertices.data(), frame.vertices.size());
         if (indexOffset != GxmFrameRing::kFull)
             memcpy(ring.At(indexOffset), frame.indices.data(), frame.indices.size() * 2);
+        // The part of each buffer locked recently that the frame draws, once.
+        executeCount++;
+        for (const GfxSnapshot &snapshot : frame.snapshots) {
+            GfxVertexBuffer *b = snapshot.buffer;
+            GxmVertexBuffer *g = (GxmVertexBuffer *)b->gpu;
+            if (g == nullptr)
+                b->gpu = g = new GxmVertexBuffer;
+            const unsigned bytes = (snapshot.end - snapshot.first) * (unsigned)sizeof(GfxVertex);
+            g->snapshotExecute = executeCount;
+            g->snapshotFirst = snapshot.first;
+            g->snapshotOffset = snapshot.end <= b->vertices.size() ? ring.Alloc(bytes, 16) : GxmFrameRing::kFull;
+            if (g->snapshotOffset != GxmFrameRing::kFull) {
+                memcpy(ring.At(g->snapshotOffset), &b->vertices[snapshot.first], bytes);
+                stats.snapshotBytes += bytes;
+            } else if (!loggedRing) {
+                Sys_Log("gxm: a frame is larger than its ring slot: its draws are dropped");
+                loggedRing = true;
+            }
+        }
         if ((vertexOffset == GxmFrameRing::kFull || indexOffset == GxmFrameRing::kFull) && !loggedRing) {
             Sys_Log("gxm: a frame is larger than its ring slot: its draws are dropped");
             loggedRing = true;
@@ -1968,8 +2001,10 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         // not have, and the frame's own vertices of each draw with the fade.
         char recorder[512];
         Gfx_RecorderCountsText(recorder, sizeof(recorder));
-        Sys_Log("gxm: per s ranges measured %u with %u vertices, own vertices walked %u in %u draws; recorder: %s",
-                stats.rangesMeasured, stats.rangeVertices, stats.ownVertices, stats.ownDraws, recorder);
+        Sys_Log("gxm: per s ranges measured %u with %u vertices, own vertices walked %u in %u draws, snapshots %u KB; "
+                "recorder: %s",
+                stats.rangesMeasured, stats.rangeVertices, stats.ownVertices, stats.ownDraws, stats.snapshotBytes / 1024,
+                recorder);
         stats = Stats();
         statsStart = now;
 #endif

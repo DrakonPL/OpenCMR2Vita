@@ -192,7 +192,7 @@ const char *const kChangedNames[CHANGED_COUNT] = { "none", "first", "world", "vi
                                                    "alpha test", "factor", "stage 0", "stage 1", "viewport" };
 
 struct RecorderCounts {
-    uint32_t states, small, joined, atlas;
+    uint32_t states, small, joined, atlas, culled, snapshots;
     uint32_t noJoin[NO_JOIN_COUNT], noAtlas[NO_ATLAS_COUNT], changed[CHANGED_COUNT];
 };
 RecorderCounts s_counts;
@@ -364,6 +364,145 @@ float SmallDrawReach(const GfxVertex *vertices, DWORD count)
 }
 
 // The box of the positions of count vertices (count is at least 1).
+void VertexBox(const GfxVertex *vertices, DWORD count, float low[3], float high[3]);
+
+// ---- the test of a draw against the view ----
+//
+// The game culls its scenery by sectors: each object of a sector that
+// touches a wide wedge in front of the camera is drawn. Half of the trees
+// and a quarter of the ground parts and objects of a frame are then outside
+// the view (PC runs of the stages). A draw whose vertices are all outside
+// one plane of the view draws no pixel: the recorder leaves it out, and the
+// executor does not set it up. The state that the game set for it stays.
+
+// video.cull_draws and video.buffer_snapshots: -2 not read yet, -1 not set
+// (then on with an executor that takes joined draws). Read again at each
+// present.
+int s_cullSetting = -2, s_snapshotSetting = -2;
+
+void ReadDrawSettings()
+{
+    s_cullSetting = Platform_GetSettingInt("video.cull_draws", -1);
+    s_snapshotSetting = Platform_GetSettingInt("video.buffer_snapshots", -1);
+}
+
+bool CullWanted()
+{
+    if (s_cullSetting == -2)
+        ReadDrawSettings();
+    return s_cullSetting < 0 ? s_executor->JoinsDraws() : s_cullSetting != 0;
+}
+
+bool SnapshotsWanted()
+{
+    if (s_snapshotSetting == -2)
+        ReadDrawSettings();
+    return s_executor->JoinsDraws() && s_snapshotSetting != 0;
+}
+
+// The matrix from a draw's own space to the clip space (world, view and
+// projection), kept for the matrices it was made of. Slot 0: the world
+// matrix of the state; slot 1: the identity (draws in world space).
+struct ClipTransform {
+    GfxMatrix world, view, projection;
+    float m[16];
+    bool valid = false;
+};
+ClipTransform s_clip[2];
+
+const float *ClipMatrix(const GfxMatrix &world, int slot)
+{
+    ClipTransform &t = s_clip[slot];
+    if (t.valid && memcmp(&t.world, &world, sizeof(GfxMatrix)) == 0 &&
+        memcmp(&t.view, &s_state.view, sizeof(GfxMatrix)) == 0 &&
+        memcmp(&t.projection, &s_state.projection, sizeof(GfxMatrix)) == 0)
+        return t.m;
+    t.world = world;
+    t.view = s_state.view;
+    t.projection = s_state.projection;
+    float wv[16];
+    const float *a = &world._11, *v = &s_state.view._11, *p = &s_state.projection._11;
+    for (int r = 0; r < 4; r++)
+        for (int k = 0; k < 4; k++)
+            wv[r * 4 + k] = a[r * 4] * v[k] + a[r * 4 + 1] * v[4 + k] + a[r * 4 + 2] * v[8 + k] + a[r * 4 + 3] * v[12 + k];
+    for (int r = 0; r < 4; r++)
+        for (int k = 0; k < 4; k++)
+            t.m[r * 4 + k] = wv[r * 4] * p[k] + wv[r * 4 + 1] * p[4 + k] + wv[r * 4 + 2] * p[8 + k] + wv[r * 4 + 3] * p[12 + k];
+    t.valid = true;
+    return t.m;
+}
+
+// The planes of the view a point is outside of, in the clip space of
+// Direct3D: -w <= x <= w, -w <= y <= w, 0 <= z <= w. A draw whose points are
+// all outside one plane draws nothing.
+inline unsigned OutsidePlanes(const float *m, float x, float y, float z)
+{
+    const float cx = x * m[0] + y * m[4] + z * m[8] + m[12];
+    const float cy = x * m[1] + y * m[5] + z * m[9] + m[13];
+    const float cz = x * m[2] + y * m[6] + z * m[10] + m[14];
+    const float cw = x * m[3] + y * m[7] + z * m[11] + m[15];
+    return (cx < -cw ? 1u : 0u) | (cx > cw ? 2u : 0u) | (cy < -cw ? 4u : 0u) | (cy > cw ? 8u : 0u) |
+           (cz < 0.0f ? 16u : 0u) | (cz > cw ? 32u : 0u);
+}
+
+bool PointsOutsideView(const float *m, const GfxVertex *vertices, DWORD count)
+{
+    unsigned all = 63;
+    for (DWORD i = 0; i < count && all != 0; i++)
+        all &= OutsidePlanes(m, vertices[i].x, vertices[i].y, vertices[i].z);
+    return all != 0;
+}
+
+bool BoxOutsideView(const float *m, const GfxBox &b)
+{
+    unsigned all = 63;
+    for (int i = 0; i < 8 && all != 0; i++)
+        all &= OutsidePlanes(m, (i & 1) ? b.high[0] : b.low[0], (i & 2) ? b.high[1] : b.low[1],
+                             (i & 4) ? b.high[2] : b.low[2]);
+    return all != 0;
+}
+
+// A hash of the positions of a buffer: the boxes of its ranges stay while
+// it is the same.
+uint64_t PositionHash(const GfxVertexBuffer *b)
+{
+    uint64_t h = 0x9e3779b97f4a7c15ull;
+    for (const GfxVertex &v : b->vertices) {
+        uint32_t w[3];
+        memcpy(w, &v.x, sizeof(w));
+        h = (h ^ w[0]) * 0x100000001b3ull;
+        h = (h ^ w[1]) * 0x100000001b3ull;
+        h = (h ^ w[2]) * 0x100000001b3ull;
+    }
+    return h;
+}
+
+// The box of the positions of a range of a buffer. A streaming buffer
+// changes between its draws: its range is measured each time.
+GfxBox BufferRangeBox(GfxVertexBuffer *b, DWORD first, DWORD count)
+{
+    GfxBox box;
+    if (b->streaming) {
+        VertexBox(&b->vertices[first], count, box.low, box.high);
+        return box;
+    }
+    if (b->positionsUnknown) {
+        const uint64_t hash = PositionHash(b);
+        if (b->boxes != NULL && hash != b->positionHash)
+            b->boxes->Clear();
+        b->positionHash = hash;
+        b->positionsUnknown = false;
+    }
+    if (b->boxes == NULL)
+        b->boxes.reset(new GxmKeyCache<GfxBox, 6>());
+    const uint64_t key = (uint64_t)first << 32 | count;
+    if (const GfxBox *known = b->boxes->Find(key))
+        return *known;
+    VertexBox(&b->vertices[first], count, box.low, box.high);
+    b->boxes->Put(key) = box;
+    return box;
+}
+
 void VertexBox(const GfxVertex *vertices, DWORD count, float low[3], float high[3])
 {
     low[0] = high[0] = vertices[0].x;
@@ -604,7 +743,7 @@ static uint32_t TraceHash(uint32_t h, const void *data, size_t size)
 
 void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
                    DWORD indexCount, GfxVertexBuffer *buffer, DWORD firstVertex, bool worldSpace,
-                   GfxTexture *const textures[2], float reach);
+                   GfxTexture *const textures[2], float reach, const GfxBox *knownBox);
 
 void RecordDrawNow(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
                    DWORD indexCount, GfxVertexBuffer *buffer, DWORD firstVertex);
@@ -677,12 +816,20 @@ void RecordDrawNow(int primitive, bool transformed, const void *vertices, DWORD 
     GfxTexture *textures[2] = { s_state.stages[0].texture, s_state.stages[1].texture };
     bool worldSpace = false;
     float reach = -1.0f;
+    // The test against the view: a draw outside it is left out.
+    const bool cull = !transformed && CullWanted();
+    GfxBox box;
+    const GfxBox *knownBox = NULL;
     if (joins && !transformed && vertexCount <= kSmallDrawVertices &&
         SmallDrawToWorld((const GfxVertex *)vertices, vertexCount, small)) {
         vertices = small;
         buffer = NULL;
         firstVertex = 0;
         worldSpace = true;
+        if (cull && PointsOutsideView(ClipMatrix(kIdentityMatrix, 1), small, vertexCount)) {
+            s_counts.culled++;
+            return;
+        }
         reach = SmallDrawReach(small, vertexCount);
         GfxTexture *atlas = AtlasSmallDraw(small, vertexCount);
         if (atlas != NULL)
@@ -694,6 +841,16 @@ void RecordDrawNow(int primitive, bool transformed, const void *vertices, DWORD 
             else
                 s_counts.noAtlas[s_noAtlas]++;
         }
+    } else if (cull) {
+        if (buffer != NULL)
+            box = BufferRangeBox(buffer, firstVertex, vertexCount);
+        else
+            VertexBox((const GfxVertex *)vertices, vertexCount, box.low, box.high);
+        if (BoxOutsideView(ClipMatrix(s_state.world, 0), box)) {
+            s_counts.culled++;
+            return;
+        }
+        knownBox = &box;
     }
     // A short strip (a sprite) as a list: lists join. The odd triangles of a
     // strip have their first two corners in the other order.
@@ -722,14 +879,15 @@ void RecordDrawNow(int primitive, bool transformed, const void *vertices, DWORD 
         }
     }
     RecordNewDraw(primitive, transformed, vertices, vertexCount, indices, indexCount, buffer, firstVertex, worldSpace,
-                  textures, reach);
+                  textures, reach, knownBox);
 }
 
 // Records a draw as a command of its own. worldSpace: its vertices are in
 // world space (SmallDrawToWorld). textures: those of its two stages.
+// knownBox: the box of its vertices, where the view test found it.
 void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
                    DWORD indexCount, GfxVertexBuffer *buffer, DWORD firstVertex, bool worldSpace,
-                   GfxTexture *const textures[2], float reach)
+                   GfxTexture *const textures[2], float reach, const GfxBox *knownBox)
 {
     GfxCommand cmd = {};
     cmd.reach = -1.0f;
@@ -747,6 +905,35 @@ void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD 
             buffer->referencedRecord = s_record;
             s_frame.buffers.push_back(buffer);
         }
+        if (box && knownBox != NULL) {
+            cmd.hasBox = true;
+            memcpy(cmd.boxLow, knownBox->low, sizeof(cmd.boxLow));
+            memcpy(cmd.boxHigh, knownBox->high, sizeof(cmd.boxHigh));
+        }
+    } else if (buffer != NULL && !buffer->streaming && SnapshotsWanted()) {
+        // A buffer locked recently, before its draws: the executor copies
+        // the part that the frame draws once. The recorder copied each draw
+        // range, and the executor copied the frame again: with the stage
+        // lighting 3.6 MB twice in a frame.
+        cmd.buffer = buffer;
+        cmd.snapshot = true;
+        cmd.firstVertexByte = firstVertex * (uint32_t)sizeof(GfxVertex);
+        if (buffer->snapshotRecord != s_record) {
+            buffer->snapshotRecord = s_record;
+            buffer->snapshotIndex = (uint32_t)s_frame.snapshots.size();
+            s_frame.snapshots.push_back({ buffer, firstVertex, firstVertex + vertexCount });
+        } else {
+            GfxSnapshot &snapshot = s_frame.snapshots[buffer->snapshotIndex];
+            snapshot.first = firstVertex < snapshot.first ? firstVertex : snapshot.first;
+            snapshot.end = firstVertex + vertexCount > snapshot.end ? firstVertex + vertexCount : snapshot.end;
+        }
+        if (box) {
+            const GfxBox b = knownBox != NULL ? *knownBox : BufferRangeBox(buffer, firstVertex, vertexCount);
+            cmd.hasBox = true;
+            memcpy(cmd.boxLow, b.low, sizeof(cmd.boxLow));
+            memcpy(cmd.boxHigh, b.high, sizeof(cmd.boxHigh));
+        }
+        s_counts.snapshots++;
     } else if (buffer != NULL && s_copied.buffer == buffer && s_copied.version == buffer->version &&
                s_copied.record == s_record && firstVertex >= s_copied.first &&
                firstVertex + vertexCount <= s_copied.first + s_copied.count) {
@@ -763,7 +950,12 @@ void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD 
         cmd.firstVertexByte = AppendVertices(vertices, vertexCount * stride, stride);
         if (box) {
             cmd.hasBox = true;
-            VertexBox((const GfxVertex *)vertices, vertexCount, cmd.boxLow, cmd.boxHigh);
+            if (knownBox != NULL) {
+                memcpy(cmd.boxLow, knownBox->low, sizeof(cmd.boxLow));
+                memcpy(cmd.boxHigh, knownBox->high, sizeof(cmd.boxHigh));
+            } else {
+                VertexBox((const GfxVertex *)vertices, vertexCount, cmd.boxLow, cmd.boxHigh);
+            }
             cmd.reach = worldSpace ? reach : -1.0f;
         }
         if (buffer != NULL) {
@@ -1081,6 +1273,7 @@ static void Present(BOOL vsync, bool stretch)
     s_record++;
     s_presentedFrames++;
     AtlasGrow();
+    ReadDrawSettings();
 #if defined(VITA) && defined(OPENCMR2_DEV)
     SysVita_FramePresented();
 #endif
@@ -1118,6 +1311,8 @@ void Gfx_RecorderCountsText(char *text, size_t size)
     add(", small draws %u%s", n.small, "");
     add(" (%u joined%s", n.joined, "");
     add(", %u from the atlas)%s", n.atlas, "");
+    add(", culled %u%s", n.culled, "");
+    add(", snapshot draws %u%s", n.snapshots, "");
     list("no join", n.noJoin, kNoJoinNames, NO_JOIN_COUNT);
     list("state parts", n.changed, kChangedNames, CHANGED_COUNT);
     list("no atlas", n.noAtlas, kNoAtlasNames, NO_ATLAS_COUNT);
@@ -1388,7 +1583,7 @@ extern "C" void Gfx_DestroyVertexBuffer(GfxVertexBuffer *buffer)
     if (buffer == NULL)
         return;
     // Draws recorded this frame may still use it.
-    if (buffer->referencedRecord == s_record)
+    if (buffer->referencedRecord == s_record || buffer->snapshotRecord == s_record)
         Flush();
     if (s_executor != NULL)
         s_executor->DestroyVertexBuffer(buffer);
@@ -1404,10 +1599,15 @@ extern "C" GfxVertex *Gfx_LockVertexBuffer(GfxVertexBuffer *buffer)
         return NULL;
     // Draws recorded this frame refer to the contents before this lock: run
     // them first. It is rare: buffers drawn by reference are rarely locked.
-    if (buffer->referencedRecord == s_record)
+    // A buffer that the frame has a snapshot of is streaming from now on:
+    // the game changes it between its draws.
+    if (buffer->snapshotRecord == s_record)
+        buffer->streaming = true;
+    if (buffer->referencedRecord == s_record || buffer->snapshotRecord == s_record)
         Flush();
     buffer->version++;
     buffer->lastLockFrame = s_presentedFrames;
+    buffer->positionsUnknown = true;
     return buffer->vertices.data();
 }
 
