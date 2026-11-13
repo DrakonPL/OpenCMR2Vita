@@ -895,6 +895,9 @@ extern "C" void Sys_SetFileReadAhead(SysFile *file, DWORD blockBytes)
 {
     if (file == NULL || file->ahead != nullptr || blockBytes == 0)
         return;
+    // [audio] read_ahead = 0: the file reads as without it.
+    if (Platform_GetSettingInt("audio.read_ahead", 1) == 0)
+        return;
     const SceOff position = sceIoLseek(file->fd, 0, SCE_SEEK_CUR);
     if (position < 0)
         return;

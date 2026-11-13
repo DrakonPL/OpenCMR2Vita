@@ -5,6 +5,7 @@
 // the port can take it, which paces the thread.
 
 #include "audio/audio_mixer.h"
+#include "platform/platform_vita.h"
 #include "port/audio.h"
 #include "port/sys.h"
 
@@ -138,6 +139,11 @@ extern "C" BOOL Audio_StartMusicThread(void (*refill)(void), DWORD periodMs)
         return TRUE;
     if (refill == NULL || s_port < 0)
         return FALSE;
+    // [audio] music_thread = 0: the game's thread refills, as before.
+    if (Platform_GetSettingInt("audio.music_thread", 1) == 0) {
+        Sys_Log("audio: the music refills on the game's thread (audio.music_thread = 0)");
+        return FALSE;
+    }
     if (s_musicLock < 0)
         s_musicLock = sceKernelCreateMutex("audio_music", SCE_KERNEL_MUTEX_ATTR_RECURSIVE, 0, NULL);
     if (s_musicLock < 0) {
