@@ -2320,6 +2320,123 @@ bool Game_StageMeshOutsideView(Mesh *pMesh)
                               (DWORD)pLod->vertexOffset, (DWORD)pLod->field_0x10) == FALSE;
 }
 
+// PORT: the trees of the deferred pass in batches (Gfx_DrawBatch). The game
+// draws each tree as a mesh with a world matrix of its own: the state of
+// Graphics_DrawMeshLOD, then a small draw for each part, some 600 trees in a
+// frame of a wood. Each cost some 25 us on the PS Vita. A run of trees whose
+// meshes set the same state goes to the renderer in one call: the state of
+// Graphics_DrawMeshLOD is set once, and each part gives its texture, its
+// world matrix and its vertices. A part texture of blend mode 0 sets the
+// texture stage as the first one does: only its texture differs. The
+// renderer leaves out the draws outside the view. [video] tree_batch = 0
+// draws each tree alone.
+
+// The blend mode of the texture stage set last (Graphics.cpp).
+extern int g_unk0x00520b18;
+int Graphics_GetGeometryStateValue(void);
+
+#define TREE_BATCH_DRAWS 2048
+// The flags of a mesh that choose the state of Graphics_DrawMeshLOD: the
+// cull mode (1), the blending (8), the lighting (0x20, 0x40000).
+#define TREE_STATE_FLAGS (0x1u | 0x8u | 0x20u | 0x40000u)
+
+static GfxBatchDraw g_treeBatch[TREE_BATCH_DRAWS];
+static Texture *g_treeBatchTextures[TREE_BATCH_DRAWS];
+static int g_treeBatchCount;
+static unsigned int g_treeBatchFlags;
+
+// Whether a mesh can be drawn in a tree batch: Graphics_DrawMeshLOD draws its
+// parts and nothing more, each with a texture of blend mode 0.
+bool Game_TreeBatchable(Mesh *pMesh)
+{
+    Mesh *pLod = (Mesh *)((BYTE *)pMesh + pMesh->lodIndex * offsetof(Mesh, field_0x108));
+    int i;
+
+    if (pLod->pTriangles == NULL || pLod->partCount <= 0 || pLod->partCount > TREE_BATCH_DRAWS)
+        return false;
+    // The reflection pass draws more.
+    if ((pLod->flags & 0x200) != 0 && (pLod->flags & 0x40000) == 0 && (g_pGraphics->field913_0x3bc & 8) != 0)
+        return false;
+    for (i = 0; i < pLod->partCount; i++) {
+        Texture *pTexture = CGraphics::m_pTextureManager->textureBuffer[pLod->pParts[i]->texture];
+        if (pTexture == NULL || pTexture->blendMode != 0)
+            return false;
+    }
+    return true;
+}
+
+// Draws the tree batch, with the state Graphics_DrawMeshLOD sets for its
+// meshes, and leaves the state as the last part of the batch left it.
+void Game_FlushTreeBatch(void)
+{
+    unsigned int flags = g_treeBatchFlags;
+    unsigned int lightingMode = 0;
+    int i;
+
+    if (g_treeBatchCount == 0)
+        return;
+    if ((flags & 1) != 0)
+        CGraphics::SetCullMode(1);
+    else
+        CGraphics::SetCullMode(CGame::GetSectorDrawState());
+    if ((flags & 0x20) == 0) {
+        lightingMode = (unsigned int)Graphics_GetGeometryStateValue();
+        Graphics_SetLightingMode((flags & 0x40000) != 0 ? 3 : 2);
+    }
+    if (g_depthSortDrawLists != 0)
+        Graphics_SwitchAlphaBlendAndTest((int)((flags >> 3) & 1));
+    else
+        Graphics_SwitchAlphaBlendAndTest(0);
+    // The texture stage as the first part sets it. A stage that kept its
+    // setup for another blend mode (the texture was set already) would differ
+    // from the parts after it: then each part is drawn alone.
+    CGraphics::ApplyTextureStageChange(0, g_treeBatchTextures[0]);
+    if (g_unk0x00520b18 == 0) {
+        Gfx_DrawBatch(g_treeBatch, (DWORD)g_treeBatchCount);
+        CGraphics::ApplyTextureStageChange(0, g_treeBatchTextures[g_treeBatchCount - 1]);
+    } else {
+        for (i = 0; i < g_treeBatchCount; i++) {
+            const GfxBatchDraw *pDraw = &g_treeBatch[i];
+            CGraphics::ApplyTextureStageChange(0, g_treeBatchTextures[i]);
+            Gfx_SetTransform(GFX_TRANSFORM_WORLD, pDraw->world);
+            Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, pDraw->buffer, pDraw->firstVertex, pDraw->vertexCount,
+                                       pDraw->indices, pDraw->indexCount);
+        }
+    }
+    if ((flags & 0x20) == 0)
+        Graphics_SetLightingMode(lightingMode);
+    g_treeBatchCount = 0;
+}
+
+// Adds the parts of a tree to the batch (Game_TreeBatchable), as
+// Graphics_DrawMeshPartsByTexture draws them. A tree with other state flags
+// than the batch draws the batch first.
+void Game_AddTreeToBatch(Mesh *pMesh, const float *pMatrix)
+{
+    Mesh *pLod = (Mesh *)((BYTE *)pMesh + pMesh->lodIndex * offsetof(Mesh, field_0x108));
+    unsigned int flags = pLod->flags & TREE_STATE_FLAGS;
+    int i;
+
+    if (g_treeBatchCount > 0 && (flags != g_treeBatchFlags || g_treeBatchCount + pLod->partCount > TREE_BATCH_DRAWS))
+        Game_FlushTreeBatch();
+    g_treeBatchFlags = flags;
+    for (i = 0; i < pLod->partCount; i++) {
+        MeshPart *pPart = pLod->pParts[i];
+        Texture *pTexture = CGraphics::m_pTextureManager->textureBuffer[pPart->texture];
+        GfxBatchDraw *pDraw = &g_treeBatch[g_treeBatchCount];
+        pDraw->world = (const GfxMatrix *)pMatrix;
+        pDraw->texture = pTexture->pSurface;
+        pDraw->buffer = CGraphics::m_pTextureManager->pVertexBuffers[pLod->vertexBufferIndex];
+        pDraw->firstVertex = (DWORD)(pLod->vertexOffset + pPart->minIndex);
+        pDraw->vertexCount = (DWORD)(pLod->field_0x10 - pPart->minIndex);
+        pDraw->indices = pPart->pData;
+        pDraw->indexCount = (DWORD)pPart->indexCount;
+        g_treeBatchTextures[g_treeBatchCount] = pTexture;
+        g_treeBatchCount++;
+        CGame::m_unk0x0059ce18 += pPart->indexCount / 3;
+    }
+}
+
 // Draws the objects the deferred pass of the static stage objects queued:
 // sorts them by view depth (farthest first) and, for each one, binds its
 // texture, sets its world matrix and marks the mesh for the culling test of
@@ -2345,9 +2462,18 @@ void Game_DrawDeferredObjects(void)
         // Game_OrderDeferredDraws).
         static unsigned short order[4096];
         Game_OrderDeferredDraws(sorted, (unsigned int)CGame::m_deferredDrawCount, g_depthSortDrawLists != 0, order);
+        // PORT: the trees in batches (Game_AddTreeToBatch). The last object
+        // is drawn alone: the state after the loop is then the original's.
+        const bool batches = Sys_GetOption("video.tree_batch", 1) != 0;
         for (i = 0; i < (unsigned int)CGame::m_deferredDrawCount; i++) {
             pObject = sorted[order[i]].pObject;
             Frontend_SetObjectField118(CGraphics::m_pTextureManager->textureBuffer[pObject->pMesh->pTriangles->textures[0]], 0);
+            if (batches && i + 1 < (unsigned int)CGame::m_deferredDrawCount && Game_TreeBatchable(pObject->pMesh)) {
+                pObject->pMesh->flags |= 8;
+                Game_AddTreeToBatch(pObject->pMesh, pObject->matrix);
+                continue;
+            }
+            Game_FlushTreeBatch();
             Gfx_SetTransform(GFX_TRANSFORM_WORLD, (GfxMatrix *)pObject->matrix);
             pObject->pMesh->flags |= 8;
             // PORT: an object outside the view is left out

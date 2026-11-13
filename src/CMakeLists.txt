@@ -317,6 +317,7 @@ set_target_properties(opencmr2_potrace PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(opencmr2_platform PRIVATE opencmr2_potrace)
 target_sources(opencmr2_platform PRIVATE
     render/gfx_core.cpp
+    render/gfx_small_batch.cpp
     render/outline_font.cpp
     render/distance_field.cpp
     render/vector_sprite.cpp

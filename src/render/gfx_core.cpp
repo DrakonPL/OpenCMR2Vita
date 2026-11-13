@@ -9,6 +9,7 @@
 #include "port/sys.h"
 #include "port/diagnostics.h"
 #include "render/gfx_internal.h"
+#include "render/gfx_small_draw.h"
 #include "render/texture_atlas.h"
 #include "render/shader_key.h"
 
@@ -114,37 +115,20 @@ struct CopiedRange {
 };
 CopiedRange s_copied;
 
-// A draw that joins the draw before has at most this many vertices with it
-// (the indices are 16 bits wide).
-const DWORD kJoinedVertices = 4096;
-// A 3D draw of at most this many vertices is recorded in world space.
-const DWORD kSmallDrawVertices = 16;
+const DWORD kJoinedVertices = kGfxJoinedVertices;
+const DWORD kSmallDrawVertices = kGfxSmallDrawVertices;
 
 // The vertices of a small 3D draw in world space, for an executor that takes
-// joined draws: positions through the world matrix, normals through its
-// upper 3x3 part (as fixed3d_v.cg does it, with the view matrix after). The
-// game draws each trackside billboard as two triangles with a world matrix
-// of its own, some 300 in a frame: in world space they have one state, and
-// the executor sets up no matrix for each. False (the draw stays as it is)
-// for a world matrix that is the identity or not affine.
+// joined draws (gfx_small_draw.h). The game draws each trackside billboard as
+// two triangles with a world matrix of its own, some 300 in a frame: in
+// world space they have one state, and the executor sets up no matrix for
+// each. False (the draw stays as it is) for a world matrix that is the
+// identity or not affine.
 bool SmallDrawToWorld(const GfxVertex *in, DWORD count, GfxVertex *out)
 {
-    const GfxMatrix &m = s_state.world;
-    if (m._14 != 0.0f || m._24 != 0.0f || m._34 != 0.0f || m._44 != 1.0f)
+    if (!Gfx_SmallDrawWorld(s_state.world, RecordedWorldOf(true)))
         return false;
-    if (memcmp(&m, &RecordedWorldOf(true), sizeof(m)) == 0)
-        return false;
-    for (DWORD i = 0; i < count; i++) {
-        const GfxVertex &v = in[i];
-        GfxVertex &o = out[i];
-        o = v;
-        o.x = v.x * m._11 + v.y * m._21 + v.z * m._31 + m._41;
-        o.y = v.x * m._12 + v.y * m._22 + v.z * m._32 + m._42;
-        o.z = v.x * m._13 + v.y * m._23 + v.z * m._33 + m._43;
-        o.nx = v.nx * m._11 + v.ny * m._21 + v.nz * m._31;
-        o.ny = v.nx * m._12 + v.ny * m._22 + v.nz * m._32;
-        o.nz = v.nx * m._13 + v.ny * m._23 + v.nz * m._33;
-    }
+    Gfx_SmallDrawToWorld(s_state.world, in, count, out);
     return true;
 }
 // A strip of at most this many vertices is recorded as a list, which joins.
@@ -192,7 +176,7 @@ const char *const kChangedNames[CHANGED_COUNT] = { "none", "first", "world", "vi
                                                    "alpha test", "factor", "stage 0", "stage 1", "viewport" };
 
 struct RecorderCounts {
-    uint32_t states, small, joined, atlas, culled, snapshots;
+    uint32_t states, small, joined, atlas, culled, snapshots, batched;
     uint32_t noJoin[NO_JOIN_COUNT], noAtlas[NO_ATLAS_COUNT], changed[CHANGED_COUNT];
 };
 RecorderCounts s_counts;
@@ -206,11 +190,6 @@ inline bool NoJoin(int reason)
     return false;
 }
 
-inline GfxTexture *NoAtlas(int reason)
-{
-    s_noAtlas = reason;
-    return NULL;
-}
 
 // ---- the atlas of the small quads ----
 //
@@ -276,38 +255,49 @@ const AtlasEntry *AtlasEntryOf(GfxTexture *t)
     return &s_atlasEntries.back();
 }
 
-// The atlas for a small draw in world space, with the draw's texture
-// coordinates moved into it: NULL where the draw stays with its texture. It
-// goes to the atlas with one clamped texture and coordinates inside it: the
-// atlas then gives each pixel what the texture gave.
-GfxTexture *AtlasSmallDraw(GfxVertex *vertices, DWORD count)
+// The place in the atlas of the texture of a small draw in world space (stage
+// 0 of the state), or NULL where the draw stays with its texture. A draw goes
+// to the atlas with one clamped texture and coordinates inside it: the atlas
+// then gives each pixel what the texture gave.
+const AtlasEntry *AtlasPlaceOf(const GfxVertex *vertices, DWORD count)
 {
     if (s_atlasWanted < 0)
         s_atlasWanted = Platform_GetSettingInt("video.quad_atlas", 1) != 0 ? 1 : 0;
+    s_noAtlas = NO_ATLAS_OFF;
     if (s_atlasWanted == 0)
-        return NoAtlas(NO_ATLAS_OFF);
+        return NULL;
     const GfxStageState &stage = s_state.stages[0];
+    s_noAtlas = NO_ATLAS_TEXTURE;
     if (stage.texture == NULL)
-        return NoAtlas(NO_ATLAS_TEXTURE);
+        return NULL;
     // A second stage that is off reads no texture.
+    s_noAtlas = NO_ATLAS_STAGE1;
     if (s_state.stages[1].texture != NULL && s_state.stages[1].colorOp != GFX_TOP_DISABLE)
-        return NoAtlas(NO_ATLAS_STAGE1);
+        return NULL;
+    s_noAtlas = NO_ATLAS_ADDRESS;
     if (stage.address != GFX_ADDRESS_CLAMP)
-        return NoAtlas(NO_ATLAS_ADDRESS);
+        return NULL;
+    s_noAtlas = NO_ATLAS_SOURCE;
     if (stage.texCoordIndex != 0 || stage.textureTransform != GFX_TTFF_DISABLE)
-        return NoAtlas(NO_ATLAS_SOURCE);
+        return NULL;
+    s_noAtlas = NO_ATLAS_RANGE;
     for (DWORD i = 0; i < count; i++)
         if (!(vertices[i].u0 >= 0.0f && vertices[i].u0 <= 1.0f && vertices[i].v0 >= 0.0f && vertices[i].v0 <= 1.0f))
-            return NoAtlas(NO_ATLAS_RANGE);
+            return NULL;
     const AtlasEntry *e = AtlasEntryOf(stage.texture);
+    if (e != NULL)
+        s_atlasRecord = s_record;
+    return e;
+}
+
+// The atlas for a small draw in world space, with the draw's texture
+// coordinates moved into it: NULL where the draw stays with its texture.
+GfxTexture *AtlasSmallDraw(GfxVertex *vertices, DWORD count)
+{
+    const AtlasEntry *e = AtlasPlaceOf(vertices, count);
     if (e == NULL)
         return NULL;
-    const float scale = 1.0f / (float)s_atlasSize;
-    for (DWORD i = 0; i < count; i++) {
-        vertices[i].u0 = ((float)e->x + vertices[i].u0 * (float)stage.texture->width) * scale;
-        vertices[i].v0 = ((float)e->y + vertices[i].v0 * (float)stage.texture->height) * scale;
-    }
-    s_atlasRecord = s_record;
+    Gfx_AtlasRemap(vertices, count, e->x, e->y, e->texture->width, e->texture->height, 1.0f / (float)s_atlasSize);
     return s_atlas;
 }
 
@@ -350,21 +340,14 @@ void AtlasGrow()
 // draw (some 280 draws in a frame of a wood).
 float SmallDrawReach(const GfxVertex *vertices, DWORD count)
 {
-    const GfxMatrix &v = s_state.view;
-    float farthest = 0.0f;
-    for (DWORD i = 0; i < count; i++) {
-        const GfxVertex &p = vertices[i];
-        const float x = p.x * v._11 + p.y * v._21 + p.z * v._31 + v._41;
-        const float y = p.x * v._12 + p.y * v._22 + p.z * v._32 + v._42;
-        const float z = p.x * v._13 + p.y * v._23 + p.z * v._33 + v._43;
-        const float squared = x * x + y * y + z * z;
-        farthest = squared > farthest ? squared : farthest;
-    }
-    return sqrtf(farthest);
+    return Gfx_SmallDrawReach(s_state.view, vertices, count);
 }
 
 // The box of the positions of count vertices (count is at least 1).
-void VertexBox(const GfxVertex *vertices, DWORD count, float low[3], float high[3]);
+inline void VertexBox(const GfxVertex *vertices, DWORD count, float low[3], float high[3])
+{
+    Gfx_VertexBox(vertices, count, low, high);
+}
 
 // ---- the test of a draw against the view ----
 //
@@ -456,45 +439,23 @@ const float *ClipMatrix(const GfxMatrix &world, int slot)
     t.world = world;
     t.view = s_state.view;
     t.projection = s_state.projection;
-    float wv[16];
-    const float *a = &world._11, *v = &s_state.view._11, *p = &s_state.projection._11;
-    for (int r = 0; r < 4; r++)
-        for (int k = 0; k < 4; k++)
-            wv[r * 4 + k] = a[r * 4] * v[k] + a[r * 4 + 1] * v[4 + k] + a[r * 4 + 2] * v[8 + k] + a[r * 4 + 3] * v[12 + k];
-    for (int r = 0; r < 4; r++)
-        for (int k = 0; k < 4; k++)
-            t.m[r * 4 + k] = wv[r * 4] * p[k] + wv[r * 4 + 1] * p[4 + k] + wv[r * 4 + 2] * p[8 + k] + wv[r * 4 + 3] * p[12 + k];
+    Gfx_ClipMatrixOf(world, s_state.view, s_state.projection, t.m);
     t.valid = true;
     return t.m;
 }
 
-// The planes of the view a point is outside of, in the clip space of
-// Direct3D: -w <= x <= w, -w <= y <= w, 0 <= z <= w. A draw whose points are
-// all outside one plane draws nothing.
-inline unsigned OutsidePlanes(const float *m, float x, float y, float z)
+// The view test of points and of a box (gfx_small_draw.h).
+inline bool PointsOutsideView(const float *m, const GfxVertex *vertices, DWORD count)
 {
-    const float cx = x * m[0] + y * m[4] + z * m[8] + m[12];
-    const float cy = x * m[1] + y * m[5] + z * m[9] + m[13];
-    const float cz = x * m[2] + y * m[6] + z * m[10] + m[14];
-    const float cw = x * m[3] + y * m[7] + z * m[11] + m[15];
-    return (cx < -cw ? 1u : 0u) | (cx > cw ? 2u : 0u) | (cy < -cw ? 4u : 0u) | (cy > cw ? 8u : 0u) |
-           (cz < 0.0f ? 16u : 0u) | (cz > cw ? 32u : 0u);
-}
-
-bool PointsOutsideView(const float *m, const GfxVertex *vertices, DWORD count)
-{
-    unsigned all = 63;
-    for (DWORD i = 0; i < count && all != 0; i++)
-        all &= OutsidePlanes(m, vertices[i].x, vertices[i].y, vertices[i].z);
-    return all != 0;
+    return Gfx_PointsOutsideView(m, vertices, count);
 }
 
 bool BoxOutsideView(const float *m, const GfxBox &b)
 {
     unsigned all = 63;
     for (int i = 0; i < 8 && all != 0; i++)
-        all &= OutsidePlanes(m, (i & 1) ? b.high[0] : b.low[0], (i & 2) ? b.high[1] : b.low[1],
-                             (i & 4) ? b.high[2] : b.low[2]);
+        all &= Gfx_OutsidePlanes(m, (i & 1) ? b.high[0] : b.low[0], (i & 2) ? b.high[1] : b.low[1],
+                                 (i & 4) ? b.high[2] : b.low[2]);
     return all != 0;
 }
 
@@ -537,22 +498,6 @@ GfxBox BufferRangeBox(GfxVertexBuffer *b, DWORD first, DWORD count)
     VertexBox(&b->vertices[first], count, box.low, box.high);
     b->boxes->Put(key) = box;
     return box;
-}
-
-void VertexBox(const GfxVertex *vertices, DWORD count, float low[3], float high[3])
-{
-    low[0] = high[0] = vertices[0].x;
-    low[1] = high[1] = vertices[0].y;
-    low[2] = high[2] = vertices[0].z;
-    for (DWORD i = 1; i < count; i++) {
-        const GfxVertex &p = vertices[i];
-        low[0] = p.x < low[0] ? p.x : low[0];
-        high[0] = p.x > high[0] ? p.x : high[0];
-        low[1] = p.y < low[1] ? p.y : low[1];
-        high[1] = p.y > high[1] ? p.y : high[1];
-        low[2] = p.z < low[2] ? p.z : low[2];
-        high[2] = p.z > high[2] ? p.z : high[2];
-    }
 }
 
 // Adds a draw of vertices in the frame's data to the draw before, where the
@@ -1295,6 +1240,16 @@ extern "C" void Gfx_EndScene(void)
 {
 }
 
+// Runs the frame recorded so far on the executor: the small batches become
+// draws first.
+static void Submit(bool present, bool vsync, bool stretch)
+{
+    if (s_executor == NULL)
+        return;
+    Gfx_ExpandSmallBatches(s_frame);
+    s_executor->Execute(s_frame, s_textures, s_readback, present, vsync, stretch);
+}
+
 static void Present(BOOL vsync, bool stretch)
 {
     if (FILE *trace = TraceFile()) {
@@ -1318,8 +1273,7 @@ static void Present(BOOL vsync, bool stretch)
     }
     if (Diagnostics::observer)
         Diagnostics::observer->BeginPresent();
-    if (s_executor != NULL)
-        s_executor->Execute(s_frame, s_textures, s_readback, true, vsync != 0, stretch);
+    Submit(true, vsync != 0, stretch);
     s_frame.Reset();
     s_record++;
     s_presentedFrames++;
@@ -1364,6 +1318,7 @@ void Gfx_RecorderCountsText(char *text, size_t size)
     add(", %u from the atlas)%s", n.atlas, "");
     add(", culled %u%s", n.culled, "");
     add(", snapshot draws %u%s", n.snapshots, "");
+    add(", batched %u%s", n.batched, "");
     list("no join", n.noJoin, kNoJoinNames, NO_JOIN_COUNT);
     list("state parts", n.changed, kChangedNames, CHANGED_COUNT);
     list("no atlas", n.noAtlas, kNoAtlasNames, NO_ATLAS_COUNT);
@@ -1382,8 +1337,7 @@ static void Flush(void)
 {
     if (TraceFile() != NULL)
         TraceAddFrameSizes(s_frame);
-    if (s_executor != NULL)
-        s_executor->Execute(s_frame, s_textures, s_readback, false, false);
+    Submit(false, false, false);
     s_frame.Reset();
     s_record++;
     s_stateDirty = true;
@@ -1709,6 +1663,89 @@ extern "C" void Gfx_DrawIndexedPrimitiveVB(int primitive, GfxVertexBuffer *buffe
                firstVertex);
 }
 
+namespace {
+
+// Adds a small draw of a batch to the frame (Gfx_DrawBatch), with the world
+// matrix and the stage 0 texture of the state. The batch command at the end
+// of the frame's commands takes it while the state it recorded is the state;
+// else a new batch command starts. The atlas place is found here: the atlas
+// belongs to the recorder.
+void RecordSmallItem(const GfxVertex *vertices, DWORD vertexCount, const WORD *indices, DWORD indexCount)
+{
+#if defined(VITA) && defined(OPENCMR2_DEV)
+    g_sysVitaDrawCounts.calls++;
+#endif
+    s_drawOverride = DrawOverride(false);
+    const bool open = !s_frame.commands.empty() && s_frame.commands.back().type == GFX_CMD_SMALL_BATCH &&
+                      StateIsRecorded(true) && s_frame.commands.back().state == s_frame.states.size() - 1 &&
+                      s_frame.commands.back().textures[1] == s_state.stages[1].texture;
+    if (!open) {
+        GfxCommand cmd = {};
+        cmd.type = GFX_CMD_SMALL_BATCH;
+        cmd.reach = -1.0f;
+        cmd.state = RecordState(true);
+        cmd.textures[1] = s_state.stages[1].texture;
+        cmd.cull = CullWanted();
+        cmd.firstItem = (uint32_t)s_frame.smallItems.size();
+        s_frame.commands.push_back(cmd);
+#if defined(VITA) && defined(OPENCMR2_DEV)
+        g_sysVitaDrawCounts.commands++;
+#endif
+    }
+    GfxSmallItem item = {};
+    item.world = s_state.world;
+    if (const AtlasEntry *e = AtlasPlaceOf(vertices, vertexCount)) {
+        item.texture = s_atlas;
+        item.atlasX = e->x;
+        item.atlasY = e->y;
+        item.textureWidth = e->texture->width;
+        item.textureHeight = e->texture->height;
+        item.atlasScale = 1.0f / (float)s_atlasSize;
+    } else {
+        item.texture = s_state.stages[0].texture;
+    }
+    item.firstVertex = (uint32_t)s_frame.smallVertices.size();
+    item.vertexCount = vertexCount;
+    s_frame.smallVertices.insert(s_frame.smallVertices.end(), vertices, vertices + vertexCount);
+    item.firstIndex = (uint32_t)s_frame.smallIndices.size();
+    item.indexCount = indexCount;
+    s_frame.smallIndices.insert(s_frame.smallIndices.end(), indices, indices + indexCount);
+    s_frame.smallItems.push_back(item);
+    s_frame.commands.back().itemCount++;
+    std::vector<GfxTexture *> &read = s_frame.smallTextures;
+    if (item.texture != NULL && std::find(read.begin(), read.end(), item.texture) == read.end())
+        read.push_back(item.texture);
+    s_counts.batched++;
+}
+
+} // namespace
+
+extern "C" void Gfx_DrawBatch(const GfxBatchDraw *draws, DWORD count)
+{
+    const void *caller = __builtin_return_address(0);
+    // The small draws go into the frame as a batch where the executor takes
+    // joined draws. Otherwise, and with the trace (a line for each draw),
+    // each draw is recorded as the game makes it alone.
+    const bool batch = s_executor != NULL && s_executor->JoinsDraws() && TraceFile() == NULL;
+    for (DWORD i = 0; i < count; i++) {
+        const GfxBatchDraw &d = draws[i];
+        if (d.world != NULL)
+            Gfx_SetTransform(GFX_TRANSFORM_WORLD, d.world);
+        Gfx_SetTexture(0, d.texture);
+        GfxVertexBuffer *buffer = d.buffer;
+        if (buffer == NULL || d.firstVertex + d.vertexCount > buffer->vertices.size())
+            continue;
+        const GfxVertex *vertices = buffer->vertices.data() + d.firstVertex;
+        if (batch && d.vertexCount > 0 && d.vertexCount <= kSmallDrawVertices && d.indices != NULL &&
+            d.indexCount > 0 && Gfx_SmallDrawWorld(s_state.world, kIdentityMatrix)) {
+            RecordSmallItem(vertices, d.vertexCount, d.indices, d.indexCount);
+            continue;
+        }
+        s_traceCaller = caller;
+        RecordDraw(GFX_TRIANGLELIST, false, vertices, d.vertexCount, d.indices, d.indexCount, buffer, d.firstVertex);
+    }
+}
+
 extern "C" void Gfx_DrawPrimitive(int primitive, const GfxVertex *vertices, DWORD vertexCount)
 {
     s_traceCaller = __builtin_return_address(0);
@@ -1810,7 +1847,10 @@ extern "C" void Gfx_DestroyTexture(GfxTexture *texture)
         for (const GfxDrawState &state : s_frame.states)
             used = used || uses(state.stages[0].texture) || uses(state.stages[1].texture);
         for (const GfxCommand &command : s_frame.commands)
-            used = used || (command.type == GFX_CMD_DRAW && (uses(command.textures[0]) || uses(command.textures[1])));
+            used = used || ((command.type == GFX_CMD_DRAW || command.type == GFX_CMD_SMALL_BATCH) &&
+                            (uses(command.textures[0]) || uses(command.textures[1])));
+        for (GfxTexture *t : s_frame.smallTextures)
+            used = used || uses(t);
         if (used)
             Flush();
     }

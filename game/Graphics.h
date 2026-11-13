@@ -1499,6 +1499,9 @@ private:
     friend void Game_DrawDeferredObjects(void);
     friend int Graphics_RenderNodeCubeMapFaces(SceneNode *pNode, int bit);
     friend int Game_DrawSceneViewport(struct SceneNode *pRoot, struct SceneNode *pCamera, void *pRect, int bit, BYTE flag);
+    friend bool Game_TreeBatchable(Mesh *pMesh);
+    friend void Game_AddTreeToBatch(Mesh *pMesh, const float *pMatrix);
+    friend void Game_FlushTreeBatch(void);
 };
 
 

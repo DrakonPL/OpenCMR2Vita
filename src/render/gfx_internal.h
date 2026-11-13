@@ -138,7 +138,11 @@ enum GfxCommandType {
     GFX_CMD_DRAW,
     GFX_CMD_CLEAR,
     GFX_CMD_TARGET,
-    GFX_CMD_BACKDROP            // copy the back buffer for the distance fade
+    GFX_CMD_BACKDROP,           // copy the back buffer for the distance fade
+    // Small 3D draws of a batch (Gfx_DrawBatch), as the game made them:
+    // Gfx_ExpandSmallBatches makes them draws before an executor runs the
+    // frame. An executor never gets this command.
+    GFX_CMD_SMALL_BATCH
 };
 
 struct GfxCommand {
@@ -174,6 +178,11 @@ struct GfxCommand {
     bool hasBox;
     float boxLow[3], boxHigh[3];
     float reach;
+    // small batch: the items firstItem.. of the frame's smallItems, all with
+    // the state (in world space) and textures[1]. cull: they are tested
+    // against the view.
+    uint32_t firstItem, itemCount;
+    bool cull;
     // clear
     DWORD clearFlags;
     DWORD clearColor;
@@ -191,6 +200,19 @@ struct GfxSnapshot {
     uint32_t first, end;
 };
 
+// A small 3D draw of a batch (GFX_CMD_SMALL_BATCH), as the game made it: its
+// vertices in their own space, its world matrix, and the texture of stage 0.
+// A draw from the atlas has its place in the atlas (atlasScale is 1 / the
+// size of the atlas, 0 for a draw with its own texture).
+struct GfxSmallItem {
+    GfxMatrix world;
+    GfxTexture *texture;
+    int atlasX, atlasY, textureWidth, textureHeight;
+    float atlasScale;
+    uint32_t firstVertex, vertexCount;      // into GfxFrame::smallVertices
+    uint32_t firstIndex, indexCount;        // into GfxFrame::smallIndices
+};
+
 struct GfxFrame {
     std::vector<uint8_t> vertices;
     std::vector<uint16_t> indices;
@@ -198,6 +220,13 @@ struct GfxFrame {
     std::vector<GfxCommand> commands;
     std::vector<GfxVertexBuffer *> buffers;     // drawn from, each once
     std::vector<GfxSnapshot> snapshots;         // each buffer once
+    // The small batches: their draws, vertices and indices, and the textures
+    // the draws read (each once), for the executor to make ready before the
+    // batches are draws.
+    std::vector<GfxSmallItem> smallItems;
+    std::vector<GfxVertex> smallVertices;
+    std::vector<uint16_t> smallIndices;
+    std::vector<GfxTexture *> smallTextures;
     void Reset()
     {
         vertices.clear();
@@ -206,8 +235,19 @@ struct GfxFrame {
         commands.clear();
         buffers.clear();
         snapshots.clear();
+        smallItems.clear();
+        smallVertices.clear();
+        smallIndices.clear();
+        smallTextures.clear();
     }
 };
+
+// Makes the small batches of a frame (GFX_CMD_SMALL_BATCH) draws of the
+// frame's vertex data, in their place among the commands: the vertices in
+// world space, the draws outside the view left out, the coordinates of the
+// atlas, and the draws of one texture joined, as the recorder does it for a
+// small draw made alone (gfx_small_draw.h). Reads only the frame.
+void Gfx_ExpandSmallBatches(GfxFrame &frame);
 
 struct GfxReadback {
     bool requested = false;
