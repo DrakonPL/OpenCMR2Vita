@@ -449,7 +449,9 @@ int main()
         Billboard(2.0f, 10.0f, 5.0f);
         Gfx_SetStageAddress(0, GFX_ADDRESS_CLAMP);
         Gfx_SetTexture(1, pine);
+        Gfx_SetStageColorOp(1, GFX_TOP_MODULATE);
         Billboard(2.0f, 10.0f, 5.0f);
+        Gfx_SetStageColorOp(1, GFX_TOP_DISABLE);
         Gfx_SetTexture(1, NULL);
         Gfx_SetTexture(0, plain);
         Billboard(2.0f, 10.0f, 5.0f);
@@ -481,7 +483,37 @@ int main()
         Gfx_Present(FALSE);
         REQUIRE(Draws() == 2 && Draw(0).vertexCount == 8 && Draw(1).vertexCount == 8);
         REQUIRE(Draw(0).textures[0] == atlas && Vertex3D(Draw(1), 0).z == 30.0f);
+        // A quad not far before the start of the fade joins a run of each
+        // kind: the game's order has quads of the two sides in turns there.
+        // A quad well before the start does not join a run with the fade,
+        // and a quad with the fade does not join a run without it.
+        Billboard(2.0f, 10.0f, 150.0f);
+        Billboard(2.0f, 10.0f, 90.0f);
+        Billboard(2.0f, 10.0f, 110.0f);
+        Billboard(2.0f, 10.0f, 80.0f);
+        Billboard(2.0f, 10.0f, 60.0f);
+        Billboard(2.0f, 10.0f, 85.0f);
+        Billboard(2.0f, 10.0f, 30.0f);
+        Billboard(2.0f, 10.0f, 120.0f);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 3 && Draw(0).vertexCount == 16 && Draw(1).vertexCount == 12 && Draw(2).vertexCount == 4);
+        REQUIRE(Vertex3D(Draw(1), 0).z == 60.0f && Vertex3D(Draw(2), 0).z == 120.0f);
+        // A run that starts not far before the fade is a run without it.
+        Billboard(2.0f, 10.0f, 90.0f);
+        Billboard(2.0f, 10.0f, 150.0f);
+        Billboard(2.0f, 10.0f, 95.0f);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 2 && Draw(0).vertexCount == 4 && Draw(1).vertexCount == 8);
         Gfx_SetDistanceFade(0.0f, 0.0f);
+
+        // A second stage that is off reads no texture: its texture does not
+        // keep a quad out of the atlas.
+        Gfx_SetTexture(1, pine);
+        Billboard(2.0f, 10.0f, 5.0f);
+        Billboard(3.0f, 20.0f, 6.0f);
+        Gfx_SetTexture(1, NULL);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && Draw(0).vertexCount == 8 && Draw(0).textures[0] == atlas);
 
         // A texture that changes or goes: the atlas starts again, after the
         // draws that are recorded with it. The next draw has the new texels.
@@ -505,6 +537,64 @@ int main()
         Gfx_Present(FALSE);
         REQUIRE(Draws() == 1 && Draw(0).textures[0] == atlas && Vertex3D(Draw(0), 0).u0 == 4.0f / size);
         REQUIRE(Texel(atlas, 4, 4) == Texel(oak, 0, 0));
+        // The atlas has room for nine textures of 256 x 256 with their
+        // borders, beside the oak. The tenth finds no room and stays with
+        // its texture for that frame. The next frame starts a larger atlas,
+        // with room for all of them.
+        {
+            GfxTexture *trees[10];
+            for (int i = 0; i < 10; i++) {
+                trees[i] = TreeTexture(256, 256, 10 + (unsigned)i);
+                REQUIRE(trees[i] != NULL);
+            }
+            const auto forest = [&] {
+                for (int i = 0; i < 10; i++) {
+                    Gfx_SetTexture(0, trees[i]);
+                    Billboard(2.0f, 10.0f + (float)i, 5.0f);
+                }
+            };
+            forest();
+            Gfx_Present(FALSE);
+            REQUIRE(Draws() == 2 && Draw(0).vertexCount == 36 && Draw(1).vertexCount == 4);
+            REQUIRE(Draw(1).textures[0] == trees[9] && Vertex3D(Draw(1), 1).u0 == 1.0f);
+            forest();
+            Gfx_SetTexture(0, oak);
+            Billboard(2.0f, 30.0f, 5.0f);
+            Gfx_Present(FALSE);
+            REQUIRE(Draws() == 1 && Draw(0).vertexCount == 44);
+            const GfxTexture *large = Draw(0).textures[0];
+            REQUIRE(large != NULL && large->width == 2048 && large->height == 2048 && large->format == GFX_FORMAT_BC3);
+            // Seven of them in a row of the large atlas: the tenth is the
+            // third of the second row.
+            const float largeSize = 2048.0f;
+            REQUIRE(Vertex3D(Draw(0), 0).u0 == 4.0f / largeSize && Vertex3D(Draw(0), 1).u0 == 260.0f / largeSize);
+            REQUIRE(Vertex3D(Draw(0), 36).u0 == (528.0f + 4.0f) / largeSize);
+            REQUIRE(Vertex3D(Draw(0), 37).u0 == (528.0f + 260.0f) / largeSize);
+            for (int y = 0; y < 256; y += 17)
+                for (int x = 0; x < 256; x += 13) {
+                    REQUIRE(Texel(large, 4 + x, 4 + y) == Texel(trees[0], x, y));
+                    REQUIRE(Texel(large, 532 + x, 268 + y) == Texel(trees[9], x, y));
+                }
+            // The large atlas stays: the next frame draws from it.
+            forest();
+            Gfx_Present(FALSE);
+            REQUIRE(Draws() == 1 && Draw(0).vertexCount == 40 && Draw(0).textures[0] == large);
+            // The textures of the next stage have the room of the large
+            // atlas also.
+            Gfx_SetTexture(0, NULL);
+            for (int i = 0; i < 10; i++) {
+                Gfx_DestroyTexture(trees[i]);
+                trees[i] = TreeTexture(256, 256, 30 + (unsigned)i);
+                REQUIRE(trees[i] != NULL);
+            }
+            forest();
+            Gfx_Present(FALSE);
+            REQUIRE(Draws() == 1 && Draw(0).vertexCount == 40 && Draw(0).textures[0] == large);
+            Gfx_SetTexture(0, NULL);
+            for (GfxTexture *tree : trees)
+                Gfx_DestroyTexture(tree);
+            Gfx_SetTexture(0, oak);
+        }
         // An executor that does not take joined draws has no atlas.
         s_joins = false;
         Billboard(2.0f, 10.0f, 5.0f);

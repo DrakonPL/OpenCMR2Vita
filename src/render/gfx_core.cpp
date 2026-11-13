@@ -149,6 +149,69 @@ bool SmallDrawToWorld(const GfxVertex *in, DWORD count, GfxVertex *out)
 // A strip of at most this many vertices is recorded as a list, which joins.
 const DWORD kJoinedStrip = 6;
 
+// ---- the counts for the logs (Gfx_RecorderCountsText) ----
+
+// Why a small draw in world space did not join the draw before.
+enum {
+    NO_JOIN_STATE,          // the state changed
+    NO_JOIN_FADE,           // the other side of the distance fade
+    NO_JOIN_PRIMITIVE,      // not a list
+    NO_JOIN_COMMAND,        // the draw before is of another kind
+    NO_JOIN_TEXTURE,        // another texture
+    NO_JOIN_SIZE,           // too many vertices together
+    NO_JOIN_DATA,           // the draw before does not end the frame's data
+    NO_JOIN_COUNT
+};
+const char *const kNoJoinNames[NO_JOIN_COUNT] = { "state", "fade", "primitive", "command", "texture", "size", "data" };
+
+// Why a small draw in world space did not draw from the atlas.
+enum {
+    NO_ATLAS_OFF,           // video.quad_atlas = 0
+    NO_ATLAS_TEXTURE,       // no texture
+    NO_ATLAS_STAGE1,        // a second texture
+    NO_ATLAS_ADDRESS,       // not clamped
+    NO_ATLAS_SOURCE,        // the coordinates are not those of the vertex
+    NO_ATLAS_RANGE,         // coordinates outside the texture
+    NO_ATLAS_FORMAT,        // not a plain BC3 texture of one level
+    NO_ATLAS_LARGE,         // too large
+    NO_ATLAS_ROOM,          // the atlas is full
+    NO_ATLAS_COUNT
+};
+const char *const kNoAtlasNames[NO_ATLAS_COUNT] = { "off", "no texture", "stage 1", "address", "source", "range",
+                                                    "format", "large", "room" };
+
+// The parts of the state that changed for a small draw that did not join
+// for its state. "none": the game set a value and set it back.
+enum {
+    CHANGED_NONE, CHANGED_FIRST, CHANGED_WORLD, CHANGED_VIEW, CHANGED_TEXTURE_MATRIX, CHANGED_LIGHTS,
+    CHANGED_MATERIAL, CHANGED_LIGHTING, CHANGED_FOG, CHANGED_FADE, CHANGED_DEPTH, CHANGED_CULL, CHANGED_BLEND,
+    CHANGED_ALPHA_TEST, CHANGED_FACTOR, CHANGED_STAGE0, CHANGED_STAGE1, CHANGED_VIEWPORT, CHANGED_COUNT
+};
+const char *const kChangedNames[CHANGED_COUNT] = { "none", "first", "world", "view", "texture matrix", "lights",
+                                                   "material", "lighting", "fog", "fade", "depth", "cull", "blend",
+                                                   "alpha test", "factor", "stage 0", "stage 1", "viewport" };
+
+struct RecorderCounts {
+    uint32_t states, small, joined, atlas;
+    uint32_t noJoin[NO_JOIN_COUNT], noAtlas[NO_ATLAS_COUNT], changed[CHANGED_COUNT];
+};
+RecorderCounts s_counts;
+bool s_countsWanted;    // a log reads the counts
+int s_noJoin;           // why JoinDraw returned false
+int s_noAtlas;          // why AtlasSmallDraw returned NULL
+
+inline bool NoJoin(int reason)
+{
+    s_noJoin = reason;
+    return false;
+}
+
+inline GfxTexture *NoAtlas(int reason)
+{
+    s_noAtlas = reason;
+    return NULL;
+}
+
 // ---- the atlas of the small quads ----
 //
 // The game draws each trackside tree as a quad with a world matrix and a
@@ -159,7 +222,13 @@ const DWORD kJoinedStrip = 6;
 // BC3 texture that the recorder fills from the textures' own blocks, each
 // with a border (texture_atlas.h), at a texture's first draw.
 
-constexpr int kAtlasSize = 1024;        // texels on each side
+// The atlas starts with kAtlasSize texels on each side. With the border of
+// each texture, that is room for nine textures of 256 x 256. An atlas that
+// is full starts again with kAtlasLargeSize texels on each side in the next
+// frame (room for 49 of them): the executor loads the whole atlas for each
+// new texture in it, so the small atlas is first.
+constexpr int kAtlasSize = 1024;
+constexpr int kAtlasLargeSize = 2048;
 constexpr int kAtlasTextureSize = 256;  // the largest texture that goes in
 
 struct AtlasEntry {
@@ -167,6 +236,8 @@ struct AtlasEntry {
     int x, y;       // the texel of the atlas where the texture starts
 };
 GfxTexture *s_atlas;
+int s_atlasSize = kAtlasSize;   // texels on each side of the atlas, or of the next atlas
+bool s_atlasFull;               // a texture found no room: the large atlas starts with the next frame
 int s_atlasWanted = -1;     // video.quad_atlas (1 by default); -1: not read yet
 AtlasPacker s_atlasPacker;
 std::vector<AtlasEntry> s_atlasEntries;
@@ -179,22 +250,27 @@ const AtlasEntry *AtlasEntryOf(GfxTexture *t)
     for (const AtlasEntry &e : s_atlasEntries)
         if (e.texture == t)
             return &e;
+    s_noAtlas = NO_ATLAS_FORMAT;
     if (t->format != GFX_FORMAT_BC3 || t->mipLevels != 1 || t->flags != 0 || t->cube != NULL ||
         t->replacement != NULL)
         return NULL;
+    s_noAtlas = NO_ATLAS_LARGE;
     if (t->width % 4 != 0 || t->height % 4 != 0 || t->width > kAtlasTextureSize || t->height > kAtlasTextureSize)
         return NULL;
+    s_noAtlas = NO_ATLAS_ROOM;
     if (s_atlas == NULL) {
-        s_atlas = Gfx_CreateTexture(kAtlasSize, kAtlasSize, GFX_FORMAT_BC3, 1, 0);
+        s_atlas = Gfx_CreateTexture(s_atlasSize, s_atlasSize, GFX_FORMAT_BC3, 1, 0);
         if (s_atlas == NULL)
             return NULL;
-        s_atlasPacker.Reset(kAtlasSize / 4, kAtlasSize / 4);
+        s_atlasPacker.Reset(s_atlasSize / 4, s_atlasSize / 4);
     }
     const int w = t->width / 4, h = t->height / 4;
     int x, y;
-    if (!s_atlasPacker.Place(w + 2, h + 2, &x, &y))
+    if (!s_atlasPacker.Place(w + 2, h + 2, &x, &y)) {
+        s_atlasFull = s_atlasSize < kAtlasLargeSize;
         return NULL;
-    Atlas_CopyBC3Tile(t->levels[0][0].data(), w, h, s_atlas->levels[0][0].data(), kAtlasSize / 4, x, y);
+    }
+    Atlas_CopyBC3Tile(t->levels[0][0].data(), w, h, s_atlas->levels[0][0].data(), s_atlasSize / 4, x, y);
     s_atlas->dirty = true;
     s_atlasEntries.push_back({ t, (x + 1) * 4, (y + 1) * 4 });
     return &s_atlasEntries.back();
@@ -209,18 +285,24 @@ GfxTexture *AtlasSmallDraw(GfxVertex *vertices, DWORD count)
     if (s_atlasWanted < 0)
         s_atlasWanted = Platform_GetSettingInt("video.quad_atlas", 1) != 0 ? 1 : 0;
     if (s_atlasWanted == 0)
-        return NULL;
+        return NoAtlas(NO_ATLAS_OFF);
     const GfxStageState &stage = s_state.stages[0];
-    if (stage.texture == NULL || s_state.stages[1].texture != NULL || stage.address != GFX_ADDRESS_CLAMP ||
-        stage.texCoordIndex != 0 || stage.textureTransform != GFX_TTFF_DISABLE)
-        return NULL;
+    if (stage.texture == NULL)
+        return NoAtlas(NO_ATLAS_TEXTURE);
+    // A second stage that is off reads no texture.
+    if (s_state.stages[1].texture != NULL && s_state.stages[1].colorOp != GFX_TOP_DISABLE)
+        return NoAtlas(NO_ATLAS_STAGE1);
+    if (stage.address != GFX_ADDRESS_CLAMP)
+        return NoAtlas(NO_ATLAS_ADDRESS);
+    if (stage.texCoordIndex != 0 || stage.textureTransform != GFX_TTFF_DISABLE)
+        return NoAtlas(NO_ATLAS_SOURCE);
     for (DWORD i = 0; i < count; i++)
         if (!(vertices[i].u0 >= 0.0f && vertices[i].u0 <= 1.0f && vertices[i].v0 >= 0.0f && vertices[i].v0 <= 1.0f))
-            return NULL;
+            return NoAtlas(NO_ATLAS_RANGE);
     const AtlasEntry *e = AtlasEntryOf(stage.texture);
     if (e == NULL)
         return NULL;
-    const float scale = 1.0f / kAtlasSize;
+    const float scale = 1.0f / (float)s_atlasSize;
     for (DWORD i = 0; i < count; i++) {
         vertices[i].u0 = ((float)e->x + vertices[i].u0 * (float)stage.texture->width) * scale;
         vertices[i].v0 = ((float)e->y + vertices[i].v0 * (float)stage.texture->height) * scale;
@@ -241,35 +323,64 @@ void AtlasForget(const GfxTexture *t)
     if (s_atlasRecord == s_record)
         Flush();
     s_atlasEntries.clear();
-    s_atlasPacker.Reset(kAtlasSize / 4, kAtlasSize / 4);
+    s_atlasPacker.Reset(s_atlasSize / 4, s_atlasSize / 4);
     if (t == s_atlas)
         s_atlas = NULL;
 }
 
-// Whether a vertex of a small draw in world space is at the start of the
-// distance fade or beyond it. The executor draws a draw with the fade only
-// where a vertex reaches it, and the fade is the largest part of its
-// fragment program: a run of quads joins only inside one of the two kinds.
-bool SmallDrawIsFar(const GfxVertex *vertices, DWORD count)
+// After a frame: the atlas that was full goes, and the next draw from an
+// atlas starts the large one. No recorded draw has the atlas then.
+void AtlasGrow()
+{
+    if (!s_atlasFull)
+        return;
+    s_atlasFull = false;
+    s_atlasSize = kAtlasLargeSize;
+    if (s_atlas != NULL)
+        Gfx_DestroyTexture(s_atlas);
+}
+
+// Where a small draw in world space is against the start of the distance
+// fade. The executor draws a draw with the fade only where a vertex reaches
+// it, and the fade is the largest part of its fragment program: a run of
+// near quads does not take a quad of the fade, and a run with the fade does
+// not take a near quad.
+enum {
+    FADE_NEAR,      // each vertex is well before the start
+    FADE_EDGE,      // each vertex is before the start, one not far from it
+    FADE_FAR        // a vertex is at the start or beyond it
+};
+// A quad at the edge joins a run of each kind: the fade changes none of its
+// pixels, and it has few pixels at that distance. The game sorts the
+// trackside objects by their distance on the ground from the car, not by
+// that from the eye: at the start of the fade, quads of the two sides come
+// in turns, and each turn was a draw.
+const float kFadeEdge = 0.7f;   // of the distance to the start
+
+int SmallDrawFadeClass(const GfxVertex *vertices, DWORD count)
 {
     if (!(s_state.fadeEnd > s_state.fadeStart))
-        return false;
+        return FADE_NEAR;
     const GfxMatrix &v = s_state.view;
     const float limit = s_state.fadeStart * s_state.fadeStart;
+    float farthest = 0.0f;
     for (DWORD i = 0; i < count; i++) {
         const GfxVertex &p = vertices[i];
         const float x = p.x * v._11 + p.y * v._21 + p.z * v._31 + v._41;
         const float y = p.x * v._12 + p.y * v._22 + p.z * v._32 + v._42;
         const float z = p.x * v._13 + p.y * v._23 + p.z * v._33 + v._43;
-        if (x * x + y * y + z * z >= limit)
-            return true;
+        const float squared = x * x + y * y + z * z;
+        if (squared >= limit)
+            return FADE_FAR;
+        farthest = squared > farthest ? squared : farthest;
     }
-    return false;
+    return farthest >= limit * (kFadeEdge * kFadeEdge) ? FADE_EDGE : FADE_NEAR;
 }
 
-// The kind of the draw recorded last: 1 a small draw in world space with a
-// vertex in the fade, 0 one with none, -1 another draw.
-int s_lastSmallFar = -1;
+// The kind of the draw recorded last: FADE_FAR a run of small draws in world
+// space with a vertex in the fade, FADE_NEAR a run with none, -1 another
+// draw. A run that starts with a quad at the edge is a near run.
+int s_lastSmallFade = -1;
 
 // Adds a draw of vertices in the frame's data to the draw before, where the
 // executor takes joined draws (GfxExecutor::JoinsDraws) and both are lists of
@@ -277,35 +388,40 @@ int s_lastSmallFar = -1;
 // game draws each sprite and each line with a call of its own: a run of them
 // becomes one draw. The triangles keep their order.
 bool JoinDraw(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
-              DWORD indexCount, bool worldSpace, GfxTexture *const textures[2], bool isFar)
+              DWORD indexCount, bool worldSpace, GfxTexture *const textures[2], int fadeClass)
 {
     if (!StateIsRecorded(worldSpace) || s_frame.commands.empty())
-        return false;
-    if (worldSpace && s_lastSmallFar != (isFar ? 1 : 0))
-        return false;
+        return NoJoin(NO_JOIN_STATE);
+    if (worldSpace && (s_lastSmallFade < 0 || (fadeClass != FADE_EDGE && fadeClass != s_lastSmallFade)))
+        return NoJoin(NO_JOIN_FADE);
     if (primitive != GFX_TRIANGLELIST && primitive != GFX_LINELIST)
-        return false;
+        return NoJoin(NO_JOIN_PRIMITIVE);
     GfxCommand &last = s_frame.commands.back();
     const size_t stride = transformed ? sizeof(GfxTLVertex) : sizeof(GfxVertex);
     const DWORD corners = primitive == GFX_LINELIST ? 2 : 3;
     if (last.type != GFX_CMD_DRAW || last.primitive != primitive || last.transformed != transformed ||
         last.buffer != NULL || last.state != s_frame.states.size() - 1)
-        return false;
+        return NoJoin(NO_JOIN_COMMAND);
     if (last.textures[0] != textures[0] || last.textures[1] != textures[1])
-        return false;
-    if ((last.firstIndex != ~0u) != (indices != NULL) || last.vertexCount + vertexCount > kJoinedVertices)
-        return false;
+        return NoJoin(NO_JOIN_TEXTURE);
+    if ((last.firstIndex != ~0u) != (indices != NULL))
+        return NoJoin(NO_JOIN_COMMAND);
+    if (last.vertexCount + vertexCount > kJoinedVertices)
+        return NoJoin(NO_JOIN_SIZE);
     // The draw before ends the frame's data, in whole primitives.
     if ((size_t)last.firstVertexByte + (size_t)last.vertexCount * stride != s_frame.vertices.size())
-        return false;
+        return NoJoin(NO_JOIN_DATA);
     if (indices != NULL) {
         if ((size_t)last.firstIndex + last.indexCount != s_frame.indices.size() || last.indexCount % corners != 0)
-            return false;
+            return NoJoin(NO_JOIN_DATA);
     } else if (last.vertexCount % corners != 0) {
-        return false;
+        return NoJoin(NO_JOIN_DATA);
     }
     s_frame.vertices.insert(s_frame.vertices.end(), (const uint8_t *)vertices,
                             (const uint8_t *)vertices + vertexCount * stride);
+#if defined(VITA) && defined(OPENCMR2_DEV)
+    g_sysVitaDrawCounts.vertexBytes += vertexCount * stride;
+#endif
     if (indices != NULL) {
         for (DWORD i = 0; i < indexCount; i++)
             s_frame.indices.push_back((uint16_t)(indices[i] + last.vertexCount));
@@ -343,6 +459,7 @@ uint32_t RecordState(bool worldSpace = false)
         const GfxMatrix &world = RecordedWorldOf(worldSpace);
         if (s_vertexDirty || memcmp(&world, &s_recordedWorld, sizeof(world)) != 0)
             s_vertexVersion++;
+        s_counts.states++;
         s_frame.states.push_back(s_state);
         s_frame.states.back().world = world;
         s_frame.states.back().vertexVersion = s_vertexVersion;
@@ -351,6 +468,49 @@ uint32_t RecordState(bool worldSpace = false)
         s_vertexDirty = false;
     }
     return (uint32_t)s_frame.states.size() - 1;
+}
+
+// Counts the parts of the state that differ from the state recorded last,
+// for a small draw in world space that did not join for its state.
+void CountChangedParts()
+{
+    uint32_t *n = s_counts.changed;
+    if (s_frame.states.empty()) {
+        n[CHANGED_FIRST]++;
+        return;
+    }
+    const GfxDrawState &a = s_state, &b = s_frame.states.back();
+    bool any = false;
+#define PART(index, same) do { if (!(same)) { n[index]++; any = true; } } while (0)
+#define SAME(field) (memcmp(&a.field, &b.field, sizeof(a.field)) == 0)
+    PART(CHANGED_WORLD, memcmp(&kIdentityMatrix, &s_recordedWorld, sizeof(GfxMatrix)) == 0);
+    PART(CHANGED_VIEW, SAME(view) && SAME(projection));
+    PART(CHANGED_TEXTURE_MATRIX, SAME(texture));
+    PART(CHANGED_LIGHTS, SAME(lights) && SAME(lightEnabled));
+    PART(CHANGED_MATERIAL, SAME(material));
+    PART(CHANGED_LIGHTING, a.lighting == b.lighting && a.ambient == b.ambient && a.specular == b.specular &&
+                               a.localViewer == b.localViewer && a.normalizeNormals == b.normalizeNormals &&
+                               a.colorVertex == b.colorVertex && a.diffuseSource == b.diffuseSource &&
+                               a.specularSource == b.specularSource && a.ambientSource == b.ambientSource &&
+                               a.emissiveSource == b.emissiveSource);
+    PART(CHANGED_FOG, a.fog == b.fog && a.fogColor == b.fogColor && a.fogVertexMode == b.fogVertexMode &&
+                          a.fogTableMode == b.fogTableMode && SAME(fogStart) && SAME(fogEnd));
+    PART(CHANGED_FADE, SAME(fadeStart) && SAME(fadeEnd));
+    PART(CHANGED_DEPTH, a.depthTest == b.depthTest && a.depthWrite == b.depthWrite && a.depthFunc == b.depthFunc);
+    PART(CHANGED_CULL, a.cull == b.cull);
+    PART(CHANGED_BLEND, a.alphaBlend == b.alphaBlend && a.srcBlend == b.srcBlend && a.destBlend == b.destBlend);
+    PART(CHANGED_ALPHA_TEST, a.alphaTest == b.alphaTest && a.alphaFunc == b.alphaFunc && a.alphaRef == b.alphaRef);
+    PART(CHANGED_FACTOR, a.textureFactor == b.textureFactor);
+    for (int i = 0; i < 2; i++) {
+        GfxStageState mine = a.stages[i];
+        mine.texture = b.stages[i].texture;
+        PART(i == 0 ? CHANGED_STAGE0 : CHANGED_STAGE1, memcmp(&mine, &b.stages[i], sizeof(mine)) == 0);
+    }
+    PART(CHANGED_VIEWPORT, SAME(viewport) && a.screenW == b.screenW && a.screenH == b.screenH);
+#undef SAME
+#undef PART
+    if (!any)
+        n[CHANGED_NONE]++;
 }
 
 // Vertices at a multiple of their size, so that the executor can draw them
@@ -437,7 +597,7 @@ static uint32_t TraceHash(uint32_t h, const void *data, size_t size)
 
 void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
                    DWORD indexCount, GfxVertexBuffer *buffer, DWORD firstVertex, bool worldSpace,
-                   GfxTexture *const textures[2], bool isFar);
+                   GfxTexture *const textures[2], int fadeClass);
 
 void RecordDrawNow(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
                    DWORD indexCount, GfxVertexBuffer *buffer, DWORD firstVertex);
@@ -448,6 +608,7 @@ void RecordDraw(int primitive, bool transformed, const void *vertices, DWORD ver
                 DWORD indexCount, GfxVertexBuffer *buffer = NULL, DWORD firstVertex = 0)
 {
 #if defined(VITA) && defined(OPENCMR2_DEV)
+    g_sysVitaDrawCounts.calls++;
     // The heartbeat's recorder time, from one draw in kRecorderSampleEvery.
     static unsigned count;
     if (++count % kRecorderSampleEvery == 0) {
@@ -507,16 +668,25 @@ void RecordDrawNow(int primitive, bool transformed, const void *vertices, DWORD 
     // as its texture where its texture is in the atlas.
     GfxVertex small[kSmallDrawVertices];
     GfxTexture *textures[2] = { s_state.stages[0].texture, s_state.stages[1].texture };
-    bool worldSpace = false, isFar = false;
+    bool worldSpace = false;
+    int fadeClass = FADE_NEAR;
     if (joins && !transformed && vertexCount <= kSmallDrawVertices &&
         SmallDrawToWorld((const GfxVertex *)vertices, vertexCount, small)) {
         vertices = small;
         buffer = NULL;
         firstVertex = 0;
         worldSpace = true;
-        isFar = SmallDrawIsFar(small, vertexCount);
-        if (GfxTexture *atlas = AtlasSmallDraw(small, vertexCount))
+        fadeClass = SmallDrawFadeClass(small, vertexCount);
+        GfxTexture *atlas = AtlasSmallDraw(small, vertexCount);
+        if (atlas != NULL)
             textures[0] = atlas;
+        if (s_countsWanted) {
+            s_counts.small++;
+            if (atlas != NULL)
+                s_counts.atlas++;
+            else
+                s_counts.noAtlas[s_noAtlas]++;
+        }
     }
     // A short strip (a sprite) as a list: lists join. The odd triangles of a
     // strip have their first two corners in the other order.
@@ -532,20 +702,29 @@ void RecordDrawNow(int primitive, bool transformed, const void *vertices, DWORD 
             primitive = GFX_TRIANGLELIST;
             indices = strip;
         }
-        if (JoinDraw(primitive, transformed, vertices, vertexCount, indices, indexCount, worldSpace, textures, isFar))
+        if (JoinDraw(primitive, transformed, vertices, vertexCount, indices, indexCount, worldSpace, textures,
+                     fadeClass)) {
+            if (worldSpace)
+                s_counts.joined++;
             return;
+        }
+        if (worldSpace && s_countsWanted) {
+            s_counts.noJoin[s_noJoin]++;
+            if (s_noJoin == NO_JOIN_STATE)
+                CountChangedParts();
+        }
     }
     RecordNewDraw(primitive, transformed, vertices, vertexCount, indices, indexCount, buffer, firstVertex, worldSpace,
-                  textures, isFar);
+                  textures, fadeClass);
 }
 
 // Records a draw as a command of its own. worldSpace: its vertices are in
 // world space (SmallDrawToWorld). textures: those of its two stages.
 void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
                    DWORD indexCount, GfxVertexBuffer *buffer, DWORD firstVertex, bool worldSpace,
-                   GfxTexture *const textures[2], bool isFar)
+                   GfxTexture *const textures[2], int fadeClass)
 {
-    s_lastSmallFar = worldSpace ? (isFar ? 1 : 0) : -1;
+    s_lastSmallFade = worldSpace ? (fadeClass == FADE_FAR ? FADE_FAR : FADE_NEAR) : -1;
     GfxCommand cmd = {};
     cmd.type = GFX_CMD_DRAW;
     cmd.primitive = primitive;
@@ -588,6 +767,11 @@ void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD 
     cmd.textures[0] = textures[0];
     cmd.textures[1] = textures[1];
     s_frame.commands.push_back(cmd);
+#if defined(VITA) && defined(OPENCMR2_DEV)
+    g_sysVitaDrawCounts.commands++;
+    if (cmd.buffer == NULL)
+        g_sysVitaDrawCounts.vertexBytes += vertexCount * (transformed ? sizeof(GfxTLVertex) : sizeof(GfxVertex));
+#endif
 }
 
 GfxStageState *Stage(int stage)
@@ -853,6 +1037,11 @@ static void Present(BOOL vsync, bool stretch)
         const TraceFrameSizes &f = s_traceSizes;
         fprintf(trace, "F %u v=%zu i=%zu c=%zu s=%zu b=%zu/%zu\n", s_traceFrame++, f.vertexBytes, f.indices, f.commands,
                 f.states, f.buffers, f.bufferBytes);
+        if (s_executor != NULL && s_executor->JoinsDraws()) {
+            char counts[512];
+            Gfx_RecorderCountsText(counts, sizeof(counts));
+            fprintf(trace, "R %s\n", counts);
+        }
         s_traceSizes = TraceFrameSizes();
         if (s_traceLiveChanged) {
             fprintf(trace, "T");
@@ -869,6 +1058,7 @@ static void Present(BOOL vsync, bool stretch)
     s_frame.Reset();
     s_record++;
     s_presentedFrames++;
+    AtlasGrow();
 #if defined(VITA) && defined(OPENCMR2_DEV)
     SysVita_FramePresented();
 #endif
@@ -883,6 +1073,36 @@ extern "C" void Gfx_Present(BOOL vsync) { Present(vsync, false); }
 extern "C" void Gfx_PresentStretched(BOOL vsync) { Present(vsync, true); }
 
 // Runs what is recorded so far without ending the frame.
+void Gfx_RecorderCountsText(char *text, size_t size)
+{
+    const RecorderCounts &n = s_counts;
+    size_t used = 0;
+    const auto add = [&](const char *format, unsigned value, const char *name) {
+        if (used < size)
+            used += (size_t)snprintf(text + used, size - used, format, value, name);
+    };
+    const auto list = [&](const char *title, const uint32_t *values, const char *const *names, int count) {
+        bool first = true;
+        for (int i = 0; i < count; i++) {
+            if (values[i] == 0)
+                continue;
+            if (first && used < size)
+                used += (size_t)snprintf(text + used, size - used, "; %s:", title);
+            first = false;
+            add(" %u %s", values[i], names[i]);
+        }
+    };
+    add("states %u%s", n.states, "");
+    add(", small draws %u%s", n.small, "");
+    add(" (%u joined%s", n.joined, "");
+    add(", %u from the atlas)%s", n.atlas, "");
+    list("no join", n.noJoin, kNoJoinNames, NO_JOIN_COUNT);
+    list("state parts", n.changed, kChangedNames, CHANGED_COUNT);
+    list("no atlas", n.noAtlas, kNoAtlasNames, NO_ATLAS_COUNT);
+    s_counts = RecorderCounts();
+    s_countsWanted = true;
+}
+
 static void Flush(void)
 {
     if (TraceFile() != NULL)
