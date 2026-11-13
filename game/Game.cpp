@@ -2247,6 +2247,55 @@ static int __cdecl Game_CompareDeferredDistance(const void *a, const void *b)
 
 extern SceneNode *g_unk0x0059be6c;
 
+// PORT: the order of the deferred objects by their distance, the farthest
+// first, in order[]. The original sorted the objects themselves with qsort
+// and Game_CompareDeferredDistance: for some hundred trees that was a tenth
+// of the game's instructions in a frame. This is a radix sort of the
+// distances in three passes of 11 bits. It keeps the objects of one distance
+// in their order, as the merge sort behind the qsort of glibc does.
+// sort: 0 keeps the order of the list.
+static void Game_OrderDeferredDraws(const DeferredDraw *items, unsigned int count, int sort, unsigned short *order)
+{
+    static unsigned int keys[4096];
+    static unsigned short scratch[4096];
+    unsigned int counts[2048];
+    unsigned short *from = order;
+    unsigned short *to = scratch;
+    unsigned int i;
+    int shift;
+
+    if (count > 4096)
+        count = 4096;
+    for (i = 0; i < count; i++) {
+        // The greatest distance has the least key. A distance below zero
+        // (none is) comes last, as with the compare function.
+        keys[i] = 0x7fffffffu - (unsigned int)items[i].distance;
+        order[i] = (unsigned short)i;
+    }
+    if (sort == 0)
+        return;
+    for (shift = 0; shift < 33; shift += 11) {
+        unsigned int start = 0;
+        unsigned short *swap;
+
+        memset(counts, 0, sizeof(counts));
+        for (i = 0; i < count; i++)
+            counts[(keys[from[i]] >> shift) & 2047]++;
+        for (i = 0; i < 2048; i++) {
+            unsigned int n = counts[i];
+            counts[i] = start;
+            start += n;
+        }
+        for (i = 0; i < count; i++)
+            to[counts[(keys[from[i]] >> shift) & 2047]++] = from[i];
+        swap = from;
+        from = to;
+        to = swap;
+    }
+    // Three passes: the last one wrote scratch.
+    memcpy(order, scratch, count * sizeof(order[0]));
+}
+
 // Draws the objects the deferred pass of the static stage objects queued:
 // sorts them by view depth (farthest first) and, for each one, binds its
 // texture, sets its world matrix and marks the mesh for the culling test of
@@ -2268,10 +2317,12 @@ void Game_DrawDeferredObjects(void)
             sorted[i].distance = FixVecLength(&delta);
             sorted[i].pObject = pObject;
         }
-        if (g_depthSortDrawLists != 0)
-            qsort(sorted, CGame::m_deferredDrawCount, sizeof(sorted[0]), Game_CompareDeferredDistance);
+        // PORT: the order of the objects, the farthest first (see
+        // Game_OrderDeferredDraws).
+        static unsigned short order[4096];
+        Game_OrderDeferredDraws(sorted, (unsigned int)CGame::m_deferredDrawCount, g_depthSortDrawLists != 0, order);
         for (i = 0; i < (unsigned int)CGame::m_deferredDrawCount; i++) {
-            pObject = sorted[i].pObject;
+            pObject = sorted[order[i]].pObject;
             Frontend_SetObjectField118(CGraphics::m_pTextureManager->textureBuffer[pObject->pMesh->pTriangles->textures[0]], 0);
             Gfx_SetTransform(GFX_TRANSFORM_WORLD, (GfxMatrix *)pObject->matrix);
             pObject->pMesh->flags |= 8;
