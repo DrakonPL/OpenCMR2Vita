@@ -164,6 +164,8 @@ bool JoinDraw(int primitive, bool transformed, const void *vertices, DWORD verte
     if (last.type != GFX_CMD_DRAW || last.primitive != primitive || last.transformed != transformed ||
         last.buffer != NULL || last.state != s_frame.states.size() - 1)
         return false;
+    if (last.textures[0] != s_state.stages[0].texture || last.textures[1] != s_state.stages[1].texture)
+        return false;
     if ((last.firstIndex != ~0u) != (indices != NULL) || last.vertexCount + vertexCount > kJoinedVertices)
         return false;
     // The draw before ends the frame's data, in whole primitives.
@@ -447,6 +449,8 @@ void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD 
         cmd.indexCount = 0;
     }
     cmd.state = RecordState(worldSpace);
+    cmd.textures[0] = s_state.stages[0].texture;
+    cmd.textures[1] = s_state.stages[1].texture;
     s_frame.commands.push_back(cmd);
 }
 
@@ -955,7 +959,20 @@ STAGE_SETTER(Gfx_SetStageTextureTransform, int, textureTransform)
             SetPixels<decltype(s->field)>(s->field, value); \
     }
 
-PIXEL_STAGE_SETTER(Gfx_SetTexture, GfxTexture *, texture)
+
+// For an executor that takes joined draws, a new texture alone starts no new
+// state: each draw has its textures (GfxCommand::textures).
+extern "C" void Gfx_SetTexture(int stage, GfxTexture *texture)
+{
+    GfxStageState *s = Stage(stage);
+    if (s == NULL)
+        return;
+    if (s_executor != NULL && s_executor->JoinsDraws())
+        s->texture = texture;
+    else
+        SetPixels(s->texture, texture);
+}
+
 PIXEL_STAGE_SETTER(Gfx_SetStageColorOp, int, colorOp)
 PIXEL_STAGE_SETTER(Gfx_SetStageColorArg1, int, colorArg1)
 PIXEL_STAGE_SETTER(Gfx_SetStageColorArg2, int, colorArg2)
@@ -1130,14 +1147,18 @@ extern "C" void Gfx_DestroyTexture(GfxTexture *texture)
         if (Root(s_state.stages[i].texture) == texture)
             s_state.stages[i].texture = NULL;
     // Draws recorded this frame may still use it: flush them first.
-    for (const GfxDrawState &state : s_frame.states)
-        for (const GfxStageState &stage : state.stages)
-            if (Root(stage.texture) == texture ||
-                (Root(stage.texture) != NULL && Root(stage.texture)->replacement == texture)) {
-                Flush();
-                goto flushed;
-            }
-flushed:
+    {
+        auto uses = [texture](GfxTexture *t) {
+            return Root(t) == texture || (Root(t) != NULL && Root(t)->replacement == texture);
+        };
+        bool used = false;
+        for (const GfxDrawState &state : s_frame.states)
+            used = used || uses(state.stages[0].texture) || uses(state.stages[1].texture);
+        for (const GfxCommand &command : s_frame.commands)
+            used = used || (command.type == GFX_CMD_DRAW && (uses(command.textures[0]) || uses(command.textures[1])));
+        if (used)
+            Flush();
+    }
     // Shutdown may visit a replacement before its owner. Detach it so the
     // owner cannot destroy it a second time (also applies to font fields).
     for (GfxTexture *owner : s_textures)

@@ -127,6 +127,12 @@ struct GfxCommand {
     uint32_t firstIndex;        // into the frame's indices, or ~0 for none
     uint32_t indexCount;
     uint32_t state;             // index into the frame's states
+    // The textures of the draw's two stages. For an executor that takes
+    // joined draws, a new texture alone starts no new state: most draws of a
+    // stage differ from the draw before only in their textures, and a state
+    // is 1.3 KB. There the textures of a draw are these, not those of its
+    // state.
+    GfxTexture *textures[2];
     // clear
     DWORD clearFlags;
     DWORD clearColor;
@@ -174,7 +180,9 @@ struct GfxExecutor {
     virtual void DestroyTexture(GfxTexture *texture) = 0;
     virtual void DestroyVertexBuffer(GfxVertexBuffer *) {}
     // Whether the recorder joins consecutive draws of one state from the
-    // frame's vertex data into one command (a run of sprites or lines).
+    // frame's vertex data into one command (a run of sprites or lines),
+    // records small 3D draws in world space, and starts no new state for a
+    // new texture alone (GfxCommand::textures).
     virtual bool JoinsDraws() const { return false; }
     // Brings a render target's pixels back into its CPU copy (for locks).
     virtual void ReadTexture(GfxTexture *texture) = 0;

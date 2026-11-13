@@ -196,8 +196,15 @@ struct Stats {
 // the same parts of the drive, so their times compare (a mode that ran alone
 // for some seconds met a scene of its own). The first frames of a turn are
 // not counted: the GPU still works on frames of the mode before. Then the log
-// gets a line for each mode. Last, "single pass" runs alone for some seconds,
-// for a look at the picture. The modes split a frame into its parts:
+// gets a line for each mode. The modes split a frame into its parts.
+// Before the turns the probe checks the single pass (see the mode below): it
+// draws two frames as always and two with the single pass, waits for the GPU
+// after each, and compares samples of the back buffer. With a picture that
+// stands still (the car at rest), the frames of the two kinds differ no more
+// than two frames of one kind when the single pass draws the same picture.
+// Then the executor draws with it from there on. Without that result
+// "single pass" runs alone for some seconds at the end, for a look at the
+// picture. The modes:
 //   normal            the frame as the game draws it
 //   quarter           the back buffer's draws clipped to about a quarter of
 //                     its pixels: the fragment cost goes down with them
@@ -258,6 +265,9 @@ constexpr unsigned kProbeBlockFrames = 8;   // the frames of a mode's turn
 constexpr unsigned kProbeSkipFrames = 2;    // at the start of a turn: not counted
 constexpr unsigned kProbeCycles = 12;
 constexpr uint64_t kProbeSteadyMicros = 6000000;    // "single pass" alone, at the end
+constexpr int kProbeCheckStep = 4;          // the check samples each 4th pixel of each 4th row
+constexpr int kProbeCheckFrames = 4;        // two frames as always, two with the single pass
+constexpr int kProbeCheckChannel = 12;      // a sample differs with a channel this far off
 
 // The sums of a mode over its counted frames.
 struct ProbeSums {
@@ -279,6 +289,11 @@ struct Probe {
     unsigned draws3d = 0, draws = 0;
     ProbeSums sums[PROBE_END];
     bool touchStarted = false, touchDown = false;
+    // The check of the single pass: the frame of the check that is drawn now
+    // (1 to kProbeCheckFrames, 0: no check), and the samples that differ
+    // between each frame and the frame before it.
+    int check = 0;
+    unsigned checkSamples = 0, checkDiffer[kProbeCheckFrames] = {};
 };
 
 // A back buffer readback the GPU has not finished: a rectangle of a display
@@ -363,6 +378,14 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     };
     Resolved resolvedKeys[4];
     unsigned resolvedNext = 0;
+
+    // Whether a blended draw with the alpha test and depth writes draws in
+    // one pass, with the discard form and its blending. It starts off: a
+    // program that can discard drew nothing in a blended pass without depth
+    // writes on another SGX543 project. The probe's check turns it on when
+    // the picture with it is the picture without it.
+    bool singlePass = false;
+    std::vector<uint32_t> probeShot[2];     // the check's samples of two frames
 
     // Whether a reserved uniform buffer serves the draws that follow: the
     // device answers it at the first video mode (TestKeptUniforms). A draw
@@ -729,7 +752,8 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         const GxmFragmentVariant &v = kGxmFragmentVariants[variant];
         // A patch in the middle of a frame costs a few ms: variants.txt lists
         // the triples that are made at the start.
-        if (programsMade && probe.mode == PROBE_OFF && loggedUnlisted < kLoggedUnknownKeys) {
+        if (programsMade && probe.mode == PROBE_OFF && !(blend && v.alphaTest == 1) &&
+            loggedUnlisted < kLoggedUnknownKeys) {
             char pair[8] = "off";
             if (blend)
                 snprintf(pair, sizeof(pair), "%d/%d", srcBlend & 15, destBlend & 15);
@@ -804,7 +828,8 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     {
         const uint32_t pipeline = (s.alphaBlend ? 1u | (uint32_t)(s.srcBlend & 15) << 1 | (uint32_t)(s.destBlend & 15) << 5
                                                 : 0u) |
-                                  (transformed ? 1u << 9 : 0u) | (uint32_t)probe.mode << 10;
+                                  (transformed ? 1u << 9 : 0u) | (uint32_t)probe.mode << 10 |
+                                  (singlePass ? 1u << 20 : 0u);
         for (Resolved &r : resolvedKeys)
             if (r.key == key && r.args == args && r.pipeline == pipeline)
                 return r.fragment != nullptr ? &r : nullptr;
@@ -1032,19 +1057,26 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     // The textures the frame draws with or into are on the GPU before the upload.
     void EnsureTextures(const GfxFrame &frame)
     {
-        for (const GfxDrawState &s : frame.states)
-            for (const GfxStageState &stage : s.stages) {
-                GfxTexture *t = Gfx_DrawnTexture(stage.texture);
+        // The textures of a draw are in its command (GfxCommand::textures).
+        GfxTexture *last[2] = {};
+        for (const GfxCommand &c : frame.commands) {
+            if (c.type == GFX_CMD_TARGET && c.target != nullptr)
+                gpuTextures.Ensure(c.target->cube != nullptr ? c.target->cube : c.target);
+            if (c.type != GFX_CMD_DRAW)
+                continue;
+            for (int i = 0; i < 2; i++) {
+                if (c.textures[i] == last[i])
+                    continue;
+                last[i] = c.textures[i];
+                GfxTexture *t = Gfx_DrawnTexture(c.textures[i]);
                 if (t == nullptr)
                     continue;
                 gpuTextures.Ensure(t);
                 // A vector icon also reads its original.
                 if (t->flags & GFX_TEXTURE_VECTOR_ICON)
-                    gpuTextures.Ensure(stage.texture);
+                    gpuTextures.Ensure(c.textures[i]);
             }
-        for (const GfxCommand &c : frame.commands)
-            if (c.type == GFX_CMD_TARGET && c.target != nullptr)
-                gpuTextures.Ensure(c.target->cube != nullptr ? c.target->cube : c.target);
+        }
     }
 
     void StartFrame()
@@ -1158,7 +1190,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     }
 
     // vertexOffset, indexOffset: the Execute's data in the ring (kFull: none).
-    void Draw(const GfxCommand &c, const GfxFrame &frame, unsigned vertexOffset, unsigned indexOffset,
+    void Draw(const GfxCommand &c, GfxFrame &frame, unsigned vertexOffset, unsigned indexOffset,
               bool backBuffer, int targetW, int targetH)
     {
         SceGxmPrimitiveType primitive;
@@ -1183,7 +1215,12 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             probe.mark = sceKernelGetProcessTimeWide();
             probe.draws3d++;
         }
-        const GfxDrawState &s = frame.states[c.state];
+        // The state of the draw, with the textures of the draw: the recorder
+        // starts no new state for a new texture alone.
+        GfxDrawState &drawState = frame.states[c.state];
+        drawState.stages[0].texture = c.textures[0];
+        drawState.stages[1].texture = c.textures[1];
+        const GfxDrawState &s = drawState;
         const GfxViewport viewport = ToTarget(s.viewport, s.screenW, s.screenH, backBuffer, targetW, targetH);
         // The vertex uniforms of the state: all rows at first, then only the
         // rows that differ from the 3D draw before.
@@ -1258,7 +1295,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                 if (!resolved->depthLooked) {
                     resolved->depthLooked = true;
                     resolved->depthVariant = LookupVariant(key, 1, args);
-                    if (resolved->depthVariant >= 0 && probe.mode == PROBE_SINGLE_PASS)
+                    if (resolved->depthVariant >= 0 && (singlePass || probe.mode == PROBE_SINGLE_PASS))
                         resolved->single = FragmentProgram(resolved->depthVariant, true, s.srcBlend, s.destBlend,
                                                            c.transformed);
                     if (resolved->depthVariant >= 0 && resolved->single == nullptr)
@@ -1266,7 +1303,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                                                                  true);
                 }
                 if (resolved->single != nullptr) {
-                    // The probe's single pass: the discard form with the draw's blending.
+                    // The single pass: the discard form with the draw's blending.
                     variant = resolved->depthVariant;
                     fragment = resolved->single;
                 } else {
@@ -1609,6 +1646,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         }
         EndScene(fragment);
         backdropAhead = false;
+        ProbeCheckFrame();
         device.Present(vsync && probe.mode == PROBE_OFF);
         ProbeTick();
         presented++;
@@ -1618,6 +1656,70 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     }
 
     // The frame time probe, after each present (dev builds).
+    // A frame of the single pass check: waits for the GPU, takes samples of
+    // the back buffer, and counts those that differ from the frame before.
+    void ProbeCheckFrame()
+    {
+#ifdef OPENCMR2_DEV
+        if (probe.check == 0)
+            return;
+        device.Finish();
+        const int w = device.Width(), h = device.Height();
+        std::vector<uint32_t> &shot = probeShot[probe.check & 1];
+        const std::vector<uint32_t> &before = probeShot[(probe.check + 1) & 1];
+        std::vector<uint32_t> row((size_t)w);
+        shot.clear();
+        for (int y = kProbeCheckStep / 2; y < h; y += kProbeCheckStep) {
+            device.ReadPixels(device.BackBuffer(), 0, y, w, 1, row.data());
+            for (int x = kProbeCheckStep / 2; x < w; x += kProbeCheckStep)
+                shot.push_back(row[(size_t)x]);
+        }
+        probe.checkSamples = (unsigned)shot.size();
+        unsigned differ = 0;
+        if (probe.check > 1 && before.size() == shot.size())
+            for (size_t i = 0; i < shot.size(); i++) {
+                const uint32_t a = shot[i], b = before[i];
+                bool off = false;
+                for (int shift = 0; shift < 24; shift += 8) {
+                    const int d = (int)(a >> shift & 0xff) - (int)(b >> shift & 0xff);
+                    off = off || d > kProbeCheckChannel || d < -kProbeCheckChannel;
+                }
+                differ += off ? 1 : 0;
+            }
+        probe.checkDiffer[probe.check - 1] = differ;
+#endif
+    }
+
+    // The end of the single pass check: the single pass is on when the
+    // picture stood still and the frames of the two kinds differ no more
+    // than two frames of one kind.
+    void ProbeCheckResult()
+    {
+#ifdef OPENCMR2_DEV
+        const unsigned samples = probe.checkSamples > 0 ? probe.checkSamples : 1;
+        const unsigned same = probe.checkDiffer[1], across = probe.checkDiffer[2], single = probe.checkDiffer[3];
+        const unsigned noise = same > single ? same : single;
+        const bool still = noise <= samples / 50;
+        const bool equal = still && across <= noise * 2 + samples / 500;
+        Sys_Log("gxm probe: single pass check: of %u samples differ %u between two frames as always, %u between "
+                "a frame as always and one with the single pass, %u between two with the single pass",
+                probe.checkSamples, same, across, single);
+        if (singlePass)
+            Sys_Log("gxm probe: the single pass was on already: the check compares it with itself");
+        else if (equal)
+            Sys_Log("gxm probe: the single pass draws the same picture: it is on from here");
+        else if (!still)
+            Sys_Log("gxm probe: the picture moves: stop the car and tap again for the single pass check");
+        else
+            Sys_Log("gxm probe: the single pass changes the picture: it stays off");
+        if (equal && !singlePass) {
+            singlePass = true;
+            for (Resolved &r : resolvedKeys)
+                r = Resolved();
+        }
+#endif
+    }
+
     void ProbeTick()
     {
 #ifdef OPENCMR2_DEV
@@ -1637,10 +1739,28 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             probe = Probe();
             probe.touchStarted = touchStarted;
             probe.touchDown = true;
-            probe.mode = kProbeCycle[0];
+            probe.mode = PROBE_NORMAL;
+            probe.check = 1;
             probe.lastPresent = now;
-            Sys_Log("gxm probe: start, %u modes take turns of %u frames, %u times, no vsync", kProbeCycleModes,
-                    kProbeBlockFrames, kProbeCycles);
+            Sys_Log("gxm probe: start, the single pass check, then %u modes take turns of %u frames, %u times, "
+                    "no vsync",
+                    kProbeCycleModes, kProbeBlockFrames, kProbeCycles);
+            return;
+        }
+        if (probe.check != 0) {
+            // The check's frames: two as always, then two with the single pass.
+            probe.lastPresent = now;
+            probe.submitMicros = 0;
+            probe.draws = probe.draws3d = 0;
+            memset(probe.section, 0, sizeof(probe.section));
+            if (probe.check < kProbeCheckFrames) {
+                probe.check++;
+                probe.mode = probe.check > kProbeCheckFrames / 2 ? PROBE_SINGLE_PASS : PROBE_NORMAL;
+                return;
+            }
+            probe.check = 0;
+            ProbeCheckResult();
+            probe.mode = kProbeCycle[0];
             return;
         }
         const uint64_t frame = now - probe.lastPresent;
@@ -1698,6 +1818,11 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                     sums.section[PROFILE_VARIANT] / perFrame, sums.section[PROFILE_DEPTH] / perFrame,
                     sums.section[PROFILE_VERTICES] / perFrame, sums.section[PROFILE_PASSES] / perFrame,
                     sums.draws3d / frames, (double)(t1 - t0) / 256.0);
+        }
+        if (singlePass) {
+            probe.mode = PROBE_OFF;
+            Sys_Log("gxm probe: done");
+            return;
         }
         probe.mode = PROBE_SINGLE_PASS;
         probe.steadyStart = sceKernelGetProcessTimeWide();

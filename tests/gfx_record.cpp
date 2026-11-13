@@ -2,8 +2,10 @@
 // draws. A setter with the value that is already set starts no new state. An
 // executor that takes joined draws gets a run of sprites or lines as one
 // draw, and a small 3D draw in world space: a run of billboards, each with a
-// world matrix of its own, has one state. The parts of a mesh in a vertex
-// buffer that is not drawn by reference share one copy of its vertices.
+// world matrix of its own, has one state. For that executor a new texture
+// alone starts no new state: each draw has its textures. The parts of a mesh
+// in a vertex buffer that is not drawn by reference share one copy of its
+// vertices.
 
 #include "port/sys.h"
 #include "render/gfx_internal.h"
@@ -275,9 +277,9 @@ int main()
         REQUIRE(b.x == 23.0f && b.y == 0.0f && b.z == 6.0f && b.nz == -3.0f);
         REQUIRE(a.diffuse == 0xff102033 && a.u0 == 1.0f);
     }
-    // Another texture starts a new draw and a new state, in world space also.
-    // A draw that is not small keeps its world matrix, and so does the small
-    // draw after it: each has the state of its vertices.
+    // Another texture starts a new draw, in the same state: the draw has its
+    // textures. A draw that is not small keeps its world matrix, and so does
+    // the small draw after it: each has the state of its vertices.
     {
         GfxTexture *leaves = Gfx_CreateTexture(8, 8, GFX_FORMAT_BGRA8, 1, 0);
         Billboard(2.0f, 10.0f, 5.0f);
@@ -289,9 +291,10 @@ int main()
         Billboard(3.0f, 20.0f, 6.0f);
         Billboard(4.0f, 30.0f, 7.0f);
         Gfx_Present(FALSE);
-        REQUIRE(Draws() == 4 && s_frame.states.size() == 4);
-        REQUIRE(IsIdentity(s_frame.states[Draw(0).state].world) && IsIdentity(s_frame.states[Draw(1).state].world));
-        REQUIRE(s_frame.states[Draw(1).state].stages[0].texture == leaves);
+        REQUIRE(Draws() == 4 && s_frame.states.size() == 3);
+        REQUIRE(IsIdentity(s_frame.states[Draw(0).state].world) && Draw(1).state == Draw(0).state);
+        REQUIRE(Draw(0).textures[0] == NULL && Draw(1).textures[0] == leaves && Draw(1).textures[1] == NULL);
+        REQUIRE(Draw(2).textures[0] == leaves && Draw(3).textures[0] == leaves);
         REQUIRE(s_frame.states[Draw(2).state].world._41 == 20.0f && Draw(2).vertexCount == 18);
         REQUIRE(Vertex3D(Draw(2), 1).x == 1.0f);
         REQUIRE(IsIdentity(s_frame.states[Draw(3).state].world) && Draw(3).vertexCount == 8);
@@ -311,6 +314,61 @@ int main()
         REQUIRE(Draws() == 1 && s_frame.states[Draw(0).state].world._34 == 0.5f && Vertex3D(Draw(0), 1).x == 1.0f);
         world = Identity();
         Gfx_SetTransform(GFX_TRANSFORM_WORLD, &world);
+    }
+
+    // The textures of a draw. An executor that does not take joined draws
+    // gets a state for each new texture, as before. Each draw has its
+    // textures in its command also.
+    {
+        GfxTexture *road = Gfx_CreateTexture(8, 8, GFX_FORMAT_BGRA8, 1, 0);
+        GfxTexture *grass = Gfx_CreateTexture(8, 8, GFX_FORMAT_BGRA8, 1, 0);
+        s_joins = false;
+        Gfx_SetTexture(0, road);
+        Mesh();
+        Gfx_SetTexture(0, grass);
+        Gfx_SetTexture(1, road);
+        Mesh();
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 2 && s_frame.states.size() == 2);
+        REQUIRE(s_frame.states[Draw(1).state].stages[0].texture == grass);
+        REQUIRE(Draw(0).textures[0] == road && Draw(1).textures[0] == grass && Draw(1).textures[1] == road);
+        // Joined: one state for the three meshes. A change of another part
+        // still starts a state.
+        s_joins = true;
+        Gfx_SetTexture(1, NULL);
+        Gfx_SetTexture(0, road);
+        Mesh();
+        Gfx_SetTexture(0, grass);
+        Mesh();
+        Gfx_SetTexture(1, road);
+        Mesh();
+        Gfx_SetAlphaRef(0x21);
+        Mesh();
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 4 && s_frame.states.size() == 2);
+        REQUIRE(Draw(0).state == Draw(1).state && Draw(1).state == Draw(2).state && Draw(3).state != Draw(2).state);
+        REQUIRE(Draw(0).textures[0] == road && Draw(1).textures[0] == grass && Draw(1).textures[1] == NULL);
+        REQUIRE(Draw(2).textures[0] == grass && Draw(2).textures[1] == road);
+        // Two sprites with different textures do not join.
+        Gfx_SetTexture(1, NULL);
+        Sprite(0.0f);
+        Gfx_SetTexture(0, road);
+        Sprite(10.0f);
+        Sprite(20.0f);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 2 && s_frame.states.size() == 1 && Draw(1).vertexCount == 8);
+        // A texture that only a draw's command names is still in use: the
+        // frame runs before the texture goes.
+        Mesh();
+        Gfx_SetTexture(0, grass);
+        Mesh();
+        Gfx_SetTexture(0, NULL);
+        s_frame.commands.clear();
+        Gfx_DestroyTexture(grass);
+        REQUIRE(Draws() == 2 && Draw(1).textures[0] == grass);
+        Gfx_Present(FALSE);
+        Gfx_DestroyTexture(road);
+        Gfx_SetAlphaRef(0);
     }
 
     // The number of a recorded state for the vertex program: it changes with
