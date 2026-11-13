@@ -309,10 +309,29 @@ static uint32_t TraceHash(uint32_t h, const void *data, size_t size)
 void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
                    DWORD indexCount, GfxVertexBuffer *buffer, DWORD firstVertex, bool worldSpace);
 
+void RecordDrawNow(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
+                   DWORD indexCount, GfxVertexBuffer *buffer, DWORD firstVertex);
+
 // Records a draw; fans become lists (SDL_GPU has no fans). With a buffer,
 // the vertices are firstVertex.. of that buffer.
 void RecordDraw(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
                 DWORD indexCount, GfxVertexBuffer *buffer = NULL, DWORD firstVertex = 0)
+{
+#if defined(VITA) && defined(OPENCMR2_DEV)
+    // The heartbeat's recorder time, from one draw in kRecorderSampleEvery.
+    static unsigned count;
+    if (++count % kRecorderSampleEvery == 0) {
+        const unsigned long long start = SysVita_Micros();
+        RecordDrawNow(primitive, transformed, vertices, vertexCount, indices, indexCount, buffer, firstVertex);
+        SysVita_RecorderSample(SysVita_Micros() - start);
+        return;
+    }
+#endif
+    RecordDrawNow(primitive, transformed, vertices, vertexCount, indices, indexCount, buffer, firstVertex);
+}
+
+void RecordDrawNow(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
+                   DWORD indexCount, GfxVertexBuffer *buffer, DWORD firstVertex)
 {
     if (FILE *trace = TraceFile()) {
         uint32_t h = TraceHash(2166136261u, vertices, vertexCount * (transformed ? sizeof(GfxTLVertex) : sizeof(GfxVertex)));
