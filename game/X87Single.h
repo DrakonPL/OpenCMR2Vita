@@ -79,6 +79,11 @@ static inline double X87s_Round(double hi, double lo)
     uint64_t bits;
     memcpy(&bits, &hi, sizeof(bits));
     const unsigned exponent = (unsigned)(bits >> 52) & 0x7ff;
+    // An exact result in the range of a float (most results: a product of
+    // two floats, a scaled integer): the conversion to float is this
+    // rounding, to the nearest and to the even one at the middle.
+    if (lo == 0.0 && exponent - (1023 - 120) <= 240)
+        return (double)(float)hi;
     if (exponent == 0 || exponent == 0x7ff)
         return X87s_RoundGeneral(hi, lo);
     const uint64_t cut = bits & 0x1fffffffull, half = 0x10000000ull, step = 0x20000000ull;
@@ -122,19 +127,47 @@ static inline int X87s_MantissaBits(uint64_t bits)
 // PORT: most products of the game are of two floats, or of an integer and a
 // float: their mantissas have 53 bits or fewer together, so the double
 // product is exact and has no rest. Only a product of longer mantissas needs
-// the exact product of Dekker (17 operations).
-static inline double X87s_Mul(double a, double b)
+// the exact product of Dekker (17 operations). x, y: the bits of a, b.
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline, unused))
+#endif
+static double X87s_MulGeneral(double a, double b, uint64_t x, uint64_t y)
 {
     double hi, lo;
+    const unsigned ex = (unsigned)(x >> 52) & 0x7ff, ey = (unsigned)(y >> 52) & 0x7ff;
+
+    // Two normal numbers (an exponent field of 0 is a zero or a subnormal)
+    // with a normal product: a product below the normal range loses bits.
+    if (ex != 0 && ey != 0 && X87s_MantissaBits(x) + X87s_MantissaBits(y) <= 53) {
+        uint64_t z;
+        hi = a * b;
+        memcpy(&z, &hi, sizeof(z));
+        if ((z >> 52 & 0x7ff) != 0 && (z >> 52 & 0x7ff) != 0x7ff)
+            return X87s_Round(hi, 0.0);
+    }
+    X87s_TwoProduct(a, b, &hi, &lo);
+    return X87s_Round(hi, lo);
+}
+
+// PORT: a number times a power of two (the game's 16.16 numbers times
+// 1/65536, some ten thousand in a frame, for each vertex of its 2D layers
+// and each matrix it gives the renderer): the product is the number with
+// another exponent, so it is exact, and the conversion to float rounds it.
+// Both exponents are in a range that keeps the product a normal float. This
+// part is in each place that multiplies: the rest is one function.
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((always_inline))
+#endif
+static inline double X87s_Mul(double a, double b)
+{
     uint64_t x, y;
 
     memcpy(&x, &a, sizeof(x));
     memcpy(&y, &b, sizeof(y));
-    // Two normal numbers (an exponent field of 0 is a zero or a subnormal).
-    if ((x >> 52 & 0x7ff) != 0 && (y >> 52 & 0x7ff) != 0 && X87s_MantissaBits(x) + X87s_MantissaBits(y) <= 53)
-        return X87s_Round(a * b, 0.0);
-    X87s_TwoProduct(a, b, &hi, &lo);
-    return X87s_Round(hi, lo);
+    if ((y & 0xfffffffffffffull) == 0 && ((unsigned)(y >> 52) & 0x7ff) - (1023 - 60) <= 120 &&
+        ((unsigned)(x >> 52) & 0x7ff) - (1023 - 60) <= 120)
+        return (double)(float)(a * b);
+    return X87s_MulGeneral(a, b, x, y);
 }
 
 static inline double X87s_Div(double a, double b)

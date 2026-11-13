@@ -142,6 +142,22 @@ int main()
     for (double a : special)
         for (double b : { 0.0, -0.0, 1.5, -2.0, 1e300, 1e-300, 3.0000000001 })
             REQUIRE(SameProduct(a, b) && SameProduct(b, a));
+    // A number times a power of two, through the exponents: inside the
+    // range of the short way, at its edges and beyond them.
+    for (int i = 0; i < 2000000; i++) {
+        const double any = FromBits(Random());
+        const double longA = (double)(int64_t)(Random() >> 12) / 1048576.0;
+        const double power = ldexp((Random() & 1) ? 1.0 : -1.0, (int)(Random() % 160) - 80);
+        const double scaled = ldexp(longA, (int)(Random() % 160) - 80);
+        REQUIRE(SameProduct(longA, power) && SameProduct(scaled, power) && SameProduct(any, power));
+        REQUIRE(SameProduct(longA, 1.0 / 65536.0) && SameProduct((int32_t)Random(), 1.0 / 65536.0));
+        REQUIRE(SameProduct(power, longA));
+    }
+    for (int e = -70; e <= 70; e++)
+        for (int f = -70; f <= 70; f += 3) {
+            const double a = ldexp(1.0000001192092896, e), b = ldexp(1.0, f);
+            REQUIRE(SameProduct(a, b) && SameProduct(-a, b) && SameProduct(ldexp(1.9999999, e), -b));
+        }
     REQUIRE(SameProduct(1e200, 1e200) && SameProduct(1e-200, 1e-200) && SameProduct(-1e200, 3.0));
     // The edge of the short way: two whole numbers of 27 bits whose product
     // has 54 bits, with a 1, 28 zeros and a 1 at its end. The double product
