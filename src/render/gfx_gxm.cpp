@@ -205,6 +205,9 @@ struct Stats {
     // wait of its present (the worker with the threaded executor), and the
     // frames presented.
     unsigned prepareMicros = 0, executeMicros = 0, frames = 0;
+    // Texture binds of textures with mip levels made here: with a mip
+    // filter, and without one (the game's mipmapping option off).
+    unsigned mipReads = 0, mipUnread = 0;
 };
 
 // The frame time probe of dev builds. A tap on the front touch screen starts
@@ -1027,6 +1030,14 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                     mipFilter = GFX_MIPFILTER_LINEAR;
                 }
                 gpuTextures.SetSampler(*g, minFilter, magFilter, mipFilter, stage.address);
+                // The mip levels made here: read where the stage has a mip
+                // filter (the game's mipmapping option), else not.
+                if (g->madeMips) {
+                    if (mipFilter != GFX_MIPFILTER_NONE)
+                        stats.mipReads++;
+                    else
+                        stats.mipUnread++;
+                }
             }
             if (g == nullptr && (slot == GXM_SLOT_CUBE0 || slot == GXM_SLOT_CUBE1))
                 g = &whiteCube;
@@ -2090,8 +2101,10 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         // Prepare runs on the game's thread; Execute on the worker with the
         // threaded executor.
         const double frames = stats.frames > 0 ? (double)stats.frames : 1.0;
-        Sys_Log("gxm: per frame ms: prepare %.2f, execute %.2f (without the wait of the present)",
-                stats.prepareMicros / 1000.0 / frames, stats.executeMicros / 1000.0 / frames);
+        Sys_Log("gxm: per frame ms: prepare %.2f, execute %.2f (without the wait of the present); per s binds of "
+                "made mip levels: %u read, %u not read (no mip filter)",
+                stats.prepareMicros / 1000.0 / frames, stats.executeMicros / 1000.0 / frames, stats.mipReads,
+                stats.mipUnread);
         stats = Stats();
         statsStart = now;
 #endif
