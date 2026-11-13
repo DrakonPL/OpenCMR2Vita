@@ -1621,7 +1621,8 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         bool timed = false;
         uint64_t start = 0;
 #ifdef OPENCMR2_DEV
-        if (presented >= nextBackdropTiming) {
+        // The time waits for the GPU twice: not with the stats off.
+        if (presented >= nextBackdropTiming && Gfx_PerfStatsWanted()) {
             nextBackdropTiming = presented + kBackdropTimingFrames;
             timed = true;
             device.Finish();
@@ -1988,6 +1989,12 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     void LogStats()
     {
 #ifdef OPENCMR2_DEV
+        // With the stats off, no line: a period starts when they are on again.
+        if (!Gfx_PerfStatsWanted()) {
+            statsStart = 0;
+            stats = Stats();
+            return;
+        }
         const uint64_t now = sceKernelGetProcessTimeWide();
         if (statsStart == 0)
             statsStart = now;

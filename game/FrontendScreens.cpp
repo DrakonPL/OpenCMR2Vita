@@ -12073,7 +12073,9 @@ void FrontendMenu_DrawNetworkSessionSetup(Menu *pMenu)
 // window, and two tests that draw the transparent 3D objects opaque (the
 // trees, the fences, the shadows, the particles): without the alpha
 // blending ([video] alpha_blend) and without the alpha test ([video]
-// alpha_test). They are saved in opencmr2.ini when OK is chosen; Back leaves them
+// alpha_test). The last row stops the performance stats of a development
+// build ([video] perf_stats), for a measurement without their cost.
+// They are saved in opencmr2.ini when OK is chosen; Back leaves them
 // as they were. The original's layout in pixels (a size of 0) stays an
 // opencmr2.ini setting.
 
@@ -12086,6 +12088,8 @@ enum ScreenOptionsItem {
     SCREEN_ITEM_FULLSCREEN,
     SCREEN_ITEM_ALPHA_BLEND,
     SCREEN_ITEM_ALPHA_TEST,
+    SCREEN_ITEM_PERF_STATS,
+    SCREEN_ITEM_COUNT,
     SCREEN_ITEM_OK = 0xe
 };
 
@@ -12097,6 +12101,7 @@ enum ScreenOptionsText {
     SCREEN_TEXT_FULLSCREEN,
     SCREEN_TEXT_ALPHA_BLEND,
     SCREEN_TEXT_ALPHA_TEST,
+    SCREEN_TEXT_PERF_STATS,
     SCREEN_TEXT_COUNT
 };
 
@@ -12104,17 +12109,17 @@ enum ScreenOptionsText {
 // some symbols: 0xb1 is l with a stroke).
 static const char *const g_screenOptionsText[6][SCREEN_TEXT_COUNT] = {
     { "Screen", "HUD Size", "Menu Size", "Vertical Sync", "Full Screen", "Alpha Blending (Test)",
-      "Alpha Test (Test)" },
+      "Alpha Test (Test)", "Performance Stats" },
     { "\xc9" "cran", "Taille du HUD", "Taille des menus", "Synchro verticale", "Plein \xe9" "cran",
-      "Fusion alpha (test)", "Test alpha (test)" },
+      "Fusion alpha (test)", "Test alpha (test)", "Statistiques" },
     { "Pantalla", "Tama\xf1o del HUD", "Tama\xf1o de los men\xfas", "Sincronizaci\xf3n vertical", "Pantalla completa",
-      "Mezcla alfa (prueba)", "Prueba alfa (prueba)" },
+      "Mezcla alfa (prueba)", "Prueba alfa (prueba)", "Estad\xedsticas" },
     { "Schermo", "Dimensione HUD", "Dimensione menu", "Sincronia verticale", "Schermo intero",
-      "Fusione alfa (test)", "Test alfa (test)" },
+      "Fusione alfa (test)", "Test alfa (test)", "Statistiche" },
     { "Bildschirm", "HUD-Gr\xf6\xdf" "e", "Men\xfcgr\xf6\xdf" "e", "VSync", "Vollbild", "Alpha-Blending (Test)",
-      "Alpha-Test (Test)" },
+      "Alpha-Test (Test)", "Leistungsstatistik" },
     { "Ekran", "Rozmiar HUD", "Rozmiar menu", "Synchronizacja pionowa", "Pe\xb1ny ekran", "Mieszanie alfa (test)",
-      "Test alfa (test)" },
+      "Test alfa (test)", "Statystyki silnika" },
 };
 
 // Sizes offered, in percent.
@@ -12154,7 +12159,7 @@ static int ScreenOptions_SizeIndex(int percent, int count)
 
 // The values the page opened with: unchanged ones are not written, so that a
 // size set in opencmr2.ini between the steps offered stays.
-static BYTE g_screenOptionsShown[6];
+static BYTE g_screenOptionsShown[SCREEN_ITEM_COUNT];
 
 void FrontendMenu_EnterScreenOptions(Menu *pMenu, int param)
 {
@@ -12172,7 +12177,8 @@ void FrontendMenu_EnterScreenOptions(Menu *pMenu, int param)
     Menu_GetItem(pMenu, SCREEN_ITEM_FULLSCREEN)->max = g_pGraphics->isFullscreen ? 0 : 1;
     Menu_GetItem(pMenu, SCREEN_ITEM_ALPHA_BLEND)->max = Sys_GetOption("video.alpha_blend", 1) != 0 ? 0 : 1;
     Menu_GetItem(pMenu, SCREEN_ITEM_ALPHA_TEST)->max = Sys_GetOption("video.alpha_test", 1) != 0 ? 0 : 1;
-    for (int i = 0; i < 6; i++)
+    Menu_GetItem(pMenu, SCREEN_ITEM_PERF_STATS)->max = Sys_GetOption("video.perf_stats", 1) != 0 ? 0 : 1;
+    for (int i = 0; i < SCREEN_ITEM_COUNT; i++)
         g_screenOptionsShown[i] = Menu_GetItem(pMenu, i)->max;
 }
 
@@ -12202,6 +12208,9 @@ void FrontendMenu_ApplyScreenOptions(Menu *pMenu, MenuItem *pItem)
     value = Menu_GetItem(pMenu, SCREEN_ITEM_ALPHA_TEST)->max;
     if (value != g_screenOptionsShown[SCREEN_ITEM_ALPHA_TEST])
         Sys_SetOption("video.alpha_test", value == 0);
+    value = Menu_GetItem(pMenu, SCREEN_ITEM_PERF_STATS)->max;
+    if (value != g_screenOptionsShown[SCREEN_ITEM_PERF_STATS])
+        Sys_SetOption("video.perf_stats", value == 0);
 }
 
 // The rows of the advanced graphics page: a label, then the value as
@@ -12268,11 +12277,13 @@ void FrontendMenu_DrawScreenOptions(Menu *pMenu)
         case SCREEN_ITEM_FULLSCREEN:
         case SCREEN_ITEM_ALPHA_BLEND:
         case SCREEN_ITEM_ALPHA_TEST:
+        case SCREEN_ITEM_PERF_STATS:
             strcpy(CFrontend::m_stringDest,
                    ScreenOptions_Text(pItem->value == SCREEN_ITEM_VSYNC         ? SCREEN_TEXT_VSYNC
                                       : pItem->value == SCREEN_ITEM_FULLSCREEN  ? SCREEN_TEXT_FULLSCREEN
                                       : pItem->value == SCREEN_ITEM_ALPHA_BLEND ? SCREEN_TEXT_ALPHA_BLEND
-                                                                                : SCREEN_TEXT_ALPHA_TEST));
+                                      : pItem->value == SCREEN_ITEM_ALPHA_TEST  ? SCREEN_TEXT_ALPHA_TEST
+                                                                                : SCREEN_TEXT_PERF_STATS));
             Font_DrawText(1, CFrontend::m_stringDest, x, textY, (int *)pColour, 0x11);
             for (j = 0; j < pItem->min; j++) {
                 x += (int)(g_pGraphics->resX * 10) / 640 + Font_GetTextWidth(1, (BYTE *)CFrontend::m_stringDest);
@@ -12313,6 +12324,7 @@ void FrontendMenu_BuildScreenOptions(void)
     Menu_AddItemType3(&g_screenOptionsMenu, 0, -1, 2, 0, 0, 0, 0, SCREEN_ITEM_FULLSCREEN);
     Menu_AddItemType3(&g_screenOptionsMenu, 0, -1, 2, 0, 0, 0, 0, SCREEN_ITEM_ALPHA_BLEND);
     Menu_AddItemType3(&g_screenOptionsMenu, 0, -1, 2, 0, 0, 0, 0, SCREEN_ITEM_ALPHA_TEST);
+    Menu_AddItemType3(&g_screenOptionsMenu, 0, -1, 2, 0, 0, 0, 0, SCREEN_ITEM_PERF_STATS);
     Menu_AddItemType1(&g_screenOptionsMenu, 0, 0x67, (MenuItemAction)FrontendMenu_ApplyScreenOptions, SCREEN_ITEM_OK);
     Menu_SetCallbacks(&g_screenOptionsMenu, FrontendMenu_EnterScreenOptions, NULL,
                       (MenuCallback)FrontendMenu_DrawScreenOptions, NULL);

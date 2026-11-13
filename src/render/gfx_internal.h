@@ -248,6 +248,11 @@ struct GfxExecutor {
 // call on. Only an executor that takes joined draws has such draws.
 void Gfx_RecorderCountsText(char *text, size_t size);
 
+// Whether the performance stats of a development build are on
+// (video.perf_stats, read at each present). Off, the recorder counts nothing
+// for the logs.
+bool Gfx_PerfStatsWanted(void);
+
 GfxExecutor *Gfx_CreateGpuExecutor(void);
 GfxExecutor *Gfx_CreateNullExecutor(void);
 #ifdef VITA
