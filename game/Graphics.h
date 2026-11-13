@@ -1336,6 +1336,8 @@ private:
     friend void Graphics_DrawCubeMappedShadowTriangles(Mesh *pMesh);
     // Mesh_DrawEnvMapped sets the texture transform of the projected cube map.
     friend void Mesh_DrawEnvMapped(Mesh *pMesh);
+    // PORT: the merged ground parts (Game.cpp).
+    friend void Game_DrawMergedGroundParts(bool *pMerged);
     friend void *Sector_RelocateStageMeshFile(BYTE *pData, struct SceneNode *parent, struct GenericFile *archive);
     friend void OptionPreview_UpdateWheelMeshVariants(int param1);
     friend Texture *Graphics_FindAndEnsureResidentTexture(char *name);

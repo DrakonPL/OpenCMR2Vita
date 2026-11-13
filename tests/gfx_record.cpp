@@ -973,7 +973,26 @@ int main()
         Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, ground, 8, 4, triangle, 3);
         Gfx_Present(FALSE);
         REQUIRE(Draws() == 1 && Draw(0).firstVertexByte == 8 * sizeof(GfxVertex) && Draw(0).boxHigh[0] == 0.1f);
+        // The game asks for a range before it draws it (the merged ground).
+        v = Gfx_LockVertexBuffer(ground);
+        for (int i = 12; i < 16; i++)
+            v[i].x = 5.0f;
+        Gfx_UnlockVertexBuffer(ground);
+        REQUIRE(Gfx_IsRangeVisible(ground, 0, 4) && Gfx_IsRangeVisible(ground, 8, 4));
+        REQUIRE(!Gfx_IsRangeVisible(ground, 12, 4) && Gfx_IsRangeVisible(ground, 8, 8));
+        REQUIRE(!Gfx_IsRangeVisible(ground, 12, 5) && !Gfx_IsRangeVisible(NULL, 0, 4));
+        s_cullDraws = 0;
+        Gfx_Present(FALSE);
+        REQUIRE(Gfx_IsRangeVisible(ground, 12, 4));
+        s_cullDraws = 1;
+        Gfx_Present(FALSE);
         Gfx_DestroyVertexBuffer(ground);
+        // The game merges its ground draws for an executor that takes
+        // joined draws.
+        REQUIRE(Gfx_MergesGroundDraws());
+        s_joins = false;
+        REQUIRE(!Gfx_MergesGroundDraws());
+        s_joins = true;
         // Transformed draws are not tested: they are in pixels.
         Sprite(5000.0f);
         Gfx_Present(FALSE);

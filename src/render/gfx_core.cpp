@@ -378,12 +378,13 @@ void VertexBox(const GfxVertex *vertices, DWORD count, float low[3], float high[
 // video.cull_draws and video.buffer_snapshots: -2 not read yet, -1 not set
 // (then on with an executor that takes joined draws). Read again at each
 // present.
-int s_cullSetting = -2, s_snapshotSetting = -2;
+int s_cullSetting = -2, s_snapshotSetting = -2, s_mergeGroundSetting = -2;
 
 void ReadDrawSettings()
 {
     s_cullSetting = Platform_GetSettingInt("video.cull_draws", -1);
     s_snapshotSetting = Platform_GetSettingInt("video.buffer_snapshots", -1);
+    s_mergeGroundSetting = Platform_GetSettingInt("video.merge_ground", -1);
 }
 
 bool CullWanted()
@@ -1613,6 +1614,24 @@ extern "C" GfxVertex *Gfx_LockVertexBuffer(GfxVertexBuffer *buffer)
 
 extern "C" void Gfx_UnlockVertexBuffer(GfxVertexBuffer *)
 {
+}
+
+extern "C" BOOL Gfx_IsRangeVisible(GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount)
+{
+    if (buffer == NULL || vertexCount == 0 || firstVertex + vertexCount > buffer->vertices.size())
+        return FALSE;
+    if (s_executor == NULL || !CullWanted())
+        return TRUE;
+    return BoxOutsideView(ClipMatrix(s_state.world, 0), BufferRangeBox(buffer, firstVertex, vertexCount)) ? FALSE : TRUE;
+}
+
+extern "C" BOOL Gfx_MergesGroundDraws(void)
+{
+    if (s_executor == NULL)
+        return FALSE;
+    if (s_mergeGroundSetting == -2)
+        ReadDrawSettings();
+    return (s_mergeGroundSetting < 0 ? s_executor->JoinsDraws() : s_mergeGroundSetting != 0) ? TRUE : FALSE;
 }
 
 extern "C" void Gfx_DrawPrimitiveVB(int primitive, GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount)

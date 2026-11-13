@@ -2510,6 +2510,153 @@ unsigned int g_shadowFrameStart;
 // GLOBAL: CMR2 0x0059be70
 unsigned int g_shadowFramePrevious;
 
+extern int g_depthSortDrawLists;
+int Graphics_GetGeometryStateValue(void);
+
+// PORT: the ground parts of the visible sectors, drawn together: one draw
+// for each vertex buffer, texture and state, not one for each part of each
+// sector (some 420 draws in a frame of a wood on the PS Vita, where each
+// draw costs CPU time). A part outside the view is left out. The ground is
+// opaque: the depth test gives each pixel the nearest part in any order.
+// A mesh that draws more than its parts (the reflection passes), with
+// blending or with a LOD stays with the original walk, after the merged
+// draws. So does the last mesh: the state that the walk leaves is then the
+// original's. A mesh with the flag 0x20 (all ground meshes) draws with the
+// lighting mode that is set, as in Graphics_DrawMeshLOD. pMerged: for each
+// visible sector, whether its mesh was drawn here. The PC GL renderer gives
+// the same frames with the merge.
+struct GroundGroup {
+    int buffer, texture, cull, lighting;    // lighting: -1 for the mode that is set
+    int first, end;             // vertices of the buffer
+    unsigned indexStart, indexCount;
+};
+struct GroundPart {
+    Mesh *pMesh;
+    MeshPart *pPart;
+    unsigned group;
+};
+
+static bool Game_GroundMeshMerges(const Mesh *pMesh)
+{
+    if (pMesh->lodIndex != 0 || (pMesh->flags & 0x1000) != 0)
+        return false;
+    if (g_depthSortDrawLists != 0 && (pMesh->flags & 8) != 0)
+        return false;
+    // The reflection passes after the parts (Graphics_DrawMeshLOD).
+    if ((pMesh->flags & 0x200) != 0 && (pMesh->flags & 0x40000) == 0 && (g_pGraphics->field913_0x3bc & 8) != 0)
+        return false;
+    return true;
+}
+
+// The groups, the parts and the indices of a frame. A frame with more of
+// them than these hold draws its ground as the original did.
+enum { kGroundGroups = 1024, kGroundParts = 8192, kGroundIndices = 1 << 18 };
+static GroundGroup s_groundGroups[kGroundGroups];
+static GroundPart s_groundParts[kGroundParts];
+static unsigned short s_groundIndices[kGroundIndices];
+
+void Game_DrawMergedGroundParts(bool *pMerged)
+{
+    GroundGroup *groups = s_groundGroups;
+    GroundPart *parts = s_groundParts;
+    unsigned short *indices = s_groundIndices;
+    unsigned int groupCount = 0, partCount = 0, indexCount = 0;
+    unsigned int count = (unsigned int)g_sectorCullEnabled;
+    unsigned int i;
+    int k;
+
+    // The sizes first: all parts of the meshes that merge, in the view or not.
+    for (i = 0; i + 1 < count; i++) {
+        Mesh *pMesh = (Mesh *)g_sectors[g_visibleSectorIndices[i]]->pMesh;
+        if (pMesh == NULL || !Game_GroundMeshMerges(pMesh))
+            continue;
+        partCount += (unsigned int)pMesh->partCount;
+        for (k = 0; k < pMesh->partCount; k++)
+            indexCount += pMesh->pParts[k]->indexCount > 0 ? (unsigned int)pMesh->pParts[k]->indexCount : 0;
+    }
+    for (i = 0; i < count; i++)
+        pMerged[i] = false;
+    if (partCount > kGroundParts || indexCount > kGroundIndices)
+        return;
+    partCount = 0;
+    for (i = 0; i + 1 < count; i++) {
+        Mesh *pMesh = (Mesh *)g_sectors[g_visibleSectorIndices[i]]->pMesh;
+        if (pMesh == NULL || !Game_GroundMeshMerges(pMesh))
+            continue;
+        pMerged[i] = true;
+        GfxVertexBuffer *pBuffer = CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex];
+        const int cull = (pMesh->flags & 1) != 0 ? 1 : CGame::GetSectorDrawState();
+        const int lighting = (pMesh->flags & 0x20) != 0 ? -1 : (pMesh->flags & 0x40000) != 0 ? 3 : 2;
+        for (k = 0; k < pMesh->partCount; k++) {
+            MeshPart *pPart = pMesh->pParts[k];
+            const int first = pMesh->vertexOffset + pPart->minIndex;
+            const int end = pMesh->vertexOffset + pPart->maxIndex + 1;
+            if (pPart->indexCount <= 0 || end <= first || !Gfx_IsRangeVisible(pBuffer, first, end - first))
+                continue;
+            unsigned g;
+            for (g = 0; g < groupCount; g++) {
+                const GroundGroup &group = groups[g];
+                if (group.buffer == pMesh->vertexBufferIndex && group.texture == pPart->texture &&
+                    group.cull == cull && group.lighting == lighting)
+                    break;
+            }
+            if (g == groupCount) {
+                if (groupCount == kGroundGroups) {
+                    // No room: the original walk draws all meshes.
+                    for (i = 0; i < count; i++)
+                        pMerged[i] = false;
+                    return;
+                }
+                GroundGroup group = { pMesh->vertexBufferIndex, pPart->texture, cull, lighting, first, end, 0, 0 };
+                groups[groupCount++] = group;
+            }
+            GroundGroup &group = groups[g];
+            group.first = first < group.first ? first : group.first;
+            group.end = end > group.end ? end : group.end;
+            group.indexCount += pPart->indexCount;
+            GroundPart part = { pMesh, pPart, g };
+            parts[partCount++] = part;
+        }
+    }
+    if (groupCount == 0)
+        return;
+    unsigned start = 0;
+    for (unsigned g = 0; g < groupCount; g++) {
+        groups[g].indexStart = start;
+        start += groups[g].indexCount;
+        groups[g].indexCount = 0;
+    }
+    for (unsigned p = 0; p < partCount; p++) {
+        const GroundPart &part = parts[p];
+        GroundGroup &group = groups[part.group];
+        const int base = part.pMesh->vertexOffset + part.pPart->minIndex - group.first;
+        unsigned short *pOut = &indices[group.indexStart + group.indexCount];
+        for (k = 0; k < part.pPart->indexCount; k++)
+            pOut[k] = (unsigned short)(part.pPart->pData[k] + base);
+        group.indexCount += part.pPart->indexCount;
+    }
+    const int lightingMode = Graphics_GetGeometryStateValue();
+    bool lightingChanged = false;
+    Graphics_SwitchAlphaBlendAndTest(0);
+    for (unsigned g = 0; g < groupCount; g++) {
+        const GroundGroup &group = groups[g];
+        CGraphics::SetCullMode(group.cull);
+        if (group.lighting >= 0) {
+            Graphics_SetLightingMode(group.lighting);
+            lightingChanged = true;
+        } else if (lightingChanged) {
+            Graphics_SetLightingMode(lightingMode);
+            lightingChanged = false;
+        }
+        CGraphics::ApplyTextureStageChange(0, CGraphics::m_pTextureManager->textureBuffer[group.texture]);
+        Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, CGraphics::m_pTextureManager->pVertexBuffers[group.buffer],
+                                   group.first, group.end - group.first, &indices[group.indexStart], group.indexCount);
+        CGame::m_unk0x0059ce18 += group.indexCount / 3;
+    }
+    if (lightingChanged)
+        Graphics_SetLightingMode(lightingMode);
+}
+
 // FUNCTION: CMR2 0x0049cec0
 void Game_DrawCulledSectorMeshes(void)
 {
@@ -2527,8 +2674,15 @@ void Game_DrawCulledSectorMeshes(void)
     Pulse_Update(CMain::GetFrameDelta() - g_sectorFramePrevious);
     g_sectorFramePrevious = CMain::GetFrameDelta();
     Gfx_SetTransform(GFX_TRANSFORM_WORLD, &g_identityWorldMatrix);
+    // PORT: the merged ground parts first (Game_DrawMergedGroundParts).
+    static bool merged[4096];
+    const bool merges = Gfx_MergesGroundDraws() != 0 && (unsigned int)g_sectorCullEnabled <= 4096;
+    if (merges)
+        Game_DrawMergedGroundParts(merged);
     for (i = 0; i < (unsigned int)g_sectorCullEnabled; i++) {
         pMesh = (Mesh *)g_sectors[g_visibleSectorIndices[i]]->pMesh;
+        if (merges && merged[i])
+            continue;
         if (pMesh != NULL) {
             if ((pMesh->flags & 0x1000) != 0)
                 Graphics_DrawMeshLOD(pMesh, 0, 1, 0);
