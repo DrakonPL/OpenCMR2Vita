@@ -29,6 +29,15 @@ struct GfxTexture {
     bool renderedTo;            // the GPU copy is newer (render targets)
     void *gpu;                  // executor's object
     GfxTexture *replacement;    // drawn instead (Gfx_SetTextureReplacement)
+    // For the recorder, for each small draw of a batch. The recording whose
+    // frame has it among the textures of its small batches
+    // (GfxFrame::smallTextures). Its place in the atlas of the small quads
+    // as of a number of the atlas: the index of the place, or -1 and why it
+    // has none.
+    uint32_t batchRecord = 0;
+    uint32_t atlasSerial = 0;
+    int atlasIndex = -1;
+    int atlasReason = 0;
     GfxTexture *faceViews[6];   // a cube: its face views (1..5; 0 is itself)
     // CPU copy of every level of every face, tightly packed rows.
     std::vector<uint8_t> levels[6][16];

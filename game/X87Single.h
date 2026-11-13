@@ -200,11 +200,12 @@ static inline double X87s_Sqrt(double x)
 #define X87S_SUB(a, b) X87s_Add((double)(a), -(double)(b))
 #define X87S_MUL(a, b) X87s_Mul((double)(a), (double)(b))
 // PORT: X87S_MUL for a whole number of 32 bits (a: a 16.16 number) and b the
-// double 1/65536 (CGraphics::m_oneOver65536). The product is exact for each
-// such number, and the conversion to float rounds it as the x87 does: no
-// look at the bits of the operands. For a place that makes many of them (a
-// triangle of a 3D layer has 15). tests/x87_round.cpp compares the two.
-#define X87S_MUL_FIX16(a, b) ((void)sizeof(b), (double)(float)((double)(int)(a) * (1.0 / 65536.0)))
+// double 1/65536 (CGraphics::m_oneOver65536). The whole number as a float is
+// the number rounded to 24 bits, and its product with a power of two is
+// exact: the product rounded to 24 bits, as the x87 gives it. No look at the
+// bits of the operands, and no double. For a place that makes many of them
+// (a triangle of a 3D layer has 15). tests/x87_round.cpp compares the two.
+#define X87S_MUL_FIX16(a, b) ((void)sizeof(b), (double)((float)(int)(a) * (1.0f / 65536.0f)))
 #define X87S_DIV(a, b) X87s_Div((double)(a), (double)(b))
 #define X87S_SQRT(x) X87s_Sqrt((double)(x))
 #define X87S_FILD(type, x) ((double)(x))

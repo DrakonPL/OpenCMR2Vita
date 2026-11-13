@@ -241,8 +241,9 @@ std::vector<AtlasEntry> s_atlasEntries;
 uint32_t s_atlasRecord;     // the recording that last drew from the atlas
 
 // The place of a texture in the atlas, or NULL where it does not go in: not
-// a plain BC3 texture of one level, too large, or no room.
-const AtlasEntry *AtlasEntryOf(GfxTexture *t)
+// a plain BC3 texture of one level, too large, or no room. A search of the
+// places, and a new place for a texture that has none.
+const AtlasEntry *FindAtlasEntry(GfxTexture *t)
 {
     for (const AtlasEntry &e : s_atlasEntries)
         if (e.texture == t)
@@ -315,6 +316,28 @@ bool AtlasStateFits()
     return stage.texCoordIndex == 0 && stage.textureTransform == GFX_TTFF_DISABLE;
 }
 
+// The places of the atlas as of this number: a texture keeps the answer of
+// FindAtlasEntry while the number stays (GfxTexture::atlasSerial). It
+// changes when the places go.
+uint32_t s_atlasSerial = 1;
+
+// FindAtlasEntry, with the answer that the texture keeps: the search for
+// each small draw of a batch was a quarter of the time of its recording.
+const AtlasEntry *AtlasEntryOf(GfxTexture *t)
+{
+    if (t->atlasSerial == s_atlasSerial) {
+        if (t->atlasIndex >= 0)
+            return &s_atlasEntries[(size_t)t->atlasIndex];
+        s_noAtlas = t->atlasReason;
+        return NULL;
+    }
+    const AtlasEntry *e = FindAtlasEntry(t);
+    t->atlasSerial = s_atlasSerial;
+    t->atlasIndex = e != NULL ? (int)(e - s_atlasEntries.data()) : -1;
+    t->atlasReason = s_noAtlas;
+    return e;
+}
+
 // The place of the texture of the state in the atlas, or NULL.
 const AtlasEntry *AtlasEntryOfState()
 {
@@ -369,6 +392,7 @@ void AtlasForget(const GfxTexture *t)
     if (s_atlasRecord == s_record)
         Flush(FLUSH_ATLAS);
     s_atlasEntries.clear();
+    s_atlasSerial++;
     s_atlasPacker.Reset(s_atlasSize / 4, s_atlasSize / 4);
     if (t == s_atlas) {
         s_atlas = NULL;
@@ -2004,10 +2028,13 @@ void RecordSmallItem(GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCou
     // The number of the job that reads the vertices: the next one.
     buffer->batchBlocks.Mark(firstVertex, vertexCount, Gfx_BatchJobsAdded() + 1);
     // The executor makes ready each texture that the draw can have.
-    std::vector<GfxTexture *> &read = s_frame.smallTextures;
+    // (GfxFrame::smallTextures: each texture once in a recording. A search
+    // of the list for each draw was a third of the time of this function.)
     for (GfxTexture *t : { item.texture, item.atlas })
-        if (t != NULL && std::find(read.begin(), read.end(), t) == read.end())
-            read.push_back(t);
+        if (t != NULL && t->batchRecord != s_record) {
+            t->batchRecord = s_record;
+            s_frame.smallTextures.push_back(t);
+        }
     s_counts.batched++;
 }
 
@@ -2296,6 +2323,8 @@ extern "C" void Gfx_SetTextureReplacement(GfxTexture *texture, GfxTexture *repla
     Gfx_WaitForExecutor();
     Gfx_DestroyTexture(texture->replacement);
     texture->replacement = replacement;
+    // A texture with a replacement does not go into the atlas.
+    texture->atlasSerial = 0;
 }
 
 extern "C" int Gfx_GetDistanceFieldScale(GfxTexture *texture)
@@ -2591,6 +2620,11 @@ struct NullExecutor : GfxExecutor {
     }
     void DestroyTexture(GfxTexture *) override {}
     void ReadTexture(GfxTexture *) override {}
+    // OPENCMR2_NULL_JOINS=1: the recorder works as for the GXM executor (the
+    // joined draws, the batches, the range locks), for a run of a stage on
+    // the PC without a picture.
+    bool JoinsDraws() const override { return joins; }
+    bool joins = getenv("OPENCMR2_NULL_JOINS") != NULL;
 };
 
 } // namespace
