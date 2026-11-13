@@ -34,6 +34,7 @@ const SceGxmMemoryAttribFlags kReadWrite = (SceGxmMemoryAttribFlags)(SCE_GXM_MEM
 struct FlipData {
     void *address;
     int vsync;
+    int width, height;      // the frame buffer size the display gets
 };
 
 // Runs on the display queue's thread: no log here.
@@ -45,8 +46,8 @@ void Flip(const void *callbackData)
     frame.base = flip->address;
     frame.pitch = kDisplayStride;
     frame.pixelformat = SCE_DISPLAY_PIXELFORMAT_A8B8G8R8;
-    frame.width = GxmDevice::kDisplayWidth;
-    frame.height = GxmDevice::kDisplayHeight;
+    frame.width = flip->width;
+    frame.height = flip->height;
     if (flip->vsync) {
         sceDisplaySetFrameBuf(&frame, SCE_DISPLAY_SETBUF_NEXTFRAME);
         sceDisplayWaitVblankStart();
@@ -133,7 +134,7 @@ bool GxmDevice::CreateDisplay()
     }
     // The display refuses a flip without vsync until it had one with: show
     // the first (black) buffer so.
-    FlipData first = { display[front].memory.data, 1 };
+    FlipData first = { display[front].memory.data, 1, kDisplayWidth, kDisplayHeight };
     Flip(&first);
     sceDisplayWaitSetFrameBuf();
     back = 1;
@@ -188,8 +189,11 @@ bool GxmDevice::SetMode(int w, int h)
     }
     if (!CreateRenderTarget(w, h))
         return false;
-    // A smaller back buffer is the centre of the display, with a black border.
-    const int x = (kDisplayWidth - w) / 2, y = (kDisplayHeight - h) / 2;
+    // A smaller back buffer is the centre of the display, with a black
+    // border. A size that the display scales starts at the buffer's first
+    // pixel and fills the screen.
+    const bool scaled = DisplayScales(w, h);
+    const int x = scaled ? 0 : (kDisplayWidth - w) / 2, y = scaled ? 0 : (kDisplayHeight - h) / 2;
     for (DisplayBuffer &d : display) {
         memset(d.memory.data, 0, kDisplayBytes);
         unsigned char *origin = (unsigned char *)d.memory.data + ((size_t)y * kDisplayStride + x) * 4;
@@ -207,7 +211,12 @@ bool GxmDevice::SetMode(int w, int h)
         return false;
     width = w;
     height = h;
-    Sys_Log("gxm: mode %dx%d in the %dx%d display", w, h, kDisplayWidth, kDisplayHeight);
+    displayWidth = scaled ? w : kDisplayWidth;
+    displayHeight = scaled ? h : kDisplayHeight;
+    if (scaled)
+        Sys_Log("gxm: mode %dx%d, scaled by the display to %dx%d", w, h, kDisplayWidth, kDisplayHeight);
+    else
+        Sys_Log("gxm: mode %dx%d in the %dx%d display", w, h, kDisplayWidth, kDisplayHeight);
     return true;
 }
 
@@ -247,7 +256,12 @@ void GxmDevice::ReadPixels(int buffer, int x, int y, int w, int h, uint32_t *pix
 
 void GxmDevice::Present(bool vsync)
 {
-    FlipData flip = { display[back].memory.data, vsync ? 1 : 0 };
+    QueueFlip(vsync, displayWidth, displayHeight);
+}
+
+void GxmDevice::QueueFlip(bool vsync, int w, int h)
+{
+    FlipData flip = { display[back].memory.data, vsync ? 1 : 0, w, h };
     Check("sceGxmDisplayQueueAddEntry", sceGxmDisplayQueueAddEntry(display[front].sync, display[back].sync, &flip));
     front = back;
     back = (back + 1) % kFrameSlots;
@@ -275,7 +289,8 @@ void GxmDevice::DialogFrame()
     update.renderTarget.colorSurfaceData = d.memory.data;
     update.displaySyncObject = d.sync;
     sceCommonDialogUpdate(&update);
-    Present(true);
+    // A dialog is drawn at the screen's size, also in a scaled mode.
+    QueueFlip(true, kDisplayWidth, kDisplayHeight);
 }
 
 namespace {

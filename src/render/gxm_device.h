@@ -17,6 +17,13 @@ public:
     // The display's size; a smaller back buffer is centred in it.
     static constexpr int kDisplayWidth = 960;
     static constexpr int kDisplayHeight = 544;
+    // Whether the display scales a frame buffer of this size to the whole
+    // screen (psp2common/display.h: 720x408, 640x368, 480x272). A back
+    // buffer of such a size fills the screen; the GPU draws fewer pixels.
+    static bool DisplayScales(int w, int h)
+    {
+        return (w == 720 && h == 408) || (w == 640 && h == 368) || (w == 480 && h == 272);
+    }
     static constexpr int kFrameSlots = kGxmFrameSlots;
 
     GxmDevice() = default;
@@ -84,7 +91,11 @@ private:
     GxmBlock patcherBuffer, patcherVertexUsse, patcherFragmentUsse;
     SceGxmShaderPatcher *patcher = nullptr;
     int width = 0, height = 0;
+    // The frame buffer size the display gets: the screen's, or the back
+    // buffer's where the display scales it (DisplayScales).
+    int displayWidth = kDisplayWidth, displayHeight = kDisplayHeight;
     int frameSlot = 0;
+    void QueueFlip(bool vsync, int w, int h);
 };
 
 #endif
