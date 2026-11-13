@@ -207,6 +207,10 @@ add_test(NAME audio_mixer COMMAND audio_mixer_test)
 add_executable(read_ahead_test read_ahead.cpp)
 target_include_directories(read_ahead_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME read_ahead COMMAND read_ahead_test)
+# The lines of the PS Vita's log between two writes to the file.
+add_executable(log_buffer_test log_buffer.cpp)
+target_include_directories(log_buffer_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME log_buffer COMMAND log_buffer_test)
 # The threaded executor: the frames on a worker, one at a time, in their order.
 add_executable(gfx_threaded_test gfx_threaded.cpp
     ${PROJECT_SOURCE_DIR}/src/render/gfx_threaded.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_small_batch.cpp)

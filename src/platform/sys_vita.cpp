@@ -1,6 +1,7 @@
 // OpenCMR2 system services on the PS Vita: see port/sys.h. Game data in
 // ux0:data/OpenCMR2/, saves, settings and the log in its user/ folder.
 
+#include "platform/log_buffer.h"
 #include "platform/platform_vita.h"
 #include "platform/read_ahead.h"
 #include "platform/sys_common.h"
@@ -139,41 +140,97 @@ bool WriteWholeFile(const std::string &path, const std::string &data)
 }
 
 // ---- log ------------------------------------------------------------------------
-// A file write per line costs tens of ms on the Vita: lines collect in a
-// buffer that goes to the file once per second, when full, and at exit.
+// A write to the file takes some 13 ms on the memory card. A dev build wrote
+// each line at once, on the thread that logged it: some 5 lines in a second
+// of a race, most of them from the game's thread (70 ms of each second, and
+// a frame of 100 ms with the lines of each heartbeat). The lines now collect
+// in memory (log_buffer.h), and a thread of its own on core 1 writes them to
+// the file once per second. A crash loses the lines of its last second:
+// [system] log_sync = 1 writes each line at once, as before.
 
-constexpr size_t kLogBufferBytes = 4096;
-constexpr uint64_t kLogFlushMicros = 1000000;
+constexpr size_t kLogBufferBytes = 32 * 1024;       // some 20 s of the lines of a race
+constexpr SceUInt kLogWriteMicros = 1000000;
+constexpr int kLogPriority = 160;                   // below the sound (96, 128), which has core 1 too
+constexpr SceSize kLogStackBytes = 16 * 1024;
 
-char s_logBuffer[kLogBufferBytes];
-size_t s_logUsed;
-uint64_t s_logLastFlush;
+LogBuffer<kLogBufferBytes> s_logLines;
 SceUID s_logFile = -1;
 // The renderer's worker thread logs too (render/gfx_threaded.cpp): a line
 // goes into the buffer with this mutex held. Made in Platform_Init, before
 // that thread starts.
 SceUID s_logMutex = -1;
+// Held for each write to the file, and taken before s_logMutex: the lines
+// go to the file in their order from the writer thread and from FlushLog,
+// and the buffer that one thread writes is not taken again. Made with
+// s_logMutex.
+SceUID s_logIoMutex = -1;
+SceUID s_logThread = -1, s_logWake = -1;
+volatile bool s_logQuit;
+bool s_logSync = true;      // until the writer thread runs
 
+// Writes the lines so far to the file, on the thread that calls it.
 void FlushLog()
 {
-    if (s_logFile >= 0 && s_logUsed > 0)
-        sceIoWrite(s_logFile, s_logBuffer, s_logUsed);
-    s_logUsed = 0;
-    s_logLastFlush = sceKernelGetProcessTimeWide();
+    if (s_logIoMutex >= 0)
+        sceKernelLockMutex(s_logIoMutex, 1, NULL);
+    if (s_logMutex >= 0)
+        sceKernelLockMutex(s_logMutex, 1, NULL);
+    size_t bytes;
+    const char *lines = s_logLines.Take(&bytes);
+    const unsigned lost = s_logLines.TakeLost();
+    if (s_logMutex >= 0)
+        sceKernelUnlockMutex(s_logMutex, 1);
+    if (s_logFile >= 0) {
+        if (bytes > 0)
+            sceIoWrite(s_logFile, lines, bytes);
+        if (lost > 0) {
+            char text[64];
+            const int length = snprintf(text, sizeof(text), "log: %u lines lost (the buffer was full)\n", lost);
+            sceIoWrite(s_logFile, text, (SceSize)length);
+        }
+    }
+    if (s_logIoMutex >= 0)
+        sceKernelUnlockMutex(s_logIoMutex, 1);
 }
 
-void AppendLog(const char *line)
+int LogWriterEntry(SceSize, void *)
 {
-    const size_t length = strlen(line);
-    if (s_logUsed + length + 1 > kLogBufferBytes)
+    while (!s_logQuit) {
+        SceUInt timeout = kLogWriteMicros;
+        sceKernelWaitSema(s_logWake, 1, &timeout);
         FlushLog();
-    if (length + 1 <= kLogBufferBytes) {
-        memcpy(s_logBuffer + s_logUsed, line, length);
-        s_logUsed += length;
-        s_logBuffer[s_logUsed++] = '\n';
     }
-    if (sceKernelGetProcessTimeWide() - s_logLastFlush >= kLogFlushMicros)
-        FlushLog();
+    return 0;
+}
+
+// Starts the writer thread. Without it each line is written at once.
+void StartLogWriter()
+{
+    s_logWake = sceKernelCreateSema("opencmr2_log", 0, 0, 1, NULL);
+    if (s_logIoMutex < 0 || s_logWake < 0)
+        return;
+    s_logQuit = false;
+    s_logThread = sceKernelCreateThread("log_writer", LogWriterEntry, kLogPriority, kLogStackBytes, 0,
+                                        SCE_KERNEL_CPU_MASK_USER_1, NULL);
+    if (s_logThread < 0 || sceKernelStartThread(s_logThread, 0, NULL) < 0) {
+        if (s_logThread >= 0)
+            sceKernelDeleteThread(s_logThread);
+        s_logThread = -1;
+        return;
+    }
+    s_logSync = false;
+}
+
+void StopLogWriter()
+{
+    if (s_logThread < 0)
+        return;
+    s_logQuit = true;
+    sceKernelSignalSema(s_logWake, 1);
+    sceKernelWaitThreadEnd(s_logThread, NULL, NULL);
+    sceKernelDeleteThread(s_logThread);
+    s_logThread = -1;
+    s_logSync = true;
 }
 
 // ---- message dialog -------------------------------------------------------------
@@ -575,6 +632,8 @@ bool Platform_Init(int, char **)
 {
     if (s_logMutex < 0)
         s_logMutex = sceKernelCreateMutex("opencmr2_log", 0, 0, NULL);
+    if (s_logIoMutex < 0)
+        s_logIoMutex = sceKernelCreateMutex("opencmr2_log_io", 0, 0, NULL);
     s_settings.clear();
     SysSettings::Parse(kVitaDefaults, s_settings);
     s_dirs.Clear();
@@ -595,6 +654,9 @@ bool Platform_Init(int, char **)
     }
     Sys_Log("game data: %s", kDataDir);
     Sys_Log("user directory: %s", kUserDir);
+    if (Platform_GetSettingInt("system.log_sync", 0) == 0)
+        StartLogWriter();
+    Sys_Log(s_logSync ? "log: each line is written at once" : "log: a thread writes the lines once per second");
     // The game's thread (this one) on core 0. The renderer's worker has core
     // 2 and the sound has core 1. A thread with no core of its own runs where
     // the system puts it: on the worker's core, the worker waits for it.
@@ -619,6 +681,7 @@ bool Platform_Init(int, char **)
 
 void Platform_Shutdown(void)
 {
+    StopLogWriter();
     FlushLog();
     if (s_logFile >= 0) {
         sceIoClose(s_logFile);
@@ -726,23 +789,26 @@ extern "C" void Sys_Log(const char *format, ...)
     vsnprintf(line, sizeof(line), format, args);
     va_end(args);
 #ifdef OPENCMR2_DEV
-    // Seconds since the start on each line, and each line on the card at once:
-    // a crash or a close from the LiveArea keeps every line.
+    // Seconds since the start on each line.
     char stamped[sizeof(line) + 16];
     snprintf(stamped, sizeof(stamped), "[%8.2f] %s", (double)sceKernelGetProcessTimeWide() / 1e6, line);
-    sceClibPrintf("%s\n", stamped);
-    if (s_logMutex >= 0)
-        sceKernelLockMutex(s_logMutex, 1, NULL);
-    AppendLog(stamped);
-    FlushLog();
+    const char *text = stamped;
 #else
-    sceClibPrintf("%s\n", line);
+    const char *text = line;
+#endif
+    sceClibPrintf("%s\n", text);
     if (s_logMutex >= 0)
         sceKernelLockMutex(s_logMutex, 1, NULL);
-    AppendLog(line);
-#endif
+    const bool room = s_logLines.Append(text);
     if (s_logMutex >= 0)
         sceKernelUnlockMutex(s_logMutex, 1);
+    // The writer thread has the file (the log section above). Without it
+    // the line goes to the file at once. A buffer that is full wakes it.
+    if (s_logSync) {
+        FlushLog();
+    } else if (!room) {
+        sceKernelSignalSema(s_logWake, 1);
+    }
 }
 
 extern "C" void Sys_Fatal(const char *format, ...)
