@@ -6697,16 +6697,40 @@ void Graphics_ProjectMeshVertexMidpoints(Mesh *pMesh)
     m12 = transform._12;
     m22 = transform._22;
     m32 = transform._32;
-    for (i = 0; i < pMesh->triangleCount; i++) {
-        for (j = 0; j < 3; j++) {
-            int index = pMesh->pTriangles[i].vertexIndex[j];
-            float *pVertex = (float *)((BYTE *)pVertexData + index * 0x30);
+    // PORT: the original walked the triangles and computed each vertex once
+    // for each triangle that has it. The values of a vertex come from the
+    // vertex alone, so one walk over the vertices gives the same values.
+    // A triangle whose vertex is outside the mesh's count keeps the walk of
+    // the original (no mesh has one).
+    j = 1;
+    for (i = 0; i < pMesh->triangleCount && j != 0; i++) {
+        if ((unsigned int)pMesh->pTriangles[i].vertexIndex[0] >= (unsigned int)pMesh->field_0x10 ||
+            (unsigned int)pMesh->pTriangles[i].vertexIndex[1] >= (unsigned int)pMesh->field_0x10 ||
+            (unsigned int)pMesh->pTriangles[i].vertexIndex[2] >= (unsigned int)pMesh->field_0x10)
+            j = 0;
+    }
+    if (j != 0) {
+        for (i = 0; i < pMesh->field_0x10; i++) {
+            float *pVertex = (float *)((BYTE *)pVertexData + i * 0x30);
             float x = (pVertex[3] + pVertex[0]) * g_floatHalf;
             float y = (pVertex[4] + pVertex[1]) * g_floatHalf;
             float z = (pVertex[5] + pVertex[2]) * g_floatHalf;
 
             pVertex[10] = (z * m31 + y * m21 + x * m11 + g_netOne) * g_floatHalf;
             pVertex[11] = (g_netOne - (z * m32 + y * m22 + x * m12)) * g_floatHalf;
+        }
+    } else {
+        for (i = 0; i < pMesh->triangleCount; i++) {
+            for (j = 0; j < 3; j++) {
+                int index = pMesh->pTriangles[i].vertexIndex[j];
+                float *pVertex = (float *)((BYTE *)pVertexData + index * 0x30);
+                float x = (pVertex[3] + pVertex[0]) * g_floatHalf;
+                float y = (pVertex[4] + pVertex[1]) * g_floatHalf;
+                float z = (pVertex[5] + pVertex[2]) * g_floatHalf;
+
+                pVertex[10] = (z * m31 + y * m21 + x * m11 + g_netOne) * g_floatHalf;
+                pVertex[11] = (g_netOne - (z * m32 + y * m22 + x * m12)) * g_floatHalf;
+            }
         }
     }
     pVertices = Gfx_LockVertexBuffer(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex]);

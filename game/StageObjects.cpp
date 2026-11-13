@@ -1233,6 +1233,19 @@ void CarEffects_DrawTyreMarks(int index)
     c.u = 0;
     c.v = 0x10000;
     for (wheel = 4; wheel != 0; wheel--, pHead++, base += 200) {
+        // PORT: a mark joins two trail points. A wheel with fewer than two
+        // has none: the walk over its 200 points, with a search at each of
+        // them, draws nothing. Most wheels have no points in most frames.
+        {
+            const BYTE *pUsed = &g_trailPointUsed[0][0][0] + base;
+            int used = 0;
+            int n;
+
+            for (n = 0; n < 200 && used < 2; n++)
+                used += pUsed[n] != 0;
+            if (used < 2)
+                continue;
+        }
         j = 0;
         do {
             found = 0;
