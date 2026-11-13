@@ -199,14 +199,11 @@ struct Stats {
 // for some seconds met a scene of its own). The first frames of a turn are
 // not counted: the GPU still works on frames of the mode before. Then the log
 // gets a line for each mode. The modes split a frame into its parts.
-// Before the turns the probe checks the single pass (see the mode below): it
-// draws two frames as always and two with the single pass, waits for the GPU
-// after each, and compares samples of the back buffer. With a picture that
-// stands still (the car at rest), the frames of the two kinds differ no more
-// than two frames of one kind when the single pass draws the same picture.
-// Then the executor draws with it from there on. Without that result
-// "single pass" runs alone for some seconds at the end, for a look at the
-// picture. The modes:
+// Before the turns the probe compares the single pass with the two passes
+// (see the mode "two passes"): it draws two frames with two passes and two
+// with the single pass, waits for the GPU after each, and compares samples
+// of the back buffer. With a picture that stands still (the car at rest),
+// the count between the two kinds is what the single pass changes. The modes:
 //   normal            the frame as the game draws it
 //   quarter           the back buffer's draws clipped to about a quarter of
 //                     its pixels: the fragment cost goes down with them
@@ -231,21 +228,23 @@ struct Stats {
 //                     where those of the pass before are still right
 //   single pass       a blended draw with the alpha test and depth writes
 //                     draws once, with the discard and its blending, and has
-//                     no depth pass. Look at the trees and the fences in this
-//                     mode: it shows whether the SGX543 draws such a program
-// The modes quarter, general, fade always and depth pass always are not in
-// the cycle: their questions are answered.
+//                     no depth pass (the default: video.single_pass)
+//   two passes        such a draw has a depth pass with the discard and a
+//                     blended pass that writes each pixel: what the single
+//                     pass saves
+// The modes quarter, general, fade always, depth pass always, no depth pass
+// and single pass are not in the cycle: their questions are answered.
 // Each line also has the CPU time of an Execute up to the present: the cost
 // of the draw calls without the wait for the GPU.
 enum ProbeMode {
     PROBE_OFF, PROBE_NORMAL, PROBE_QUARTER, PROBE_TILE, PROBE_NO_3D, PROBE_NO_DEPTH_PASS, PROBE_GENERAL,
     PROBE_FADE_ALWAYS, PROBE_DEPTH_PASS_ALWAYS, PROBE_LOOKUP_ONLY, PROBE_PROFILE, PROBE_UNIFORMS_ALWAYS,
-    PROBE_SINGLE_PASS, PROBE_END
+    PROBE_SINGLE_PASS, PROBE_TWO_PASSES, PROBE_END
 };
 const char *const kProbeNames[PROBE_END] = { "off",         "normal",        "quarter", "tile",
                                              "no 3D",       "no depth pass", "general", "fade always",
                                              "depth pass always", "lookup only", "profile", "uniforms always",
-                                             "single pass" };
+                                             "single pass", "two passes" };
 
 // The steps the profile mode times: an Execute before its draws, then the
 // steps of a 3D draw in Draw's order.
@@ -260,15 +259,14 @@ enum ProfileSection {
     PROFILE_PASSES,     // the GXM calls of the draw's passes
     PROFILE_SECTIONS
 };
-const int kProbeCycle[] = { PROBE_NORMAL, PROBE_NO_3D,           PROBE_LOOKUP_ONLY, PROBE_NO_DEPTH_PASS,
-                            PROBE_TILE,   PROBE_UNIFORMS_ALWAYS, PROBE_SINGLE_PASS, PROBE_PROFILE };
+const int kProbeCycle[] = { PROBE_NORMAL,          PROBE_NO_3D,      PROBE_LOOKUP_ONLY, PROBE_TILE,
+                            PROBE_UNIFORMS_ALWAYS, PROBE_TWO_PASSES, PROBE_PROFILE };
 constexpr unsigned kProbeCycleModes = sizeof(kProbeCycle) / sizeof(kProbeCycle[0]);
 constexpr unsigned kProbeBlockFrames = 8;   // the frames of a mode's turn
 constexpr unsigned kProbeSkipFrames = 2;    // at the start of a turn: not counted
 constexpr unsigned kProbeCycles = 12;
-constexpr uint64_t kProbeSteadyMicros = 6000000;    // "single pass" alone, at the end
 constexpr int kProbeCheckStep = 4;          // the check samples each 4th pixel of each 4th row
-constexpr int kProbeCheckFrames = 4;        // two frames as always, two with the single pass
+constexpr int kProbeCheckFrames = 4;        // two frames with two passes, two with the single pass
 constexpr int kProbeCheckChannel = 12;      // a sample differs with a channel this far off
 
 // The sums of a mode over its counted frames.
@@ -283,7 +281,6 @@ struct Probe {
     int mode = PROBE_OFF;
     unsigned slot = 0, blockFrame = 0, cycle = 0;   // the place in the cycle
     uint64_t lastPresent = 0;
-    uint64_t steadyStart = 0;       // not 0: the cycles are done, "single pass" runs alone
     // The frame that is drawn now.
     uint64_t submitMicros = 0;
     uint64_t section[PROFILE_SECTIONS] = {};
@@ -389,11 +386,14 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     int fpsShown = -1;
 
     // Whether a blended draw with the alpha test and depth writes draws in
-    // one pass, with the discard form and its blending. It starts off: a
-    // program that can discard drew nothing in a blended pass without depth
-    // writes on another SGX543 project. The probe's check turns it on when
-    // the picture with it is the picture without it.
-    bool singlePass = false;
+    // one pass, with the discard form and its blending, as Direct3D does it
+    // (video.single_pass, 1 by default). Without it such a draw has a depth
+    // pass with the discard and a blended pass that writes each pixel: on
+    // another SGX543 project a program that can discard drew nothing in a
+    // blended pass without depth writes. With depth writes it draws: the
+    // device drew 99.7% of the samples of a still picture the same in both
+    // ways, and the two passes cost 32 us for each draw.
+    bool singlePass = true;
     std::vector<uint32_t> probeShot[2];     // the check's samples of two frames
 
     // Whether a reserved uniform buffer serves the draws that follow: the
@@ -560,8 +560,9 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         // The pipelines the game draws with (variants.txt), made now: a
         // patch costs a few ms. Each triple with the general variant of its
         // key and with the variants of the key's arguments keys. A blended
-        // 3D triple with the alpha test also gets its depth pass programs.
-        // A program that can discard never blends.
+        // 3D triple with the alpha test also gets the programs of its
+        // discard form: with its blending for the single pass, or without
+        // colour for the depth pass.
         for (const GxmPipelineTriple &t : kGxmPipelineTriples) {
             const GxmFragmentVariant &v = kGxmFragmentVariants[t.variant];
             const bool blend = t.srcBlend != 0;
@@ -573,11 +574,17 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                 FragmentProgram(made.second, blend, t.srcBlend, t.destBlend, t.transformed);
             if (!blend || v.alphaTest != 2 || t.transformed)
                 continue;
-            const VariantSet &depth = variantIndex[v.key << 2 | 1];
-            if (depth.general >= 0)
-                FragmentProgram(depth.general, false, 0, 0, false, true);
-            for (const auto &made : depth.made)
-                FragmentProgram(made.second, false, 0, 0, false, true);
+            const VariantSet &discard = variantIndex[v.key << 2 | 1];
+            auto make = [&](int variant) {
+                if (singlePass)
+                    FragmentProgram(variant, true, t.srcBlend, t.destBlend, false);
+                else
+                    FragmentProgram(variant, false, 0, 0, false, true);
+            };
+            if (discard.general >= 0)
+                make(discard.general);
+            for (const auto &made : discard.made)
+                make(made.second);
         }
         Sys_Log("gxm: %d fragment variants, %d pipelines made", kVariantCount, (int)fragmentPrograms.size());
         stats.misses = 0;
@@ -612,6 +619,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     bool SetVideoMode(int width, int height, bool) override
     {
         if (!ready) {
+            singlePass = Platform_GetSettingInt("video.single_pass", 1) != 0;
             ready = device.Init() && memory.Init() && CreatePrograms() && CreateBuffers();
             // GXM runs from here: a message box draws through this display.
             if (ready)
@@ -767,8 +775,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         const GxmFragmentVariant &v = kGxmFragmentVariants[variant];
         // A patch in the middle of a frame costs a few ms: variants.txt lists
         // the triples that are made at the start.
-        if (programsMade && probe.mode == PROBE_OFF && !(blend && v.alphaTest == 1) &&
-            loggedUnlisted < kLoggedUnknownKeys) {
+        if (programsMade && probe.mode == PROBE_OFF && loggedUnlisted < kLoggedUnknownKeys) {
             char pair[8] = "off";
             if (blend)
                 snprintf(pair, sizeof(pair), "%d/%d", srcBlend & 15, destBlend & 15);
@@ -1350,7 +1357,8 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                 if (!resolved->depthLooked) {
                     resolved->depthLooked = true;
                     resolved->depthVariant = LookupVariant(key, 1, args);
-                    if (resolved->depthVariant >= 0 && (singlePass || probe.mode == PROBE_SINGLE_PASS))
+                    if (resolved->depthVariant >= 0 && probe.mode != PROBE_TWO_PASSES &&
+                        (singlePass || probe.mode == PROBE_SINGLE_PASS))
                         resolved->single = FragmentProgram(resolved->depthVariant, true, s.srcBlend, s.destBlend,
                                                            c.transformed);
                     if (resolved->depthVariant >= 0 && resolved->single == nullptr)
@@ -1746,33 +1754,13 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
 #endif
     }
 
-    // The end of the single pass check: the single pass is on when the
-    // picture stood still and the frames of the two kinds differ no more
-    // than two frames of one kind.
+    // The end of the comparison of the single pass with the two passes.
     void ProbeCheckResult()
     {
 #ifdef OPENCMR2_DEV
-        const unsigned samples = probe.checkSamples > 0 ? probe.checkSamples : 1;
-        const unsigned same = probe.checkDiffer[1], across = probe.checkDiffer[2], single = probe.checkDiffer[3];
-        const unsigned noise = same > single ? same : single;
-        const bool still = noise <= samples / 50;
-        const bool equal = still && across <= noise * 2 + samples / 500;
-        Sys_Log("gxm probe: single pass check: of %u samples differ %u between two frames as always, %u between "
-                "a frame as always and one with the single pass, %u between two with the single pass",
-                probe.checkSamples, same, across, single);
-        if (singlePass)
-            Sys_Log("gxm probe: the single pass was on already: the check compares it with itself");
-        else if (equal)
-            Sys_Log("gxm probe: the single pass draws the same picture: it is on from here");
-        else if (!still)
-            Sys_Log("gxm probe: the picture moves: stop the car and tap again for the single pass check");
-        else
-            Sys_Log("gxm probe: the single pass changes the picture: it stays off");
-        if (equal && !singlePass) {
-            singlePass = true;
-            for (Resolved &r : resolvedKeys)
-                r = Resolved();
-        }
+        Sys_Log("gxm probe: single pass check: of %u samples differ %u between two frames with two passes, %u "
+                "between a frame with two passes and one with the single pass, %u between two with the single pass",
+                probe.checkSamples, probe.checkDiffer[1], probe.checkDiffer[2], probe.checkDiffer[3]);
 #endif
     }
 
@@ -1795,7 +1783,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             probe = Probe();
             probe.touchStarted = touchStarted;
             probe.touchDown = true;
-            probe.mode = PROBE_NORMAL;
+            probe.mode = PROBE_TWO_PASSES;
             probe.check = 1;
             probe.lastPresent = now;
             Sys_Log("gxm probe: start, the single pass check, then %u modes take turns of %u frames, %u times, "
@@ -1804,14 +1792,14 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             return;
         }
         if (probe.check != 0) {
-            // The check's frames: two as always, then two with the single pass.
+            // The check's frames: two with two passes, then two with the single pass.
             probe.lastPresent = now;
             probe.submitMicros = 0;
             probe.draws = probe.draws3d = 0;
             memset(probe.section, 0, sizeof(probe.section));
             if (probe.check < kProbeCheckFrames) {
                 probe.check++;
-                probe.mode = probe.check > kProbeCheckFrames / 2 ? PROBE_SINGLE_PASS : PROBE_NORMAL;
+                probe.mode = probe.check > kProbeCheckFrames / 2 ? PROBE_SINGLE_PASS : PROBE_TWO_PASSES;
                 return;
             }
             probe.check = 0;
@@ -1821,7 +1809,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         }
         const uint64_t frame = now - probe.lastPresent;
         probe.lastPresent = now;
-        if (probe.steadyStart == 0 && probe.blockFrame >= kProbeSkipFrames) {
+        if (probe.blockFrame >= kProbeSkipFrames) {
             ProbeSums &sums = probe.sums[probe.mode];
             sums.frameMicros += frame;
             sums.frameMax = frame > sums.frameMax ? frame : sums.frameMax;
@@ -1835,13 +1823,6 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         probe.submitMicros = 0;
         probe.draws = probe.draws3d = 0;
         memset(probe.section, 0, sizeof(probe.section));
-        if (probe.steadyStart != 0) {
-            if (now - probe.steadyStart < kProbeSteadyMicros)
-                return;
-            probe.mode = PROBE_OFF;
-            Sys_Log("gxm probe: done");
-            return;
-        }
         if (++probe.blockFrame < kProbeBlockFrames)
             return;
         probe.blockFrame = 0;
@@ -1875,15 +1856,8 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                     sums.section[PROFILE_VERTICES] / perFrame, sums.section[PROFILE_PASSES] / perFrame,
                     sums.draws3d / frames, (double)(t1 - t0) / 256.0);
         }
-        if (singlePass) {
-            probe.mode = PROBE_OFF;
-            Sys_Log("gxm probe: done");
-            return;
-        }
-        probe.mode = PROBE_SINGLE_PASS;
-        probe.steadyStart = sceKernelGetProcessTimeWide();
-        Sys_Log("gxm probe: single pass alone for %u s: look at the trees and the fences",
-                (unsigned)(kProbeSteadyMicros / 1000000));
+        probe.mode = PROBE_OFF;
+        Sys_Log("gxm probe: done");
 #endif
     }
 
