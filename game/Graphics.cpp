@@ -6735,7 +6735,9 @@ void Graphics_ProjectMeshVertexMidpoints(Mesh *pMesh)
             }
         }
     }
-    pVertices = Gfx_LockVertexBuffer(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex]);
+    // PORT: a lock of the vertices of this mesh alone (see Mesh_RefreshVertices).
+    pVertices = Gfx_LockVertexBufferRange(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex],
+                                          (DWORD)pMesh->vertexOffset, (DWORD)pMesh->field_0x10);
     memcpy((BYTE *)pVertices + pMesh->vertexOffset * 0x30, pMesh->pVertexData, pMesh->field_0x10 * 0x30);
     Gfx_UnlockVertexBuffer(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex]);
 }

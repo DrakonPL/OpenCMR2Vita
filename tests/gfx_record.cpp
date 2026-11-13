@@ -851,6 +851,145 @@ int main()
         s_joins = true;
     }
 
+    // The blocks of a vertex buffer that a range lock touched
+    // (gfx_range_locks.h): recent for two frames, then a patch, once.
+    {
+        GfxRangeLocks locks;
+        std::vector<std::pair<uint32_t, uint32_t>> patches;
+        const auto take = [&](uint32_t frame) {
+            patches.clear();
+            locks.TakeRested(frame, 200, [&](uint32_t first, uint32_t end) { patches.push_back({ first, end }); });
+        };
+        REQUIRE(!locks.Any() && !locks.Recent(0, 200, 5));
+        locks.Lock(40, 30, 5);      // vertices 40 to 69: blocks 1 and 2
+        locks.Lock(190, 10, 5);     // blocks 5 and 6; the buffer ends in block 6
+        REQUIRE(locks.Any());
+        REQUIRE(!locks.Recent(0, 32, 5) && locks.Recent(0, 33, 5) && locks.Recent(95, 1, 5) && !locks.Recent(96, 64, 5));
+        REQUIRE(locks.Recent(60, 4, 6) && !locks.Recent(60, 4, 7));
+        take(6);
+        REQUIRE(patches.empty() && locks.Any());
+        locks.Lock(64, 1, 6);       // block 2 again, a frame later
+        take(7);
+        REQUIRE(patches.size() == 2 && patches[0] == std::make_pair(32u, 64u) && patches[1] == std::make_pair(160u, 200u));
+        REQUIRE(locks.Recent(64, 1, 7) && locks.Any());
+        take(8);
+        REQUIRE(patches.size() == 1 && patches[0] == std::make_pair(64u, 96u) && !locks.Any());
+        take(9);
+        REQUIRE(patches.empty());
+        // The ranges that touch a patch.
+        const GfxPatch some[2] = { { NULL, 32, 64 }, { NULL, 192, 200 } };
+        REQUIRE(!Gfx_TouchesPatch(some, 2, 0, 32) && Gfx_TouchesPatch(some, 2, 0, 33) && Gfx_TouchesPatch(some, 2, 63, 1));
+        REQUIRE(!Gfx_TouchesPatch(some, 2, 64, 128) && Gfx_TouchesPatch(some, 2, 64, 129) &&
+                Gfx_TouchesPatch(some, 2, 199, 50) && !Gfx_TouchesPatch(some, 2, 200, 50) &&
+                !Gfx_TouchesPatch(some, 0, 0, 500));
+    }
+
+    // The game changes one mesh of a vertex buffer of many
+    // (Gfx_LockVertexBufferRange): for two frames the draws of that mesh
+    // copy its vertices, and the draws of the other meshes refer to the
+    // buffer. Then the frame has a patch of the blocks of the mesh, and its
+    // draws refer to the buffer again. The buffer's version stays.
+    {
+        s_cullDraws = 1;
+        Gfx_Present(FALSE);
+        GfxMatrix view, projection;
+        Gfx_GetTransform(GFX_TRANSFORM_VIEW, &view);
+        Gfx_GetTransform(GFX_TRANSFORM_PROJECTION, &projection);
+        const GfxMatrix identity = Identity();
+        Gfx_SetTransform(GFX_TRANSFORM_VIEW, &identity);
+        Gfx_SetTransform(GFX_TRANSFORM_PROJECTION, &identity);
+        GfxVertexBuffer *shared = Gfx_CreateVertexBuffer(200);
+        GfxVertex *v = Gfx_LockVertexBuffer(shared);
+        for (int i = 0; i < 200; i++) {
+            v[i].x = (float)i * 0.001f;
+            v[i].z = 0.5f;
+        }
+        Gfx_UnlockVertexBuffer(shared);
+        for (int i = 0; i < 4; i++)
+            Gfx_Present(FALSE);
+        const uint32_t version = shared->version;
+        const auto drawBoth = [&] {
+            Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, shared, 0, 40, triangle, 3);      // mesh A
+            Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, shared, 100, 40, triangle, 3);    // mesh B
+        };
+        drawBoth();
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 2 && Draw(0).buffer == shared && Draw(1).buffer == shared && s_frame.patches.empty());
+        REQUIRE(Draw(0).hasBox && Draw(0).boxHigh[0] == 39.0f * 0.001f);
+        // The colours of mesh A change.
+        v = Gfx_LockVertexBufferRange(shared, 0, 40);
+        REQUIRE(v == shared->vertices.data());
+        v[5].diffuse = 7;
+        Gfx_UnlockVertexBuffer(shared);
+        for (int frame = 0; frame < 2; frame++) {
+            drawBoth();
+            Gfx_Present(FALSE);
+            REQUIRE(Draws() == 2 && Draw(0).buffer == NULL && !Draw(0).snapshot && Draw(1).buffer == shared);
+            REQUIRE(Vertex3D(Draw(0), 5).diffuse == 7 && s_frame.patches.empty() && s_frame.snapshots.empty());
+            REQUIRE(s_frame.buffers.size() == 1 && shared->version == version);
+        }
+        drawBoth();
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 2 && Draw(0).buffer == shared && Draw(1).buffer == shared && s_frame.vertices.empty());
+        REQUIRE(s_frame.patches.size() == 1 && s_frame.patches[0].buffer == shared);
+        REQUIRE(s_frame.patches[0].first == 0 && s_frame.patches[0].end == 64);
+        drawBoth();
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 2 && Draw(0).buffer == shared && s_frame.patches.empty() && shared->version == version);
+
+        // A position of mesh A changes: the box of its draws is that of the
+        // new positions (the boxes of a buffer stay only with its positions).
+        v = Gfx_LockVertexBufferRange(shared, 0, 40);
+        v[3].x = 0.9f;
+        Gfx_UnlockVertexBuffer(shared);
+        drawBoth();
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 2 && Draw(0).buffer == NULL && Draw(0).hasBox && Draw(0).boxHigh[0] == 0.9f);
+        REQUIRE(Draw(1).hasBox && Draw(1).boxHigh[0] == 139.0f * 0.001f);
+
+        // The game changes the mesh after a draw of the frame that has its
+        // patch: the draws so far run first, with the patch of what the
+        // buffer had. The draws after the lock copy the new vertices.
+        Gfx_Present(FALSE);
+        drawBoth();
+        v = Gfx_LockVertexBufferRange(shared, 10, 4);
+        REQUIRE(Draws() == 2 && Draw(0).buffer == shared && s_frame.patches.size() == 1);
+        v[10].diffuse = 9;
+        Gfx_UnlockVertexBuffer(shared);
+        drawBoth();
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 2 && Draw(0).buffer == NULL && Vertex3D(Draw(0), 10).diffuse == 9 && s_frame.patches.empty());
+        // A change of a mesh with no patch in the frame runs no draw: the
+        // draws so far keep the GPU copy, which does not change yet.
+        drawBoth();
+        v = Gfx_LockVertexBufferRange(shared, 100, 40);
+        Gfx_UnlockVertexBuffer(shared);
+        drawBoth();
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 4 && Draw(1).buffer == shared && Draw(3).buffer == NULL);
+
+        // A buffer that was locked whole a short time ago has no parts, and
+        // an executor that takes no joined draws has none: a lock of all.
+        Gfx_LockVertexBuffer(shared);
+        Gfx_UnlockVertexBuffer(shared);
+        const uint32_t whole = shared->version;
+        Gfx_LockVertexBufferRange(shared, 0, 40);
+        Gfx_UnlockVertexBuffer(shared);
+        REQUIRE(shared->version == whole + 1);
+        for (int i = 0; i < 4; i++)
+            Gfx_Present(FALSE);
+        s_joins = false;
+        Gfx_LockVertexBufferRange(shared, 0, 40);
+        Gfx_UnlockVertexBuffer(shared);
+        REQUIRE(shared->version == whole + 2);
+        s_joins = true;
+        Gfx_DestroyVertexBuffer(shared);
+        Gfx_SetTransform(GFX_TRANSFORM_VIEW, &view);
+        Gfx_SetTransform(GFX_TRANSFORM_PROJECTION, &projection);
+        s_cullDraws = 0;
+        Gfx_Present(FALSE);
+    }
+
     // A streaming vertex buffer (the game locks it between its draws): its
     // vertices are copied into the frame. The parts of a mesh, each drawn
     // with a range inside the range of the part before, share one copy.

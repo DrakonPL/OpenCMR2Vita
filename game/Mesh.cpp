@@ -120,7 +120,9 @@ void Mesh_Rebuild(Mesh *pMesh)
         MESH_SET_VERTEX_COLOUR(2);
     }
 
-    pVertices = Gfx_LockVertexBuffer(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex]);
+    // PORT: a lock of the vertices of this mesh alone (see Mesh_RefreshVertices).
+    pVertices = Gfx_LockVertexBufferRange(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex],
+                                          (DWORD)pMesh->vertexOffset, (DWORD)vertexCount);
     memcpy((char *)pVertices + pMesh->vertexOffset * 0x30, pMesh->pVertexData,
            vertexCount * 0x30);
     Gfx_UnlockVertexBuffer(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex]);
@@ -256,7 +258,12 @@ void Mesh_RefreshVertices(Mesh *pMesh)
 {
     void *pVertices;
 
-    pVertices = Gfx_LockVertexBuffer(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex]);
+    // PORT: a lock of the vertices of this mesh alone. A vertex buffer has
+    // the vertices of many meshes: the original locked all of it, and the
+    // renderer then took each mesh of the buffer as changed (the stage
+    // lighting changes some meshes in each frame).
+    pVertices = Gfx_LockVertexBufferRange(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex],
+                                          (DWORD)pMesh->vertexOffset, (DWORD)pMesh->field_0x10);
     memcpy((BYTE *)pVertices + pMesh->vertexOffset * 0x30, pMesh->pVertexData, pMesh->field_0x10 * 0x30);
     Gfx_UnlockVertexBuffer(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex]);
 }
@@ -274,7 +281,9 @@ void Mesh_SetColourAndRefresh(Mesh *pMesh, DWORD colour)
     p = pMesh->pVertexData;
     for (i = 0; i < count; i++)
         p[i * 12 + 6] = colour;
-    pVertices = Gfx_LockVertexBuffer(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex]);
+    // PORT: a lock of the vertices of this mesh alone (see Mesh_RefreshVertices).
+    pVertices = Gfx_LockVertexBufferRange(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex],
+                                          (DWORD)pMesh->vertexOffset, (DWORD)count);
     memcpy((BYTE *)pVertices + pMesh->vertexOffset * 0x30, pMesh->pVertexData, count * 0x30);
     Gfx_UnlockVertexBuffer(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex]);
 }

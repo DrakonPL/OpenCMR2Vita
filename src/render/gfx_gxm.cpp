@@ -201,6 +201,7 @@ struct Stats {
     unsigned vertexUploads = 0, fragmentUploads = 0;    // default uniform buffers reserved and filled
     unsigned rangesMeasured = 0, rangeVertices = 0;     // vertex buffer ranges that the cache did not have
     unsigned snapshotBytes = 0;                         // vertices of buffers copied into the ring
+    unsigned patchBytes = 0;                            // vertices written into the GPU copies of buffers
     unsigned ownDraws = 0, ownVertices = 0;             // draws of the frame's vertices that were walked for the fade
     // The time of Prepare (the game's thread) and of Execute without the
     // wait of its present (the worker with the threaded executor), and the
@@ -1135,6 +1136,40 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         }
     }
 
+    // The parts of the buffers that the game changed and that rested go
+    // into their GPU copies (gfx_range_locks.h): no frame that the GPU still
+    // draws reads them. The ranges that were measured there are measured
+    // again at their next draw.
+    void PatchVertexBuffers(const GfxFrame &frame)
+    {
+        const size_t count = frame.patches.size();
+        for (size_t first = 0; first < count;) {
+            GfxVertexBuffer *b = frame.patches[first].buffer;
+            size_t end = first + 1;
+            while (end < count && frame.patches[end].buffer == b)
+                end++;
+            GxmVertexBuffer *g = (GxmVertexBuffer *)b->gpu;
+            if (g != nullptr && g->memory != nullptr && g->version == b->version) {
+                for (size_t i = first; i < end; i++) {
+                    const GfxPatch &p = frame.patches[i];
+                    if (p.end > b->vertices.size() || p.first >= p.end)
+                        continue;
+                    const size_t bytes = (size_t)(p.end - p.first) * sizeof(GfxVertex);
+                    memcpy((GfxVertex *)g->memory + p.first, &b->vertices[p.first], bytes);
+                    stats.patchBytes += (unsigned)bytes;
+                }
+                if (g->ranges != nullptr) {
+                    const GfxPatch *patches = &frame.patches[first];
+                    const size_t patchCount = end - first;
+                    g->ranges->RemoveIf([patches, patchCount](uint64_t key) {
+                        return Gfx_TouchesPatch(patches, patchCount, (uint32_t)(key >> 32), (uint32_t)key);
+                    });
+                }
+            }
+            first = end;
+        }
+    }
+
     // Each draw costs CPU time here: a run of the game's sprites or lines
     // comes as one draw.
     bool JoinsDraws() const override { return true; }
@@ -1801,6 +1836,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         texturesChanged = gpuTextures.TakeChanged() || texturesChanged;
         const uint64_t buffersStart = sceKernelGetProcessTimeWide();
         UploadVertexBuffers(frame);
+        PatchVertexBuffers(frame);
         const uint64_t snapshotsStart = sceKernelGetProcessTimeWide();
         stats.textureMicros += (unsigned)(buffersStart - texturesStart);
         stats.bufferMicros += (unsigned)(snapshotsStart - buffersStart);
@@ -2131,10 +2167,10 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         // not have, and the frame's own vertices of each draw with the fade.
         char recorder[512];
         Gfx_RecorderCountsText(recorder, sizeof(recorder));
-        Sys_Log("gxm: per s ranges measured %u with %u vertices, own vertices walked %u in %u draws, snapshots %u KB; "
-                "recorder: %s",
+        Sys_Log("gxm: per s ranges measured %u with %u vertices, own vertices walked %u in %u draws, snapshots %u KB, "
+                "patches %u KB; recorder: %s",
                 stats.rangesMeasured, stats.rangeVertices, stats.ownVertices, stats.ownDraws, stats.snapshotBytes / 1024,
-                recorder);
+                stats.patchBytes / 1024, recorder);
         // Prepare runs on the game's thread; Execute on the worker with the
         // threaded executor.
         const double frames = stats.frames > 0 ? (double)stats.frames : 1.0;

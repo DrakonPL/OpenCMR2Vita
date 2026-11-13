@@ -340,6 +340,11 @@ GfxVertexBuffer *Gfx_CreateVertexBuffer(DWORD vertexCount);
 void Gfx_DestroyVertexBuffer(GfxVertexBuffer *buffer);
 /* The whole buffer, for writing; contents are kept between locks. */
 GfxVertex *Gfx_LockVertexBuffer(GfxVertexBuffer *buffer);
+/* As Gfx_LockVertexBuffer, for a caller that writes only vertexCount
+   vertices from firstVertex (one mesh of a buffer of many) before the
+   unlock: the draws of the other vertices are not those of a buffer that
+   changed. Returns the whole buffer, as Gfx_LockVertexBuffer does. */
+GfxVertex *Gfx_LockVertexBufferRange(GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount);
 void Gfx_UnlockVertexBuffer(GfxVertexBuffer *buffer);
 
 void Gfx_DrawPrimitiveVB(int primitive, GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount);

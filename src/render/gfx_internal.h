@@ -5,6 +5,7 @@
 #define OPENCMR2_GFX_INTERNAL_H
 
 #include "port/gfx.h"
+#include "render/gfx_range_locks.h"
 #include "render/gxm_key_cache.h"
 #include "render/texture_mips.h"
 
@@ -80,6 +81,14 @@ struct GfxVertexBuffer {
     bool streaming = false;
     uint32_t snapshotRecord = 0;    // the recording whose frame has a snapshot of it
     uint32_t snapshotIndex = 0;     // that snapshot in GfxFrame::snapshots
+    // The parts that the game locked alone (Gfx_LockVertexBufferRange), for
+    // an executor that takes joined draws: gfx_range_locks.h.
+    GfxRangeLocks rangeLocks;
+    uint32_t patchRecord = 0;       // the recording whose frame has patches of it (GfxFrame::patches)
+    // The range lock that is open, until the unlock: its vertices, and the
+    // hash of their positions before the game wrote them.
+    uint32_t openFirst = 0, openCount = 0;
+    uint64_t openHash = 0;
 };
 
 // Bytes of one level, given its size, for a format.
@@ -208,6 +217,14 @@ struct GfxSnapshot {
     uint32_t first, end;
 };
 
+// The vertices first..end-1 of a vertex buffer, which the executor writes
+// into its GPU copy before the frame's draws (gfx_range_locks.h). The
+// patches of a buffer are together, in rising order and apart.
+struct GfxPatch {
+    GfxVertexBuffer *buffer;
+    uint32_t first, end;
+};
+
 // A small 3D draw of a batch (GFX_CMD_SMALL_BATCH), as the game made it: its
 // vertices in their own space, its world matrix, and the texture of stage 0.
 // A draw from the atlas has its place in the atlas (atlasScale is 1 / the
@@ -228,6 +245,7 @@ struct GfxFrame {
     std::vector<GfxCommand> commands;
     std::vector<GfxVertexBuffer *> buffers;     // drawn from, each once
     std::vector<GfxSnapshot> snapshots;         // each buffer once
+    std::vector<GfxPatch> patches;              // of the buffers in buffers
     // The small batches: their draws, vertices and indices, and the textures
     // the draws read (each once), for the executor to make ready before the
     // batches are draws.
@@ -243,6 +261,7 @@ struct GfxFrame {
         commands.clear();
         buffers.clear();
         snapshots.clear();
+        patches.clear();
         smallItems.clear();
         smallVertices.clear();
         smallIndices.clear();
