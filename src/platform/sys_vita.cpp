@@ -350,11 +350,20 @@ struct FrameParts : Diagnostics::Observer {
     uint64_t partMicros[Diagnostics::SCENE_PART_COUNT] = {};
     uint64_t partStart = 0;
     int part = Diagnostics::SCENE_PART_NONE;
+    // The draws of each part (SCENE_PART_NONE: outside the parts), and the
+    // recorder's counts at the start of the part that runs now.
+    SysVitaDrawCounts partDraws[Diagnostics::SCENE_PART_COUNT] = {};
+    SysVitaDrawCounts partDrawsStart = {};
     void ScenePart(int next) override
     {
         const uint64_t now = sceKernelGetProcessTimeWide();
         if (part != Diagnostics::SCENE_PART_NONE)
             partMicros[part] += now - partStart;
+        const SysVitaDrawCounts counts = g_sysVitaDrawCounts;
+        partDraws[part].calls += counts.calls - partDrawsStart.calls;
+        partDraws[part].commands += counts.commands - partDrawsStart.commands;
+        partDraws[part].vertexBytes += counts.vertexBytes - partDrawsStart.vertexBytes;
+        partDrawsStart = counts;
         part = next >= 0 && next < Diagnostics::SCENE_PART_COUNT ? next : Diagnostics::SCENE_PART_NONE;
         partStart = now;
     }
@@ -389,11 +398,20 @@ struct FrameParts : Diagnostics::Observer {
         tickMicros = presentMicros = frameMicros = recorderMicros = 0;
         ticks = 0;
         memset(partMicros, 0, sizeof(partMicros));
+        memset(partDraws, 0, sizeof(partDraws));
     }
 };
 FrameParts s_frameParts;
 
+// The names of the parts, for the heartbeat.
+const char *const kPartNames[Diagnostics::SCENE_PART_COUNT] = {
+    "other", "setup", "particles", "sky", "ground", "shadows", "objects", "billboards",
+    "nodes", "layers", "view", "prepare", "car shadows", "reflections", "hud"
+};
+
 } // namespace
+
+SysVitaDrawCounts g_sysVitaDrawCounts;
 
 unsigned long long SysVita_Micros(void)
 {
@@ -466,6 +484,21 @@ void SysVita_FramePresented(void)
                     p.partMicros[Diagnostics::SCENE_PART_CAR_SHADOWS] / perFrame,
                     p.partMicros[Diagnostics::SCENE_PART_REFLECTIONS] / perFrame,
                     p.partMicros[Diagnostics::SCENE_PART_HUD] / perFrame);
+        // The draws of each part in a frame: the calls of the game, the
+        // commands they became, and the vertices copied into the frame.
+        s_frameParts.ScenePart(s_frameParts.part);
+        char text[512];
+        size_t used = 0;
+        for (int i = 0; i < Diagnostics::SCENE_PART_COUNT; i++) {
+            const SysVitaDrawCounts &d = p.partDraws[i];
+            if (d.calls == 0 || used >= sizeof(text))
+                continue;
+            used += (size_t)snprintf(text + used, sizeof(text) - used, "%s %s %.0f>%.0f %.0f KB", used ? "," : "",
+                                     kPartNames[i], (double)d.calls / periodFrames, (double)d.commands / periodFrames,
+                                     (double)d.vertexBytes / 1024.0 / periodFrames);
+        }
+        if (used > 0)
+            Sys_Log("heartbeat: draws per frame (calls>commands, vertices copied):%s", text);
     }
     s_frameParts.Reset();
     periodStart = now;

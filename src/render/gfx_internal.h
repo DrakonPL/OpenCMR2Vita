@@ -194,6 +194,12 @@ struct GfxExecutor {
     virtual void CollectReadback(GfxReadback &) {}
 };
 
+// A text for the logs: what the recorder did with the small 3D draws since
+// the last call (how many joined the draw before, how many drew from the
+// atlas, and why the others did not). The recorder counts from the first
+// call on. Only an executor that takes joined draws has such draws.
+void Gfx_RecorderCountsText(char *text, size_t size);
+
 GfxExecutor *Gfx_CreateGpuExecutor(void);
 GfxExecutor *Gfx_CreateNullExecutor(void);
 #ifdef VITA

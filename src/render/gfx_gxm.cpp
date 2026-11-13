@@ -193,6 +193,8 @@ struct Stats {
     unsigned fadeDraws = 0, nearDraws = 0;  // draws of a key with the fade: with it, and too near for it
     unsigned depthSkipped = 0;              // blended draws whose alpha test passes for each pixel: no depth pass
     unsigned vertexUploads = 0, fragmentUploads = 0;    // default uniform buffers reserved and filled
+    unsigned rangesMeasured = 0, rangeVertices = 0;     // vertex buffer ranges that the cache did not have
+    unsigned ownDraws = 0, ownVertices = 0;             // draws of the frame's vertices that were walked for the fade
 };
 
 // The frame time probe of dev builds. A tap on the front touch screen starts
@@ -1236,6 +1238,8 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             return range;
         DrawRange &range = g->ranges->Put(key);
         MeasureRange(&c.buffer->vertices[first], c.vertexCount, true, true, range);
+        stats.rangesMeasured++;
+        stats.rangeVertices += c.vertexCount;
         return &range;
     }
 
@@ -1359,6 +1363,10 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             fadeKey || needAlpha ? RangeOf(c, frame, fadeKey && !ownVertices, needAlpha, scratch) : nullptr;
         if ((key & kFadeKeyBit) != 0) {
             float reach = 0.0f;
+            if (fadeKey && range != nullptr && ownVertices) {
+                stats.ownDraws++;
+                stats.ownVertices += c.vertexCount;
+            }
             if (fadeKey && range != nullptr)
                 reach = ownVertices ? Gxm_FarthestEyeDistance(frame.vertices.data() + c.firstVertexByte,
                                                               sizeof(GfxVertex), c.vertexCount,
@@ -1940,6 +1948,12 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                 "vertex fills %u, uniform uploads %u vertex %u fragment, texture binds %u, dropped %u",
                 stats.draws, stats.depthPasses, stats.depthSkipped, stats.fadeDraws, stats.nearDraws, stats.misses,
                 stats.vertexFills, stats.vertexUploads, stats.fragmentUploads, stats.textureBinds, stats.dropped);
+        // The ranges measured: those of vertex buffers that the cache did
+        // not have, and the frame's own vertices of each draw with the fade.
+        char recorder[512];
+        Gfx_RecorderCountsText(recorder, sizeof(recorder));
+        Sys_Log("gxm: per s ranges measured %u with %u vertices, own vertices walked %u in %u draws; recorder: %s",
+                stats.rangesMeasured, stats.rangeVertices, stats.ownVertices, stats.ownDraws, recorder);
         stats = Stats();
         statsStart = now;
 #endif
