@@ -595,6 +595,16 @@ bool Platform_Init(int, char **)
     }
     Sys_Log("game data: %s", kDataDir);
     Sys_Log("user directory: %s", kUserDir);
+    // The game's thread (this one) on core 0. The renderer's worker has core
+    // 2 and the sound has core 1. A thread with no core of its own runs where
+    // the system puts it: on the worker's core, the worker waits for it.
+    // [system] pin_game_thread = 0 leaves the game's thread on any core.
+    if (Platform_GetSettingInt("system.pin_game_thread", 1) != 0) {
+        const int result = sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), SCE_KERNEL_CPU_MASK_USER_0);
+        Sys_Log("game thread: on core 0 (the mask before: 0x%08x)", (unsigned)result);
+    } else {
+        Sys_Log("game thread: on any core (system.pin_game_thread = 0)");
+    }
 #ifdef OPENCMR2_DEV
     LogFileProbe();
     // The app's memory budget, after the heap and the program are taken out.
