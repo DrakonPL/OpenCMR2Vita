@@ -739,9 +739,13 @@ int ReadBlock(SceUID fd, uint64_t offset, void *buffer, uint32_t size)
 // while that one's reader goes on. The SDK has no declared asynchronous
 // read with a documented end (sceIoReadAsync, sceIoComplete): this thread
 // makes the read asynchronous with sceIoRead. One read at a time: a second
-// read-ahead's Start waits until the first one's Wait.
+// read-ahead's Start waits until the first one's Wait. The thread that
+// collects a read (Wait) can be another than the one that began it (Start):
+// the music thread reads ahead, the game's thread seeks or closes the file.
+// So the reader is held by a semaphore, which has no owner: a mutex must be
+// unlocked by the thread that locked it.
 struct FileReader {
-    SceUID lock = -1, start = -1, done = -1, thread = -1;
+    SceUID free = -1, start = -1, done = -1, thread = -1;
     bool tried = false;
     // The read the thread does now.
     SceUID fd = -1;
@@ -767,10 +771,10 @@ struct FileReader {
         if (tried)
             return thread >= 0;
         tried = true;
-        lock = sceKernelCreateMutex("file_reader", 0, 0, NULL);
+        free = sceKernelCreateSema("file_reader_free", 0, 1, 1, NULL);
         start = sceKernelCreateSema("file_reader_start", 0, 0, 1, NULL);
         done = sceKernelCreateSema("file_reader_done", 0, 0, 1, NULL);
-        if (lock >= 0 && start >= 0 && done >= 0)
+        if (free >= 0 && start >= 0 && done >= 0)
             thread = sceKernelCreateThread("file_reader", Entry, 128, 16 * 1024, 0, SCE_KERNEL_CPU_MASK_USER_1, NULL);
         FileReader *self = this;
         const int started = thread < 0 ? thread : sceKernelStartThread(thread, sizeof(self), &self);
@@ -801,7 +805,7 @@ struct VitaReadIo : ReadAheadIo {
             return true;
         }
         // Held until Wait: the thread has one read.
-        sceKernelLockMutex(r.lock, 1, NULL);
+        sceKernelWaitSema(r.free, 1, NULL);
         r.fd = fd;
         r.offset = offset;
         r.buffer = buffer;
@@ -817,7 +821,7 @@ struct VitaReadIo : ReadAheadIo {
         FileReader &r = s_fileReader;
         sceKernelWaitSema(r.done, 1, NULL);
         const int result = r.result;
-        sceKernelUnlockMutex(r.lock, 1);
+        sceKernelSignalSema(r.free, 1);
         return result;
     }
 };
