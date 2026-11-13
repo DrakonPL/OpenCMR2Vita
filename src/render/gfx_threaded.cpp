@@ -191,10 +191,9 @@ struct ThreadedExecutor : GfxExecutor {
     // what it needs of them.
     std::vector<GfxTexture *> noTextures;
     GfxReadback noReadback;
-    // For the logs (GfxExecutor::NoteWorkerTimes): the us the game's thread
-    // waited, and the worker's expand of the last frame.
-    unsigned long long waitMicros = 0;
-    unsigned expandMicros = 0;
+    // For the logs (GfxExecutor::NoteWorkerTimes). The worker writes expand,
+    // the game's thread the waits.
+    GfxWorkerTimes times;
     Worker worker;
 
     explicit ThreadedExecutor(GfxExecutor *executor) : inner(executor), worker(&Run, this) {}
@@ -205,19 +204,22 @@ struct ThreadedExecutor : GfxExecutor {
         ThreadedExecutor *self = (ThreadedExecutor *)data;
         const unsigned long long start = Micros();
         Gfx_ExpandSmallBatches(self->frame);
-        self->expandMicros = (unsigned)(Micros() - start);
+        self->times.expand = (unsigned)(Micros() - start);
         self->inner->Execute(self->frame, self->noTextures, self->noReadback, self->present, self->vsync,
                              self->stretch);
     }
 
-    void Wait() override
+    // Waits for the worker, and adds the time to a wait of the times.
+    void WaitInto(unsigned &wait)
     {
         if (worker.OnWorker())
             return;
         const unsigned long long start = Micros();
         worker.Wait();
-        waitMicros += Micros() - start;
+        wait += (unsigned)(Micros() - start);
     }
+
+    void Wait() override { WaitInto(times.otherWait); }
 
     bool SetVideoMode(int width, int height, bool fullscreen) override
     {
@@ -234,10 +236,9 @@ struct ThreadedExecutor : GfxExecutor {
     void Execute(GfxFrame &recorded, std::vector<GfxTexture *> &textures, GfxReadback &readback, bool presentFrame,
                  bool vsyncFrame, bool stretchFrame) override
     {
-        Wait();
-        inner->NoteWorkerTimes((unsigned)waitMicros, expandMicros);
-        waitMicros = 0;
-        expandMicros = 0;
+        WaitInto(presentFrame ? times.presentWait : times.flushWait);
+        inner->NoteWorkerTimes(times);
+        times = GfxWorkerTimes();
         std::swap(frame, recorded);
         inner->Prepare(frame, textures, readback, presentFrame);
         present = presentFrame;

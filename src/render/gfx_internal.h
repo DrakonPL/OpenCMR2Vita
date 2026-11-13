@@ -267,6 +267,15 @@ struct GfxReadback {
 
 // ---- executor -----------------------------------------------------------------------
 
+// The times of the threaded executor, in us (GfxExecutor::NoteWorkerTimes).
+struct GfxWorkerTimes {
+    // The waits of the game's thread for the worker: before the Execute of a
+    // present, before an Execute in the middle of a frame (the recorder ran
+    // the draws so far: a lock of what they use), and in other calls.
+    unsigned presentWait = 0, flushWait = 0, otherWait = 0;
+    unsigned expand = 0;    // the worker's expand of the small batches of the last Execute
+};
+
 struct GfxExecutor {
     virtual ~GfxExecutor() {}
     virtual bool SetVideoMode(int width, int height, bool fullscreen) = 0;
@@ -283,10 +292,9 @@ struct GfxExecutor {
                          bool vsync, bool stretch = false) = 0;
     // Returns when no Execute runs (the threaded executor's worker is idle).
     virtual void Wait() {}
-    // For the logs, from the threaded executor before each Prepare: the us
-    // the game's thread waited for the worker since the call before, and the
-    // us the worker took to expand the small batches of the last frame.
-    virtual void NoteWorkerTimes(unsigned, unsigned) {}
+    // For the logs, from the threaded executor before each Prepare: what
+    // happened since the call before.
+    virtual void NoteWorkerTimes(const GfxWorkerTimes &) {}
     virtual void DestroyTexture(GfxTexture *texture) = 0;
     virtual void DestroyVertexBuffer(GfxVertexBuffer *) {}
     // Whether the recorder joins consecutive draws of one state from the

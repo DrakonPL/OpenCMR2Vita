@@ -31,7 +31,7 @@ struct SlowExecutor : GfxExecutor {
     std::atomic<int> batchesSeen{ 0 };      // GFX_CMD_SMALL_BATCH commands that reached Execute
     std::atomic<int> destroyed{ 0 };
     std::atomic<int> finished{ 0 };         // frames whose Execute ended
-    unsigned long long notedWait = 0;       // us, the sum of NoteWorkerTimes
+    GfxWorkerTimes noted;                   // us, the sums of NoteWorkerTimes
     std::vector<int> notesBeforePrepare;    // the NoteWorkerTimes calls before each Prepare
     int notes = 0;
     // The threaded executor: Execute calls its Wait, as a system dialog does
@@ -61,10 +61,12 @@ struct SlowExecutor : GfxExecutor {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         preparing = false;
     }
-    void NoteWorkerTimes(unsigned waitMicros, unsigned) override
+    void NoteWorkerTimes(const GfxWorkerTimes &times) override
     {
         Check();
-        notedWait += waitMicros;
+        noted.presentWait += times.presentWait;
+        noted.flushWait += times.flushWait;
+        noted.otherWait += times.otherWait;
         notes++;
     }
     void Execute(GfxFrame &frame, std::vector<GfxTexture *> &, GfxReadback &, bool, bool, bool) override
@@ -137,15 +139,18 @@ int main()
     // time. A texture that goes waits for the frame that runs. The wait (most
     // of the 30 ms of the first frame) goes to the inner executor before the
     // Prepare of the frame.
-    REQUIRE(slow->notedWait == 0);
+    REQUIRE(slow->noted.presentWait < 5000);
     frame = FrameOf(5);
     threaded->Execute(frame, textures, readback, true, false, false);
-    REQUIRE(slow->notedWait >= 20000);
+    REQUIRE(slow->noted.presentWait >= 20000 && slow->noted.flushWait == 0 && slow->noted.otherWait == 0);
     REQUIRE(slow->notesBeforePrepare.size() == 2 && slow->notesBeforePrepare[1] == 2);
     UntilRunning(*slow);
+    // The wait of another call (most of the 30 ms of the second frame) goes
+    // with the next Execute, apart from the waits of the Execute calls.
     threaded->DestroyTexture(nullptr);
     frame = FrameOf(2);
     threaded->Execute(frame, textures, readback, false, false, false);
+    REQUIRE(slow->noted.otherWait >= 15000 && slow->noted.flushWait < 5000);
     UntilRunning(*slow);
     threaded->ReadTexture(nullptr);
     frame = FrameOf(4);
@@ -187,6 +192,15 @@ int main()
     threaded->Execute(frame, textures, readback, true, false, false);
     threaded->Wait();
     REQUIRE(slow->batchesSeen == 0 && slow->commandCounts.size() == 7 && slow->commandCounts[6] == 1);
+
+    // An Execute in the middle of a frame that waits for the one before:
+    // the wait is that of a flush.
+    const unsigned flushBefore = slow->noted.flushWait;
+    frame = FrameOf(1);
+    threaded->Execute(frame, textures, readback, false, false, false);
+    frame = FrameOf(1);
+    threaded->Execute(frame, textures, readback, false, false, false);
+    REQUIRE(slow->noted.flushWait - flushBefore >= 20000);
 
     // Each Execute called the wait of its own worker, which returned (else
     // the first frame would never have ended). A frame that runs when the
