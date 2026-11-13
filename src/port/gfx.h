@@ -343,6 +343,16 @@ GfxVertex *Gfx_LockVertexBuffer(GfxVertexBuffer *buffer);
 void Gfx_UnlockVertexBuffer(GfxVertexBuffer *buffer);
 
 void Gfx_DrawPrimitiveVB(int primitive, GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount);
+/* Whether a range of a vertex buffer can be in the view, with the current
+   world, view and projection matrices: FALSE where each of its vertices is
+   outside one plane of the view. TRUE where the renderer does not test
+   draws against the view (the setting video.cull_draws). */
+BOOL Gfx_IsRangeVisible(GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount);
+/* Whether the game draws the ground parts of the visible sectors together,
+   one draw for each vertex buffer and texture (the setting
+   video.merge_ground; on by default where each draw costs much CPU time,
+   on the PS Vita). */
+BOOL Gfx_MergesGroundDraws(void);
 /* Indices are relative to firstVertex. */
 void Gfx_DrawIndexedPrimitiveVB(int primitive, GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount,
                                 const WORD *indices, DWORD indexCount);
