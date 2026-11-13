@@ -212,7 +212,9 @@ struct Stats {
     // present on the worker (vsync and the display queue), and the wait of
     // the game's thread for the worker.
     unsigned textureMicros = 0, bufferMicros = 0, snapshotMicros = 0;
-    unsigned ringCopyMicros = 0, expandMicros = 0, presentWaitMicros = 0, gameWaitMicros = 0;
+    unsigned ringCopyMicros = 0, expandMicros = 0, presentWaitMicros = 0;
+    GfxWorkerTimes gameWaits;   // the sums of the waits of the game's thread
+    unsigned executes = 0;      // Execute calls: more than the frames where the recorder ran draws in a frame
     // Texture binds of textures with mip levels made here: with a mip
     // filter, and without one (the game's mipmapping option off).
     unsigned mipReads = 0, mipUnread = 0;
@@ -1758,10 +1760,12 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             CollectRead(readback, false);
     }
 
-    void NoteWorkerTimes(unsigned gameWaitMicros, unsigned expandMicros) override
+    void NoteWorkerTimes(const GfxWorkerTimes &times) override
     {
-        stats.gameWaitMicros += gameWaitMicros;
-        stats.expandMicros += expandMicros;
+        stats.gameWaits.presentWait += times.presentWait;
+        stats.gameWaits.flushWait += times.flushWait;
+        stats.gameWaits.otherWait += times.otherWait;
+        stats.expandMicros += times.expand;
     }
 
     // ---- frame execution ----
@@ -1858,6 +1862,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         if (indexOffset != GxmFrameRing::kFull)
             memcpy(ring.At(indexOffset), frame.indices.data(), frame.indices.size() * 2);
         stats.ringCopyMicros += (unsigned)(sceKernelGetProcessTimeWide() - entered);
+        stats.executes++;
         if ((snapshotOffset == GxmFrameRing::kFull || vertexOffset == GxmFrameRing::kFull ||
              indexOffset == GxmFrameRing::kFull) &&
             !loggedRing) {
@@ -2140,10 +2145,12 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         // The game's thread: prepare and its wait for the worker. The worker:
         // the expand, execute (the ring copy in it) and the present's wait.
         Sys_Log("gxm: per frame ms: prepare parts: textures %.2f, vertex buffers %.2f, snapshots %.2f; game thread "
-                "waited for the worker %.2f; worker: batches expanded %.2f, ring copy %.2f, present wait %.2f",
+                "waited for the worker %.2f at the present, %.2f at a flush, %.2f else, %.2f executes; worker: "
+                "batches expanded %.2f, ring copy %.2f, present wait %.2f",
                 stats.textureMicros * msPerFrame, stats.bufferMicros * msPerFrame, stats.snapshotMicros * msPerFrame,
-                stats.gameWaitMicros * msPerFrame, stats.expandMicros * msPerFrame, stats.ringCopyMicros * msPerFrame,
-                stats.presentWaitMicros * msPerFrame);
+                stats.gameWaits.presentWait * msPerFrame, stats.gameWaits.flushWait * msPerFrame,
+                stats.gameWaits.otherWait * msPerFrame, stats.executes / frames, stats.expandMicros * msPerFrame,
+                stats.ringCopyMicros * msPerFrame, stats.presentWaitMicros * msPerFrame);
         stats = Stats();
         statsStart = now;
 #endif

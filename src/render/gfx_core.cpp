@@ -21,7 +21,16 @@
 
 #include <algorithm>
 
-static void Flush(void);
+// Why the recorder runs the draws recorded so far in the middle of a frame.
+enum {
+    FLUSH_ATLAS,            // a texture of the atlas goes or changes
+    FLUSH_BUFFER_GONE,      // a vertex buffer that the draws use goes
+    FLUSH_BUFFER_LOCK,      // a vertex buffer that the draws use is locked
+    FLUSH_TEXTURE_LOCK,     // a texture that the draws use is locked
+    FLUSH_REPLACEMENT,      // a texture gets another replacement
+    FLUSH_COUNT
+};
+static void Flush(int cause);
 
 namespace {
 
@@ -176,9 +185,12 @@ const char *const kChangedNames[CHANGED_COUNT] = { "none", "first", "world", "vi
                                                    "material", "lighting", "fog", "fade", "depth", "cull", "blend",
                                                    "alpha test", "factor", "stage 0", "stage 1", "viewport" };
 
+const char *const kFlushNames[FLUSH_COUNT] = { "atlas", "buffer gone", "buffer lock", "texture lock",
+                                               "replacement" };
+
 struct RecorderCounts {
     uint32_t states, small, joined, atlas, culled, snapshots, batched;
-    uint32_t noJoin[NO_JOIN_COUNT], noAtlas[NO_ATLAS_COUNT], changed[CHANGED_COUNT];
+    uint32_t noJoin[NO_JOIN_COUNT], noAtlas[NO_ATLAS_COUNT], changed[CHANGED_COUNT], flushes[FLUSH_COUNT];
 };
 RecorderCounts s_counts;
 bool s_countsWanted;    // a log reads the counts
@@ -330,7 +342,7 @@ void AtlasForget(const GfxTexture *t)
     if (!known)
         return;
     if (s_atlasRecord == s_record)
-        Flush();
+        Flush(FLUSH_ATLAS);
     s_atlasEntries.clear();
     s_atlasPacker.Reset(s_atlasSize / 4, s_atlasSize / 4);
     if (t == s_atlas)
@@ -1361,6 +1373,7 @@ void Gfx_RecorderCountsText(char *text, size_t size)
     list("no join", n.noJoin, kNoJoinNames, NO_JOIN_COUNT);
     list("state parts", n.changed, kChangedNames, CHANGED_COUNT);
     list("no atlas", n.noAtlas, kNoAtlasNames, NO_ATLAS_COUNT);
+    list("flushes", n.flushes, kFlushNames, FLUSH_COUNT);
     s_counts = RecorderCounts();
     s_countsWanted = s_perfStatsSetting != 0;
 }
@@ -1372,8 +1385,9 @@ bool Gfx_PerfStatsWanted(void)
     return s_perfStatsSetting != 0;
 }
 
-static void Flush(void)
+static void Flush(int cause)
 {
+    s_counts.flushes[cause]++;
     if (TraceFile() != NULL)
         TraceAddFrameSizes(s_frame);
     Submit(false, false, false);
@@ -1635,7 +1649,7 @@ extern "C" void Gfx_DestroyVertexBuffer(GfxVertexBuffer *buffer)
         return;
     // Draws recorded this frame may still use it.
     if (buffer->referencedRecord == s_record || buffer->snapshotRecord == s_record)
-        Flush();
+        Flush(FLUSH_BUFFER_GONE);
     if (s_executor != NULL)
         s_executor->DestroyVertexBuffer(buffer);
     if (s_copied.buffer == buffer)
@@ -1655,7 +1669,7 @@ extern "C" GfxVertex *Gfx_LockVertexBuffer(GfxVertexBuffer *buffer)
     if (buffer->snapshotRecord == s_record)
         buffer->streaming = true;
     if (buffer->referencedRecord == s_record || buffer->snapshotRecord == s_record)
-        Flush();
+        Flush(FLUSH_BUFFER_LOCK);
     buffer->version++;
     buffer->lastLockFrame = s_presentedFrames;
     buffer->positionsUnknown = true;
@@ -1905,7 +1919,7 @@ extern "C" void Gfx_DestroyTexture(GfxTexture *texture)
         for (GfxTexture *t : s_frame.smallTextures)
             used = used || uses(t);
         if (used)
-            Flush();
+            Flush(FLUSH_TEXTURE_LOCK);
     }
     // Shutdown may visit a replacement before its owner. Detach it so the
     // owner cannot destroy it a second time (also applies to font fields).
@@ -1929,7 +1943,7 @@ extern "C" void Gfx_SetTextureReplacement(GfxTexture *texture, GfxTexture *repla
         return;
     // Draws recorded so far read the previous one. They have run (the worker
     // of the threaded executor reads the replacement too).
-    Flush();
+    Flush(FLUSH_REPLACEMENT);
     Gfx_WaitForExecutor();
     Gfx_DestroyTexture(texture->replacement);
     texture->replacement = replacement;
