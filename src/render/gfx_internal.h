@@ -166,6 +166,9 @@ struct GfxExecutor {
                          bool vsync, bool stretch = false) = 0;
     virtual void DestroyTexture(GfxTexture *texture) = 0;
     virtual void DestroyVertexBuffer(GfxVertexBuffer *) {}
+    // Whether the recorder joins consecutive draws of one state from the
+    // frame's vertex data into one command (a run of sprites or lines).
+    virtual bool JoinsDraws() const { return false; }
     // Brings a render target's pixels back into its CPU copy (for locks).
     virtual void ReadTexture(GfxTexture *texture) = 0;
     // Completes the back buffer read the last presented frame started, when

@@ -107,26 +107,44 @@ inline void Gxm_FillVertexUniforms(const GfxDrawState &s, const GfxViewport &vie
 // them (VU_UNLIT_ROWS). The next state with lighting makes them current.
 // The rows up to VU_UNLIT_ROWS, and with lighting all rows, are those that
 // Gxm_FillVertexUniforms gives.
-inline void Gxm_UpdateVertexUniforms(const GfxDrawState &prev, const GfxDrawState &s, const GfxViewport &viewport,
+// Returns whether a row that a draw of s reads can be different from before.
+// Most draws of a stage differ from the draw before only in their textures:
+// then no row changes, and the executor does not give the rows to the GPU
+// again.
+inline bool Gxm_UpdateVertexUniforms(const GfxDrawState &prev, const GfxDrawState &s, const GfxViewport &viewport,
                                      float u[VU_ROWS][4])
 {
+    bool changed = false;
     const bool view = memcmp(&prev.view, &s.view, sizeof(s.view)) != 0;
-    if (view || memcmp(&prev.world, &s.world, sizeof(s.world)) != 0)
+    if (view || memcmp(&prev.world, &s.world, sizeof(s.world)) != 0) {
         GfxShared::Multiply(s.world, s.view, u[VU_WORLD_VIEW]);
-    if (memcmp(&prev.projection, &s.projection, sizeof(s.projection)) != 0)
+        changed = true;
+    }
+    if (memcmp(&prev.projection, &s.projection, sizeof(s.projection)) != 0) {
         memcpy(u[VU_PROJECTION], &s.projection, 64);
+        changed = true;
+    }
     if (memcmp(prev.texture, s.texture, sizeof(s.texture)) != 0) {
         memcpy(u[VU_TEXTURE_MATRIX0], &s.texture[0], 64);
         memcpy(u[VU_TEXTURE_MATRIX1], &s.texture[1], 64);
+        changed = true;
     }
-    if (memcmp(&prev.material, &s.material, sizeof(s.material)) != 0)
+    if (memcmp(&prev.material, &s.material, sizeof(s.material)) != 0) {
         Gxm_MaterialRows(s, u);
+        changed = true;
+    }
     // The lights are in eye space: a new view moves them.
     if (s.lighting && (!prev.lighting || view ||
                        memcmp(prev.lightEnabled, s.lightEnabled, sizeof(s.lightEnabled)) != 0 ||
-                       memcmp(prev.lights, s.lights, sizeof(s.lights)) != 0))
+                       memcmp(prev.lights, s.lights, sizeof(s.lights)) != 0)) {
         Gxm_LightRows(s, u);
+        changed = true;
+    }
+    // The small rows are one block (VU_GLOBAL_AMBIENT to VU_TARGET).
+    float before[VU_TARGET - VU_GLOBAL_AMBIENT + 1][4];
+    memcpy(before, u[VU_GLOBAL_AMBIENT], sizeof(before));
     Gxm_SmallRows(s, viewport, u);
+    return changed || memcmp(before, u[VU_GLOBAL_AMBIENT], sizeof(before)) != 0;
 }
 
 #endif
