@@ -46,8 +46,10 @@ namespace {
 
 bool s_joins;
 GfxFrame s_frame;       // the frame of the last present
+int s_batchWaits;       // the calls of WaitForBatches
 
 struct CaptureExecutor : GfxExecutor {
+    void WaitForBatches() override { s_batchWaits++; }
     bool SetVideoMode(int, int, bool) override { return true; }
     void SetFullscreen(bool) override {}
     void Execute(GfxFrame &frame, std::vector<GfxTexture *> &, GfxReadback &, bool, bool, bool) override
@@ -1333,9 +1335,65 @@ int main()
         Gfx_DestroyTexture(bark);
         REQUIRE(Draws() == 2 && Draw(1).textures[0] == bark);
         Gfx_Present(FALSE);
-        s_cullDraws = 0;
+
+        // The small draws of a batch refer to the vertices of the buffer:
+        // the recorder does not copy them. The game writes such vertices
+        // again (a lock): the batch so far runs first, with the vertices as
+        // they were, and the executor is asked for its batches (the worker
+        // of the threaded executor reads the vertices). A lock of other
+        // vertices runs nothing.
+        const auto worldX = [&](float x) { return x * m[0]._11 + m[0]._41; };
+        start();
+        Gfx_DrawBatch(two, 1);      // the oak quad: vertices 0 to 3
+        s_frame = GfxFrame();
+        s_batchWaits = 0;
+        GfxVertex *w = Gfx_LockVertexBufferRange(buffer, 36, 4);
+        Gfx_UnlockVertexBuffer(buffer);
+        REQUIRE(Draws() == 0 && s_batchWaits == 0);
+        w = Gfx_LockVertexBufferRange(buffer, 0, 4);
+        REQUIRE(Draws() == 1 && s_batchWaits == 1 && Vertex3D(Draw(0), 1).x == worldX(0.5f));
+        w[1].x = 0.4f;
+        Gfx_UnlockVertexBuffer(buffer);
+        Gfx_DrawBatch(two, 1);
         Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && Vertex3D(Draw(0), 1).x == worldX(0.4f));
+        // A lock in a later frame: the batch of the frame before is with the
+        // executor, which is asked once.
+        w = Gfx_LockVertexBufferRange(buffer, 0, 4);
+        w[1].x = 0.5f;
+        Gfx_UnlockVertexBuffer(buffer);
+        REQUIRE(s_batchWaits == 2);
+        Gfx_LockVertexBufferRange(buffer, 0, 4);
+        Gfx_UnlockVertexBuffer(buffer);
+        REQUIRE(s_batchWaits == 2);
+        // A lock of the whole buffer, and a buffer that goes, the same.
+        Gfx_DrawBatch(two, 1);
+        s_frame = GfxFrame();
+        w = Gfx_LockVertexBuffer(buffer);
+        REQUIRE(Draws() == 1 && s_batchWaits == 3 && Vertex3D(Draw(0), 1).x == worldX(0.5f));
+        // A small draw with texture coordinates outside its texture keeps
+        // its texture, in a batch as alone: the batch finds it when its
+        // vertices are read.
+        w[1].u0 = 2.0f;
+        Gfx_UnlockVertexBuffer(buffer);
+        start();
+        Gfx_SetTransform(GFX_TRANSFORM_WORLD, two[0].world);
+        Gfx_SetTexture(0, oak);
+        Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, buffer, 0, 4, quad, 6);
+        Gfx_Present(FALSE);
+        const std::string outside = FrameText();
+        REQUIRE(Draws() == 1 && Draw(0).textures[0] == oak);
+        start();
+        Gfx_DrawBatch(two, 1);
+        Gfx_Present(FALSE);
+        REQUIRE(FrameText() == outside && Draws() == 1 && Draw(0).textures[0] == oak);
+        Gfx_DrawBatch(two, 1);
+        s_frame = GfxFrame();
+        s_cullDraws = 0;
         Gfx_DestroyVertexBuffer(buffer);
+        REQUIRE(Draws() == 1);
+        Gfx_Present(FALSE);
+        Gfx_Present(FALSE);
         Gfx_DestroyTexture(oak);
         Gfx_DestroyTexture(pine);
         Gfx_SetStageAddress(0, GFX_ADDRESS_WRAP);

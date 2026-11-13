@@ -84,6 +84,41 @@ private:
     uint32_t marked = 0;            // the blocks with a frame
 };
 
+// A stamp for each block of a vertex buffer (the blocks of GfxRangeLocks):
+// the recording whose small batches refer to the vertices of the block
+// (GfxSmallItem::buffer). The stamps of a buffer only rise.
+struct GfxBlockStamps {
+    void Mark(uint32_t first, uint32_t count, uint32_t stamp)
+    {
+        if (count == 0)
+            return;
+        const size_t last = (first + count - 1) / GfxRangeLocks::kBlock;
+        if (stamps.size() <= last)
+            stamps.resize(last + 1, 0);
+        for (size_t b = first / GfxRangeLocks::kBlock; b <= last; b++)
+            stamps[b] = stamp;
+        latest = stamp > latest ? stamp : latest;
+    }
+
+    // The largest stamp of the blocks that count vertices from first touch,
+    // and that of all blocks. 0: no stamp.
+    uint32_t Latest(uint32_t first, uint32_t count) const
+    {
+        uint32_t most = 0;
+        if (count == 0)
+            return most;
+        const size_t last = (first + count - 1) / GfxRangeLocks::kBlock;
+        for (size_t b = first / GfxRangeLocks::kBlock; b <= last && b < stamps.size(); b++)
+            most = stamps[b] > most ? stamps[b] : most;
+        return most;
+    }
+    uint32_t Latest() const { return latest; }
+
+private:
+    std::vector<uint32_t> stamps;
+    uint32_t latest = 0;
+};
+
 // Whether count vertices from first touch one of the patches, which are in
 // rising order and apart: each has first and end (the vertex after its last).
 template <typename Patch> bool Gfx_TouchesPatch(const Patch *patches, size_t patchCount, uint32_t first, uint32_t count)
