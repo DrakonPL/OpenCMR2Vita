@@ -1,8 +1,9 @@
 // The recorder (src/render/gfx_core.cpp): what a frame holds for the game's
 // draws. A setter with the value that is already set starts no new state. An
 // executor that takes joined draws gets a run of sprites or lines as one
-// draw. The parts of a mesh in a vertex buffer that is not drawn by reference
-// share one copy of its vertices.
+// draw, and a small 3D draw in world space: a run of billboards, each with a
+// world matrix of its own, has one state. The parts of a mesh in a vertex
+// buffer that is not drawn by reference share one copy of its vertices.
 
 #include "port/sys.h"
 #include "render/gfx_internal.h"
@@ -75,6 +76,47 @@ float SpriteX(const GfxCommand &c, unsigned vertex)
     GfxTLVertex v;
     memcpy(&v, s_frame.vertices.data() + c.firstVertexByte + vertex * sizeof(GfxTLVertex), sizeof(v));
     return v.sx;
+}
+
+GfxVertex Vertex3D(const GfxCommand &c, unsigned vertex)
+{
+    GfxVertex v;
+    memcpy(&v, s_frame.vertices.data() + c.firstVertexByte + vertex * sizeof(GfxVertex), sizeof(v));
+    return v;
+}
+
+GfxMatrix Identity()
+{
+    GfxMatrix m{};
+    m._11 = m._22 = m._33 = m._44 = 1.0f;
+    return m;
+}
+
+// A billboard of the game: a quad of two triangles with a world matrix of
+// its own (a scale and a place).
+void Billboard(float scale, float x, float z)
+{
+    GfxMatrix world = Identity();
+    world._11 = world._22 = world._33 = scale;
+    world._41 = x;
+    world._43 = z;
+    Gfx_SetTransform(GFX_TRANSFORM_WORLD, &world);
+    GfxVertex v[4] = {};
+    for (int i = 0; i < 4; i++) {
+        v[i].x = (float)(i & 1);
+        v[i].y = (float)(i >> 1);
+        v[i].nz = -1.0f;
+        v[i].diffuse = 0xff102030 + (DWORD)i;
+        v[i].u0 = (float)(i & 1);
+    }
+    const WORD quad[6] = { 0, 1, 2, 2, 1, 3 };
+    Gfx_DrawIndexedPrimitive(GFX_TRIANGLELIST, v, 4, quad, 6);
+}
+
+bool IsIdentity(const GfxMatrix &m)
+{
+    const GfxMatrix identity = Identity();
+    return memcmp(&m, &identity, sizeof(m)) == 0;
 }
 
 } // namespace
@@ -167,6 +209,69 @@ int main()
         Gfx_Present(FALSE);
         REQUIRE(Draws() == 3 && Draw(0).vertexCount == 6 && !Draw(0).transformed && Draw(1).transformed);
         REQUIRE(Draw(1).primitive == GFX_TRIANGLELIST && Draw(1).vertexCount == 6 && Draw(2).vertexCount == 2);
+    }
+
+    // Small 3D draws, each with a world matrix of its own: an executor that
+    // does not take joined draws gets them as the game made them.
+    s_joins = false;
+    Billboard(2.0f, 10.0f, 5.0f);
+    Billboard(3.0f, 20.0f, 6.0f);
+    Gfx_Present(FALSE);
+    REQUIRE(Draws() == 2 && s_frame.states.size() == 2);
+    REQUIRE(s_frame.states[Draw(1).state].world._41 == 20.0f && Vertex3D(Draw(1), 1).x == 1.0f);
+    // Joined: they are in world space, with one state and one draw. The
+    // positions go through the whole matrix, the normals through its 3x3 part.
+    s_joins = true;
+    Billboard(2.0f, 10.0f, 5.0f);
+    Billboard(3.0f, 20.0f, 6.0f);
+    Gfx_Present(FALSE);
+    REQUIRE(Draws() == 1 && s_frame.states.size() == 1);
+    {
+        const GfxCommand &c = Draw(0);
+        REQUIRE(IsIdentity(s_frame.states[c.state].world));
+        REQUIRE(!c.transformed && c.buffer == NULL && c.vertexCount == 8 && c.indexCount == 12);
+        REQUIRE(s_frame.indices[c.firstIndex + 6] == 4 && s_frame.indices[c.firstIndex + 11] == 7);
+        const GfxVertex a = Vertex3D(c, 3), b = Vertex3D(c, 5);
+        REQUIRE(a.x == 12.0f && a.y == 2.0f && a.z == 5.0f && a.nz == -2.0f && a.nx == 0.0f);
+        REQUIRE(b.x == 23.0f && b.y == 0.0f && b.z == 6.0f && b.nz == -3.0f);
+        REQUIRE(a.diffuse == 0xff102033 && a.u0 == 1.0f);
+    }
+    // Another texture starts a new draw and a new state, in world space also.
+    // A draw that is not small keeps its world matrix, and so does the small
+    // draw after it: each has the state of its vertices.
+    {
+        GfxTexture *leaves = Gfx_CreateTexture(8, 8, GFX_FORMAT_BGRA8, 1, 0);
+        Billboard(2.0f, 10.0f, 5.0f);
+        Gfx_SetTexture(0, leaves);
+        Billboard(3.0f, 20.0f, 6.0f);
+        GfxVertex mesh[18] = {};
+        mesh[1].x = 1.0f;
+        Gfx_DrawPrimitive(GFX_TRIANGLELIST, mesh, 18);
+        Billboard(3.0f, 20.0f, 6.0f);
+        Billboard(4.0f, 30.0f, 7.0f);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 4 && s_frame.states.size() == 4);
+        REQUIRE(IsIdentity(s_frame.states[Draw(0).state].world) && IsIdentity(s_frame.states[Draw(1).state].world));
+        REQUIRE(s_frame.states[Draw(1).state].stages[0].texture == leaves);
+        REQUIRE(s_frame.states[Draw(2).state].world._41 == 20.0f && Draw(2).vertexCount == 18);
+        REQUIRE(Vertex3D(Draw(2), 1).x == 1.0f);
+        REQUIRE(IsIdentity(s_frame.states[Draw(3).state].world) && Draw(3).vertexCount == 8);
+        REQUIRE(Vertex3D(Draw(3), 5).x == 34.0f);
+        Gfx_SetTexture(0, NULL);
+        Gfx_DestroyTexture(leaves);
+    }
+    // A world matrix that is not affine stays with its draw.
+    {
+        GfxMatrix world = Identity();
+        world._34 = 0.5f;
+        Gfx_SetTransform(GFX_TRANSFORM_WORLD, &world);
+        GfxVertex v[3] = {};
+        v[1].x = 1.0f;
+        Gfx_DrawPrimitive(GFX_TRIANGLELIST, v, 3);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && s_frame.states[Draw(0).state].world._34 == 0.5f && Vertex3D(Draw(0), 1).x == 1.0f);
+        world = Identity();
+        Gfx_SetTransform(GFX_TRANSFORM_WORLD, &world);
     }
 
     // A vertex buffer the game has just locked is not drawn by reference:

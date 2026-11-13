@@ -215,15 +215,21 @@ struct Stats {
 //                     gives them for a frame
 //   uniforms always   each pass reserves and fills its uniform buffers, also
 //                     where those of the pass before are still right
+//   single pass       a blended draw with the alpha test and depth writes
+//                     draws once, with the discard and its blending, and has
+//                     no depth pass. Look at the trees and the fences in this
+//                     mode: it shows whether the SGX543 draws such a program
 // Each line also has the CPU time of an Execute up to the present: the cost
 // of the draw calls without the wait for the GPU.
 enum ProbeMode {
     PROBE_OFF, PROBE_NORMAL, PROBE_QUARTER, PROBE_TILE, PROBE_NO_3D, PROBE_NO_DEPTH_PASS, PROBE_GENERAL,
-    PROBE_FADE_ALWAYS, PROBE_DEPTH_PASS_ALWAYS, PROBE_LOOKUP_ONLY, PROBE_PROFILE, PROBE_UNIFORMS_ALWAYS, PROBE_END
+    PROBE_FADE_ALWAYS, PROBE_DEPTH_PASS_ALWAYS, PROBE_LOOKUP_ONLY, PROBE_PROFILE, PROBE_UNIFORMS_ALWAYS,
+    PROBE_SINGLE_PASS, PROBE_END
 };
 const char *const kProbeNames[PROBE_END] = { "off",         "normal",        "quarter", "tile",
                                              "no 3D",       "no depth pass", "general", "fade always",
-                                             "depth pass always", "lookup only", "profile", "uniforms always" };
+                                             "depth pass always", "lookup only", "profile", "uniforms always",
+                                             "single pass" };
 
 // The steps the profile mode times: an Execute before its draws, then the
 // steps of a 3D draw in Draw's order.
@@ -319,10 +325,11 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     int vertexUniformW = 0, vertexUniformH = 0;
     unsigned vertexUniformVersion = 1;
     float vertexUniforms[VU_ROWS][4];
-    // Whether a reserved uniform buffer serves the draws that follow. A draw
-    // that fails with a kept buffer ends this: then each pass reserves its
-    // buffers, as GXM always permits.
-    bool keepUniforms = true;
+    // Whether a reserved uniform buffer serves the draws that follow: the
+    // device answers it at the first video mode (TestKeptUniforms). A draw
+    // that fails with a kept buffer also ends it. Without it each pass
+    // reserves its buffers, as GXM always permits.
+    bool keepUniforms = false, keepUniformsTested = false;
     bool loggedSplit = false, loggedRing = false, loggedPrimitive = false, loggedStaticFull = false;
 
     // Textures made or destroyed in this frame; in an earlier one, not logged yet.
@@ -541,9 +548,78 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         }
         if (!ready || !device.SetMode(width, height))
             return false;
+        if (!keepUniformsTested) {
+            keepUniformsTested = true;
+            TestKeptUniforms();
+        }
         // Without it the scenery does not fade, and the game still runs.
         CreateBackdrop();
         return true;
+    }
+
+    // Finds out whether a reserved default uniform buffer serves the draws
+    // that follow it. vitaGL draws that way. Notes from other GXM work say
+    // that a buffer lasts one draw. Squares of the clear programs in a scene
+    // of their own answer it, read back from the back buffer:
+    //   A  both buffers reserved and filled: green
+    //   B  no buffer reserved: green only if both buffers stayed
+    //   C  after a draw with another fragment program, only the fragment
+    //      buffer reserved: red only if the vertex buffer stayed
+    // Each square has the depth test "equal" on a depth of 0.5 from the
+    // vertex buffer, so a vertex buffer with other values draws nothing.
+    void TestKeptUniforms()
+    {
+        keepUniforms = false;
+        const int size = 64;
+        if (device.Width() < size * 4 || device.Height() < size || !device.BeginBackBufferScene())
+            return;
+        bound = Bound();
+        SceGxmContext *context = device.Context();
+        bool drawn = true;
+        const float depth[4] = { 0.5f, 0.0f, 0.0f, 0.0f };
+        float black[4], green[4], red[4];
+        Color(0xff000000, black);
+        Color(0xff00ff00, green);
+        Color(0xffff0000, red);
+        // z, rgba: nullptr keeps the buffer of the draw before.
+        auto square = [&](int column, SceGxmFragmentProgram *program, SceGxmDepthFunc func, const float *z,
+                          const float *rgba) {
+            GfxViewport v{};
+            v.x = (DWORD)(column * size);
+            v.width = v.height = (DWORD)size;
+            v.maxZ = 1.0f;
+            SetPrograms(clearVertex, program);
+            SetViewport((float)v.x, 0.0f, (float)size, (float)size, 0.0f, 1.0f, v);
+            SetDepthAndCull(func, true, SCE_GXM_CULL_NONE);
+            void *buffer;
+            if (z != nullptr) {
+                sceGxmReserveVertexDefaultUniformBuffer(context, &buffer);
+                sceGxmSetUniformDataF(buffer, clearDepthParam, 0, 4, z);
+            }
+            if (rgba != nullptr) {
+                sceGxmReserveFragmentDefaultUniformBuffer(context, &buffer);
+                sceGxmSetUniformDataF(buffer, clearColorParam, 0, 4, rgba);
+            }
+            drawn = sceGxmDraw(context, SCE_GXM_PRIMITIVE_TRIANGLE_STRIP, SCE_GXM_INDEX_FORMAT_U16, identityIndices,
+                               4) >= 0 && drawn;
+        };
+        // The ground of the squares: black, at the depth.
+        for (int column = 0; column < 4; column++)
+            square(column, clearColor, SCE_GXM_DEPTH_FUNC_ALWAYS, depth, black);
+        square(0, clearColor, SCE_GXM_DEPTH_FUNC_EQUAL, depth, green);
+        square(1, clearColor, SCE_GXM_DEPTH_FUNC_EQUAL, nullptr, nullptr);
+        square(3, clearDepthOnly, SCE_GXM_DEPTH_FUNC_ALWAYS, nullptr, black);
+        square(2, clearColor, SCE_GXM_DEPTH_FUNC_EQUAL, nullptr, red);
+        device.EndScene();
+        device.Finish();
+        bound = Bound();
+        uint32_t pixel[3] = {};
+        for (int column = 0; column < 3; column++)
+            device.ReadPixels(device.BackBuffer(), column * size + size / 2, size / 2, 1, 1, &pixel[column]);
+        const uint32_t a = pixel[0] & 0xffffff, b = pixel[1] & 0xffffff, c = pixel[2] & 0xffffff;
+        keepUniforms = drawn && a == 0x00ff00 && b == 0x00ff00 && c == 0xff0000;
+        Sys_Log("gxm: a reserved uniform buffer serves the draws that follow: %s (squares %06x %06x %06x, draws %s)",
+                keepUniforms ? "yes" : "no", (unsigned)a, (unsigned)b, (unsigned)c, drawn ? "ok" : "failed");
     }
 
     // The backdrop target, the size of the back buffer, from the texture pool.
@@ -614,7 +690,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         const GxmFragmentVariant &v = kGxmFragmentVariants[variant];
         // A patch in the middle of a frame costs a few ms: variants.txt lists
         // the triples that are made at the start.
-        if (programsMade && loggedUnlisted < kLoggedUnknownKeys) {
+        if (programsMade && probe.mode == PROBE_OFF && loggedUnlisted < kLoggedUnknownKeys) {
             char pair[8] = "off";
             if (blend)
                 snprintf(pair, sizeof(pair), "%d/%d", srcBlend & 15, destBlend & 15);
@@ -1116,8 +1192,17 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                 stats.depthSkipped++;
             } else {
                 depthVariant = LookupVariant(key, 1, args);
-                if (depthVariant >= 0)
+                SceGxmFragmentProgram *single = nullptr;
+                if (depthVariant >= 0 && probe.mode == PROBE_SINGLE_PASS)
+                    single = FragmentProgram(depthVariant, true, s.srcBlend, s.destBlend, c.transformed);
+                if (single != nullptr) {
+                    // The probe's single pass: the discard form with the draw's blending.
+                    variant = depthVariant;
+                    fragment = single;
+                    depthVariant = -1;
+                } else if (depthVariant >= 0) {
                     depthProgram = FragmentProgram(depthVariant, false, 0, 0, c.transformed, true);
+                }
             }
         }
         step(PROFILE_DEPTH);
