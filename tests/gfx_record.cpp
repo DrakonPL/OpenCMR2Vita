@@ -1342,6 +1342,7 @@ int main()
                                            d.indexCount);
             }
         };
+        GfxTexture *atlasTexture = NULL;
         for (int joins = 1; joins >= 0; joins--) {
             s_joins = joins != 0;
             s_cullDraws = 1;
@@ -1367,6 +1368,7 @@ int main()
                 // The atlas keeps 3 mip levels, and tells the part that
                 // changed (the executor's levels of it).
                 REQUIRE(Draw(0).textures[0]->mipLimit == 3 && !Draw(0).textures[0]->changedRect.Empty());
+                atlasTexture = Draw(0).textures[0];
             } else {
                 // Each draw alone; the box of the tree outside the view is
                 // outside it.
@@ -1443,7 +1445,14 @@ int main()
         REQUIRE(Draws() == 1);
         Gfx_Present(FALSE);
         Gfx_Present(FALSE);
+        // A texture of the atlas goes: the atlas starts again, and all of it
+        // is the part that changed (the textures that come take the places
+        // of those that were there).
+        atlasTexture->changedRect = GfxMipRect();
         Gfx_DestroyTexture(oak);
+        REQUIRE(atlasTexture->changedRect.x0 == 0 && atlasTexture->changedRect.y0 == 0 &&
+                atlasTexture->changedRect.x1 == atlasTexture->width &&
+                atlasTexture->changedRect.y1 == atlasTexture->height);
         Gfx_DestroyTexture(pine);
         Gfx_SetStageAddress(0, GFX_ADDRESS_WRAP);
     }
@@ -1514,6 +1523,8 @@ int main()
         std::vector<uint8_t> kept[16], whole[16];
         Gfx_MakeBC3Mips(atlas.data(), size, size, 3, GfxMipRect(), kept);
         const std::vector<uint8_t> before = kept[1];
+        // What the GPU has, for the test of the part that changes below.
+        std::vector<uint8_t> onGpu[3] = { atlas, kept[1], kept[2] };
         GfxMipRect tile;
         tile.x0 = 40;
         tile.y0 = 36;
@@ -1528,6 +1539,29 @@ int main()
         Gfx_MakeBC3Mips(atlas.data(), size, size, 3, tile, kept);
         Gfx_MakeBC3Mips(atlas.data(), size, size, 3, GfxMipRect(), whole);
         REQUIRE(kept[1] == whole[1] && kept[2] == whole[2] && kept[1] != before);
+        // An executor writes only the blocks of the part into the levels
+        // that it has (Gfx_MipPartBlocks): each level is then the new one.
+        {
+            const GfxMipRect part = Gfx_MipPartOf(tile, size, size, 3);
+            REQUIRE(part.x0 == 32 && part.y0 == 32 && part.x1 == 80 && part.y1 == 112);
+            const std::vector<uint8_t> *now[3] = { &atlas, &kept[1], &kept[2] };
+            for (int m = 0; m < 3; m++) {
+                const GfxMipRect blocks = Gfx_MipPartBlocks(part, size, size, m);
+                const int rowBlocks = (size >> m) / 4;
+                REQUIRE(blocks.x0 == 8 >> m && blocks.y0 == 8 >> m && blocks.x1 == 20 >> m && blocks.y1 == 28 >> m);
+                REQUIRE(onGpu[m] != *now[m]);
+                for (int by = blocks.y0; by < blocks.y1; by++)
+                    memcpy(&onGpu[m][((size_t)by * rowBlocks + blocks.x0) * 16],
+                           &(*now[m])[((size_t)by * rowBlocks + blocks.x0) * 16], (size_t)(blocks.x1 - blocks.x0) * 16);
+                REQUIRE(onGpu[m] == *now[m]);
+            }
+            // All of a texture, and a level smaller than a block.
+            const GfxMipRect all = Gfx_MipPartOf(GfxMipRect(), 64, 32, 7);
+            REQUIRE(all.x0 == 0 && all.y0 == 0 && all.x1 == 64 && all.y1 == 32);
+            const GfxMipRect last = Gfx_MipPartBlocks(all, 64, 32, 6), first = Gfx_MipPartBlocks(all, 64, 32, 0);
+            REQUIRE(last.x0 == 0 && last.y0 == 0 && last.x1 == 1 && last.y1 == 1);
+            REQUIRE(first.x1 == 16 && first.y1 == 8);
+        }
         // New levels for a part: of a texture that is not zero outside the
         // part, all of it is made; of an atlas that is new (zero but for a
         // tile), the tile is enough. Both are the levels of the whole.

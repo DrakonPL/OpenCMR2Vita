@@ -113,6 +113,38 @@ int Gfx_MipLevelCount(int width, int height, int limit)
     return limit > 0 && count > limit ? limit : count;
 }
 
+GfxMipRect Gfx_MipPartOf(GfxMipRect changed, int width, int height, int count)
+{
+    GfxMipRect r;
+    r.x1 = width;
+    r.y1 = height;
+    if (changed.Empty() || count < 1)
+        return r;
+    // Out to whole blocks of the last level: the levels of a part so
+    // aligned are those of the whole texture there.
+    const int align = 4 << (count - 1);
+    r.x0 = changed.x0 < 0 ? 0 : changed.x0 / align * align;
+    r.y0 = changed.y0 < 0 ? 0 : changed.y0 / align * align;
+    r.x1 = (changed.x1 + align - 1) / align * align;
+    r.y1 = (changed.y1 + align - 1) / align * align;
+    r.x1 = r.x1 < width ? r.x1 : width;
+    r.y1 = r.y1 < height ? r.y1 : height;
+    return r;
+}
+
+GfxMipRect Gfx_MipPartBlocks(GfxMipRect part, int width, int height, int level)
+{
+    const int levelBlocksX = (Max1(width >> level) + 3) / 4, levelBlocksY = (Max1(height >> level) + 3) / 4;
+    const int x0 = part.x0 >> level, y0 = part.y0 >> level;
+    const int w = Max1((part.x1 - part.x0) >> level), h = Max1((part.y1 - part.y0) >> level);
+    GfxMipRect blocks;
+    blocks.x0 = x0 / 4;
+    blocks.y0 = y0 / 4;
+    blocks.x1 = (x0 + w + 3) / 4 < levelBlocksX ? (x0 + w + 3) / 4 : levelBlocksX;
+    blocks.y1 = (y0 + h + 3) / 4 < levelBlocksY ? (y0 + h + 3) / 4 : levelBlocksY;
+    return blocks;
+}
+
 void Gfx_MakeBC3Mips(const uint8_t *level0, int width, int height, int count, GfxMipRect changed,
                      std::vector<uint8_t> mips[])
 {
@@ -126,16 +158,7 @@ void Gfx_MakeBC3Mips(const uint8_t *level0, int width, int height, int count, Gf
             fresh = true;
         }
     }
-    // The part, out to whole blocks of the last level: the levels of a part
-    // so aligned are those of the whole texture there.
-    GfxMipRect r = changed;
-    const int align = 4 << (count - 1);
-    r.x0 = r.x0 < 0 ? 0 : r.x0 / align * align;
-    r.y0 = r.y0 < 0 ? 0 : r.y0 / align * align;
-    r.x1 = (r.x1 + align - 1) / align * align;
-    r.y1 = (r.y1 + align - 1) / align * align;
-    r.x1 = r.x1 < width ? r.x1 : width;
-    r.y1 = r.y1 < height ? r.y1 : height;
+    GfxMipRect r = Gfx_MipPartOf(changed, width, height, count);
     // New levels are blocks of zero bytes: the levels of a level 0 of zero
     // bytes (EncodeBC3Block). Where level 0 is zero outside the part (an
     // atlas that is new), the part is enough; else all of it is made.
