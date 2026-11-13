@@ -345,6 +345,12 @@ GfxVertex *Gfx_LockVertexBuffer(GfxVertexBuffer *buffer);
    unlock: the draws of the other vertices are not those of a buffer that
    changed. Returns the whole buffer, as Gfx_LockVertexBuffer does. */
 GfxVertex *Gfx_LockVertexBufferRange(GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount);
+/* Copies vertexCount vertices into the buffer from firstVertex, as a
+   Gfx_LockVertexBufferRange, a copy and an unlock do. The renderer sees what
+   changes: vertices that the buffer has already change nothing, and
+   positions that stay keep what it knows of them. */
+void Gfx_WriteVertexBufferRange(GfxVertexBuffer *buffer, DWORD firstVertex, const GfxVertex *vertices,
+                                DWORD vertexCount);
 void Gfx_UnlockVertexBuffer(GfxVertexBuffer *buffer);
 
 void Gfx_DrawPrimitiveVB(int primitive, GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount);

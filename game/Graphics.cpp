@@ -6686,7 +6686,6 @@ void Graphics_ProjectMeshVertexMidpoints(Mesh *pMesh)
     GfxMatrix view;
     float m11, m21, m31, m12, m22, m32;
     float *pVertexData = (float *)pMesh->pVertexData;
-    void *pVertices;
     int i;
     int j;
 
@@ -6735,11 +6734,10 @@ void Graphics_ProjectMeshVertexMidpoints(Mesh *pMesh)
             }
         }
     }
-    // PORT: a lock of the vertices of this mesh alone (see Mesh_RefreshVertices).
-    pVertices = Gfx_LockVertexBufferRange(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex],
-                                          (DWORD)pMesh->vertexOffset, (DWORD)pMesh->field_0x10);
-    memcpy((BYTE *)pVertices + pMesh->vertexOffset * 0x30, pMesh->pVertexData, pMesh->field_0x10 * 0x30);
-    Gfx_UnlockVertexBuffer(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex]);
+    // PORT: a write of the vertices of this mesh alone (see Mesh_RefreshVertices).
+    Gfx_WriteVertexBufferRange(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex],
+                               (DWORD)pMesh->vertexOffset, (const GfxVertex *)pMesh->pVertexData,
+                               (DWORD)pMesh->field_0x10);
 }
 
 // Draws the triangles of a mesh in contiguous texture runs, setting the

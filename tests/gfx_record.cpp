@@ -986,6 +986,36 @@ int main()
         Gfx_UnlockVertexBuffer(shared);
         Gfx_Present(FALSE);
 
+        // The game gives the vertices of a mesh to the renderer
+        // (Gfx_WriteVertexBufferRange). Vertices that the buffer has already
+        // change nothing: the draws refer to the buffer.
+        for (int i = 0; i < 3; i++) {
+            drawBoth();
+            Gfx_Present(FALSE);
+        }
+        REQUIRE(Draws() == 2 && !Draw(0).snapshot && !Draw(1).snapshot);
+        std::vector<GfxVertex> meshA(shared->vertices.begin(), shared->vertices.begin() + 40);
+        const uint32_t serial = shared->lockSerial;
+        Gfx_WriteVertexBufferRange(shared, 0, meshA.data(), 40);
+        drawBoth();
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 2 && !Draw(0).snapshot && s_frame.snapshots.empty() && shared->lockSerial == serial);
+        // New colours: the draws of the mesh take the snapshot, and its box
+        // stays (no range lock number: the positions are the same).
+        meshA[7].diffuse = 0x11223344;
+        Gfx_WriteVertexBufferRange(shared, 0, meshA.data(), 40);
+        REQUIRE(shared->vertices[7].diffuse == 0x11223344 && shared->lockSerial == serial && shared->version == version);
+        drawBoth();
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 2 && Draw(0).snapshot && !Draw(1).snapshot && Draw(0).boxHigh[0] == 0.9f);
+        // A new position: the box is measured again.
+        meshA[3].x = 0.7f;
+        Gfx_WriteVertexBufferRange(shared, 0, meshA.data(), 40);
+        REQUIRE(shared->lockSerial == serial + 1);
+        drawBoth();
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 2 && Draw(0).snapshot && Draw(0).boxHigh[0] == 0.7f);
+
         // A buffer that was locked whole a short time ago has no parts, and
         // an executor that takes no joined draws has none: a lock of all.
         Gfx_LockVertexBuffer(shared);
@@ -1000,6 +1030,9 @@ int main()
         Gfx_LockVertexBufferRange(shared, 0, 40);
         Gfx_UnlockVertexBuffer(shared);
         REQUIRE(shared->version == whole + 2);
+        meshA[9].diffuse = 5;
+        Gfx_WriteVertexBufferRange(shared, 0, meshA.data(), 40);
+        REQUIRE(shared->version == whole + 3 && shared->vertices[9].diffuse == 5);
         s_joins = true;
         Gfx_DestroyVertexBuffer(shared);
         Gfx_SetTransform(GFX_TRANSFORM_VIEW, &view);
