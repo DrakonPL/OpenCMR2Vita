@@ -1,4 +1,5 @@
 #include "SavedGame.h"
+#include "port/diagnostics.h"
 #include "port/sys.h"
 #include "ChampionshipDriver.h"
 #include "ProfileEventResults.h"
@@ -6131,6 +6132,9 @@ void RallyData_UpdateViewFrameAndDebugOverlay(CallbackStateMachine *param1, int 
             CGame::SetGameInputFocusState(0);
         }
     }
+    // PORT: the parts of the update are named for the frame timing of dev
+    // builds (Diagnostics::Observer::ScenePart).
+    Diagnostics::ScenePartScope scenePart(Diagnostics::SCENE_PART_VIEW);
     pOrder = Car_GetOrder();
     orderCount = Car_GetOrderCount();
     RallyData_ClearStageDepthBuffer();
@@ -6153,8 +6157,10 @@ void RallyData_UpdateViewFrameAndDebugOverlay(CallbackStateMachine *param1, int 
     View_SelectVisibleCars(maskedView, (short *)g_viewScreenRect);
     Replay_HideFinishedGhostCarNodes();
     StageObject_PositionRearViewLightNodes(View_GetActiveCameraFlags(maskedView));
+    Diagnostics::ScenePart(Diagnostics::SCENE_PART_PREPARE);
     Game_PrepareScene(RallyData_GetChallengeRenderState(), g_viewNodes[maskedView],
                       g_viewScreenRect, maskedView);
+    Diagnostics::ScenePart(Diagnostics::SCENE_PART_CAR_SHADOWS);
     if (g_viewShadowStreamed == 0) {
         g_viewShadowStreamed = 1;
         Scene_BeginShadowBatch();
@@ -6182,6 +6188,7 @@ void RallyData_UpdateViewFrameAndDebugOverlay(CallbackStateMachine *param1, int 
         }
         Scene_EndShadowBatch();
     }
+    Diagnostics::ScenePart(Diagnostics::SCENE_PART_REFLECTIONS);
     StageObject_RebuildOrderedWheelVisibility();
     if (CGameInfo::GetGameModeOptionBit19() != 0) {
         for (i = 0; i < 7; i++) {
@@ -6238,6 +6245,7 @@ void RallyData_UpdateViewFrameAndDebugOverlay(CallbackStateMachine *param1, int 
         StageObject_ResetCarNodeViewFlags(pCar);
         CarPart_ApplyHiddenStates(pCar);
     }
+    Diagnostics::ScenePart(Diagnostics::SCENE_PART_VIEW);
     Graphics_SetShadowGeometryState(!CGameInfo::IsRecordFlagSet(0xf));
     View_SetPlayerProjection(param2);
     if ((g_pGraphics->field913_0x3bc & 4) != 0) {
@@ -6307,6 +6315,7 @@ void RallyData_UpdateViewFrameAndDebugOverlay(CallbackStateMachine *param1, int 
         return;
     if ((BYTE)RallyData_IsChampionshipFinalStage() != 0)
         return;
+    Diagnostics::ScenePart(Diagnostics::SCENE_PART_HUD);
     if ((BYTE)RallyDataState() == 1 && param3 != 0) {
         // PORT: the HUD laid out for the screen, element by element.
         Hud_BeginView(maskedView);

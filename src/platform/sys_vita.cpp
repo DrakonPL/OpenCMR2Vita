@@ -459,6 +459,13 @@ void SysVita_FramePresented(void)
                     p.partMicros[Diagnostics::SCENE_PART_BILLBOARDS] / perFrame,
                     p.partMicros[Diagnostics::SCENE_PART_NODES] / perFrame,
                     p.partMicros[Diagnostics::SCENE_PART_LAYERS] / perFrame);
+        if (parts > 0)
+            Sys_Log("heartbeat: view parts ms: view %.2f, prepare %.2f, car shadows %.2f, reflections %.2f, hud %.2f",
+                    p.partMicros[Diagnostics::SCENE_PART_VIEW] / perFrame,
+                    p.partMicros[Diagnostics::SCENE_PART_PREPARE] / perFrame,
+                    p.partMicros[Diagnostics::SCENE_PART_CAR_SHADOWS] / perFrame,
+                    p.partMicros[Diagnostics::SCENE_PART_REFLECTIONS] / perFrame,
+                    p.partMicros[Diagnostics::SCENE_PART_HUD] / perFrame);
     }
     s_frameParts.Reset();
     periodStart = now;

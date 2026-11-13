@@ -181,8 +181,9 @@ struct GfxExecutor {
     virtual void DestroyVertexBuffer(GfxVertexBuffer *) {}
     // Whether the recorder joins consecutive draws of one state from the
     // frame's vertex data into one command (a run of sprites or lines),
-    // records small 3D draws in world space, and starts no new state for a
-    // new texture alone (GfxCommand::textures).
+    // records small 3D draws in world space, starts no new state for a new
+    // texture alone (GfxCommand::textures), and draws small quads from an
+    // atlas of their textures.
     virtual bool JoinsDraws() const { return false; }
     // Brings a render target's pixels back into its CPU copy (for locks).
     virtual void ReadTexture(GfxTexture *texture) = 0;

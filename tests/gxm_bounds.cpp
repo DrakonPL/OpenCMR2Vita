@@ -79,6 +79,12 @@ int main()
     const float halfDiagonal = 0.5f * sqrtf(6 * 6 + 8 * 8 + 7 * 7) * 2.0f;
     REQUIRE(bound <= cornerMax + halfDiagonal);
 
+    // The farthest vertex itself: exact, and not above the bound of the box.
+    REQUIRE(Near(Gxm_FarthestEyeDistance(vertices, sizeof(Vertex), 4, turned), farthest));
+    REQUIRE(Gxm_FarthestEyeDistance(vertices, sizeof(Vertex), 4, turned) <= bound * 1.0001f);
+    REQUIRE(Near(Gxm_FarthestEyeDistance(vertices, sizeof(Vertex), 4, identity), sqrtf(4 + 36 + 1)));
+    REQUIRE(Near(Gxm_FarthestEyeDistance(&vertices[1], sizeof(Vertex), 1, away), sqrtf(16 + 105 * 105)));
+
     printf("gxm_bounds: ok\n");
     return 0;
 }
