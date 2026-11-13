@@ -11,6 +11,7 @@
 #include "render/gxm_alpha.h"
 #include "render/gxm_bounds.h"
 #include "render/gxm_dialog.h"
+#include "render/gxm_fragment_uniforms.h"
 #include "render/gxm_readback.h"
 #include "render/gxm_textures.h"
 #include "render/gxm_vertex_uniforms.h"
@@ -45,13 +46,7 @@ using namespace GfxShared;
 constexpr int kVariantCount = (int)(sizeof(kGxmFragmentVariants) / sizeof(kGxmFragmentVariants[0]));
 constexpr unsigned kIdentityIndices = 65536;    // a non-indexed draw indexes through these
 constexpr size_t kLoggedUnknownKeys = 64;    // different missing variants logged, at most
-// A frame with no backdrop copy does not fade: the range starts beyond any eye
-// distance. The start and the end are different: smoothstep with equal edges
-// divides by zero, and on the device each faded pixel then showed the
-// backdrop.
-constexpr float kNoFadeStart = 1e18f;
 constexpr uint64_t kFadeKeyBit = 1ull << 32;    // the distance fade of a fragment key (shader_key.h)
-constexpr float kNoFadeEnd = 2e18f;
 // Dev builds time the backdrop copy once in this many frames (it waits for
 // the GPU before and after it).
 constexpr unsigned kBackdropTimingFrames = 600;
@@ -120,47 +115,6 @@ bool Check(const char *call, int err)
     return err >= 0;
 }
 
-// The rows of fu[] in the fixed_f variants (shaders/cg/uniforms.h). fade:
-// the frame has its backdrop copy.
-void FillFragmentUniforms(const GfxDrawState &s, int targetW, int targetH, bool fade, float u[FU_ROWS][4])
-{
-    memset(u, 0, sizeof(float) * 4 * FU_ROWS);
-    for (int i = 0; i < 2; i++) {
-        const GfxStageState &stage = s.stages[i];
-        const int first = i == 0 ? FU_STAGE0_SOURCE : FU_STAGE1_SOURCE;
-        const int args[4] = { stage.colorArg1, stage.colorArg2, stage.alphaArg1, stage.alphaArg2 };
-        for (int k = 0; k < 4; k++) {
-            const int source = args[k] & 0xf;
-            u[first][k] = (float)(source <= GFX_TA_SPECULAR ? source : GFX_TA_CURRENT);
-            u[first + 1][k] = (args[k] & GFX_TA_COMPLEMENT) ? 1.0f : 0.0f;
-            u[first + 2][k] = (args[k] & GFX_TA_ALPHAREPLICATE) ? 1.0f : 0.0f;
-        }
-        // The texture drawn, and the original a vector icon also reads.
-        const GfxTexture *drawn = Gfx_DrawnTexture(stage.texture);
-        float *size = u[i == 0 ? FU_TEX_SIZE0 : FU_TEX_SIZE1];
-        if (drawn != nullptr) {
-            size[0] = (float)drawn->width;
-            size[1] = (float)drawn->height;
-            size[2] = (float)stage.texture->width;
-            size[3] = (float)stage.texture->height;
-        }
-    }
-    Color(s.textureFactor, u[FU_TEXTURE_FACTOR]);
-    u[FU_ALPHA_TEST][0] = (float)s.alphaFunc;
-    u[FU_ALPHA_TEST][1] = (float)(s.alphaRef & 0xff);
-    u[FU_ALPHA_TEST][2] = Gfx_AlphaThreshold(s);
-    Color(s.fogColor, u[FU_FOG_COLOR]);
-    u[FU_FOG_PARAMS][0] = s.fogStart;
-    u[FU_FOG_PARAMS][1] = s.fogEnd;
-    memcpy(u[FU_BUMP_MATRIX], s.stages[0].bumpMat, sizeof(float) * 4);
-    u[FU_BUMP_LUMINANCE][0] = s.stages[0].bumpLumScale;
-    u[FU_BUMP_LUMINANCE][1] = s.stages[0].bumpLumOffset;
-    u[FU_DISTANCE_FADE][0] = fade ? s.fadeStart : kNoFadeStart;
-    u[FU_DISTANCE_FADE][1] = fade ? s.fadeEnd : kNoFadeEnd;
-    u[FU_TARGET][0] = targetW ? 1.0f / targetW : 0.0f;
-    u[FU_TARGET][1] = targetH ? 1.0f / targetH : 0.0f;
-}
-
 // What the executor finds out about the vertices of a 3D draw from their CPU
 // copy: their box, and the least alpha of their two colours.
 struct DrawRange {
@@ -219,12 +173,21 @@ struct Bound {
     const GxmTexture *textures[GXM_TEXTURE_UNITS] = {};
     uint32_t samplers[GXM_TEXTURE_UNITS] = {};
     unsigned generations[GXM_TEXTURE_UNITS] = {};
+    // The default uniform buffers of the set programs, as a draw reserved and
+    // filled them. They stay for the draws that follow: a draw reserves a
+    // buffer again only when its program or its rows change. A new scene
+    // starts with none.
+    bool vertexUniforms = false, fragmentUniforms = false;
+    unsigned vertexVersion = 0, vertexRows = 0;     // a 3D draw: the version and the rows of the vertex uniforms
+    float target[2] = {};                           // a 2D draw: the screen size
+    float fragment[FU_ROWS][4] = {};                // the rows of the fragment program
 };
 
 struct Stats {
     unsigned draws = 0, misses = 0, vertexFills = 0, textureBinds = 0, dropped = 0, depthPasses = 0;
     unsigned fadeDraws = 0, nearDraws = 0;  // draws of a key with the fade: with it, and too near for it
     unsigned depthSkipped = 0;              // blended draws whose alpha test passes for each pixel: no depth pass
+    unsigned vertexUploads = 0, fragmentUploads = 0;    // default uniform buffers reserved and filled
 };
 
 // The frame time probe of dev builds. A tap on the front touch screen starts
@@ -250,15 +213,17 @@ struct Stats {
 //   profile           normal, with the time of each step of a 3D draw (and of
 //                     an Execute before its draws) summed: a second line
 //                     gives them for a frame
+//   uniforms always   each pass reserves and fills its uniform buffers, also
+//                     where those of the pass before are still right
 // Each line also has the CPU time of an Execute up to the present: the cost
 // of the draw calls without the wait for the GPU.
 enum ProbeMode {
     PROBE_OFF, PROBE_NORMAL, PROBE_QUARTER, PROBE_TILE, PROBE_NO_3D, PROBE_NO_DEPTH_PASS, PROBE_GENERAL,
-    PROBE_FADE_ALWAYS, PROBE_DEPTH_PASS_ALWAYS, PROBE_LOOKUP_ONLY, PROBE_PROFILE, PROBE_END
+    PROBE_FADE_ALWAYS, PROBE_DEPTH_PASS_ALWAYS, PROBE_LOOKUP_ONLY, PROBE_PROFILE, PROBE_UNIFORMS_ALWAYS, PROBE_END
 };
 const char *const kProbeNames[PROBE_END] = { "off",         "normal",        "quarter", "tile",
                                              "no 3D",       "no depth pass", "general", "fade always",
-                                             "depth pass always", "lookup only", "profile" };
+                                             "depth pass always", "lookup only", "profile", "uniforms always" };
 
 // The steps the profile mode times: an Execute before its draws, then the
 // steps of a 3D draw in Draw's order.
@@ -349,9 +314,15 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     int sceneFace = 0;                          // a cube target: its face
     Bound bound;
     // The vertex uniforms last filled: for the state and the target size.
+    // The version goes up when a row changes.
     const GfxDrawState *vertexUniformState = nullptr;
     int vertexUniformW = 0, vertexUniformH = 0;
+    unsigned vertexUniformVersion = 1;
     float vertexUniforms[VU_ROWS][4];
+    // Whether a reserved uniform buffer serves the draws that follow. A draw
+    // that fails with a kept buffer ends this: then each pass reserves its
+    // buffers, as GXM always permits.
+    bool keepUniforms = true;
     bool loggedSplit = false, loggedRing = false, loggedPrimitive = false, loggedStaticFull = false;
 
     // Textures made or destroyed in this frame; in an earlier one, not logged yet.
@@ -720,10 +691,12 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         if (v != bound.vertexProgram) {
             sceGxmSetVertexProgram(context, v);
             bound.vertexProgram = v;
+            bound.vertexUniforms = false;
         }
         if (f != bound.fragmentProgram) {
             sceGxmSetFragmentProgram(context, f);
             bound.fragmentProgram = f;
+            bound.fragmentUniforms = false;
         }
     }
 
@@ -905,6 +878,10 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         }
     }
 
+    // Each draw costs CPU time here: a run of the game's sprites or lines
+    // comes as one draw.
+    bool JoinsDraws() const override { return true; }
+
     void DestroyVertexBuffer(GfxVertexBuffer *b) override
     {
         GxmVertexBuffer *g = (GxmVertexBuffer *)b->gpu;
@@ -973,6 +950,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         Color(c.clearColor, rgba);
         sceGxmReserveFragmentDefaultUniformBuffer(context, &buffer);
         sceGxmSetUniformDataF(buffer, clearColorParam, 0, 4, rgba);
+        bound.vertexUniforms = bound.fragmentUniforms = false;
         Check("sceGxmDraw(clear)", sceGxmDraw(context, SCE_GXM_PRIMITIVE_TRIANGLE_STRIP, SCE_GXM_INDEX_FORMAT_U16,
                                               identityIndices, 4));
     }
@@ -1074,14 +1052,18 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         // The vertex uniforms of the state: all rows at first, then only the
         // rows that differ from the 3D draw before.
         if (!c.transformed && (vertexUniformState != &s || vertexUniformW != targetW || vertexUniformH != targetH)) {
+            bool changed = true;
             if (vertexUniformState == nullptr || vertexUniformW != targetW || vertexUniformH != targetH)
                 Gxm_FillVertexUniforms(s, viewport, vertexUniforms);
             else
-                Gxm_UpdateVertexUniforms(*vertexUniformState, s, viewport, vertexUniforms);
+                changed = Gxm_UpdateVertexUniforms(*vertexUniformState, s, viewport, vertexUniforms);
             vertexUniformState = &s;
             vertexUniformW = targetW;
             vertexUniformH = targetH;
-            stats.vertexFills++;
+            if (changed) {
+                vertexUniformVersion++;
+                stats.vertexFills++;
+            }
         }
         step(PROFILE_STATE);
         uint64_t key = Gfx_FragmentKey(s, backBuffer && !c.transformed);
@@ -1177,30 +1159,61 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         auto pass = [&](int index, SceGxmFragmentProgram *program, SceGxmDepthFunc func, bool depthWrite) {
             SetPrograms(c.transformed ? vertexTL : vertex3d, program);
             SetDepthAndCull(func, depthWrite, CullMode(s.cull));
-            // The default uniform buffers last one draw: reserved and filled
-            // each time, after the programs are set.
+            // A default uniform buffer stays reserved and filled for the
+            // draws that follow, while its program is set. Thus a pass
+            // reserves and fills a buffer only when the program or a row is
+            // new: most draws differ from the draw before only in their
+            // textures.
+            const bool always = probe.mode == PROBE_UNIFORMS_ALWAYS || !keepUniforms;
+            const unsigned uploads = stats.vertexUploads + stats.fragmentUploads;
             void *buffer;
-            sceGxmReserveVertexDefaultUniformBuffer(context, &buffer);
             if (c.transformed) {
                 // Pre-transformed vertices are in pixels of the game's screen.
                 const float target[4] = { (float)(scaled ? s.screenW : targetW),
                                           (float)(scaled ? s.screenH : targetH), 0.0f, 0.0f };
-                sceGxmSetUniformDataF(buffer, targetParam, 0, 4, target);
+                if (always || !bound.vertexUniforms || bound.target[0] != target[0] || bound.target[1] != target[1]) {
+                    sceGxmReserveVertexDefaultUniformBuffer(context, &buffer);
+                    sceGxmSetUniformDataF(buffer, targetParam, 0, 4, target);
+                    bound.vertexUniforms = true;
+                    bound.target[0] = target[0];
+                    bound.target[1] = target[1];
+                    stats.vertexUploads++;
+                }
             } else {
                 // A draw without lighting reads only the rows before the lights.
                 const unsigned rows = s.lighting ? vertexUniformRows : std::min<unsigned>(vertexUniformRows, VU_UNLIT_ROWS);
-                sceGxmSetUniformDataF(buffer, vertexUniformsParam, 0, rows * 4, vertexUniforms[0]);
+                if (always || !bound.vertexUniforms || bound.vertexVersion != vertexUniformVersion ||
+                    bound.vertexRows < rows) {
+                    sceGxmReserveVertexDefaultUniformBuffer(context, &buffer);
+                    sceGxmSetUniformDataF(buffer, vertexUniformsParam, 0, rows * 4, vertexUniforms[0]);
+                    bound.vertexUniforms = true;
+                    bound.vertexVersion = vertexUniformVersion;
+                    bound.vertexRows = rows;
+                    stats.vertexUploads++;
+                }
             }
             const Variant &v = variants[index];
             if (v.uniforms != nullptr) {
                 float fragmentUniforms[FU_ROWS][4];
-                FillFragmentUniforms(s, targetW, targetH, backdropCopied, fragmentUniforms);
-                sceGxmReserveFragmentDefaultUniformBuffer(context, &buffer);
-                sceGxmSetUniformDataF(buffer, v.uniforms, 0, v.uniformRows * 4, fragmentUniforms[0]);
+                Gxm_FillFragmentUniforms(s, targetW, targetH, backdropCopied, fragmentUniforms);
+                const size_t bytes = std::min<size_t>(v.uniformRows, FU_ROWS) * sizeof(fragmentUniforms[0]);
+                if (always || !bound.fragmentUniforms || memcmp(bound.fragment, fragmentUniforms, bytes) != 0) {
+                    sceGxmReserveFragmentDefaultUniformBuffer(context, &buffer);
+                    sceGxmSetUniformDataF(buffer, v.uniforms, 0, v.uniformRows * 4, fragmentUniforms[0]);
+                    bound.fragmentUniforms = true;
+                    memcpy(bound.fragment, fragmentUniforms, bytes);
+                    stats.fragmentUploads++;
+                }
             }
             BindTextures(s, kGxmFragmentVariants[index]);
             sceGxmSetVertexStream(context, 0, vertices + c.firstVertexByte);
-            Check("sceGxmDraw", sceGxmDraw(context, primitive, SCE_GXM_INDEX_FORMAT_U16, indices, count));
+            const bool kept = stats.vertexUploads + stats.fragmentUploads - uploads < (v.uniforms != nullptr ? 2u : 1u);
+            if (!Check("sceGxmDraw", sceGxmDraw(context, primitive, SCE_GXM_INDEX_FORMAT_U16, indices, count)) &&
+                kept && keepUniforms) {
+                Sys_Log("gxm: a draw with a kept uniform buffer failed: each pass reserves its buffers from here");
+                keepUniforms = false;
+                bound.vertexUniforms = bound.fragmentUniforms = false;
+            }
             stats.draws++;
             probe.draws++;
         };
@@ -1541,9 +1554,9 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         if (now - statsStart < kStatsMicros)
             return;
         Sys_Log("gxm: per s draws %u (depth passes %u, not needed %u, fade %u, near %u), patcher misses %u, "
-                "vertex fills %u, texture binds %u, dropped %u",
+                "vertex fills %u, uniform uploads %u vertex %u fragment, texture binds %u, dropped %u",
                 stats.draws, stats.depthPasses, stats.depthSkipped, stats.fadeDraws, stats.nearDraws, stats.misses,
-                stats.vertexFills, stats.textureBinds, stats.dropped);
+                stats.vertexFills, stats.vertexUploads, stats.fragmentUploads, stats.textureBinds, stats.dropped);
         stats = Stats();
         statsStart = now;
 #endif

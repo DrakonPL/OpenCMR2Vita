@@ -68,6 +68,74 @@ inline void Touch()
     s_stateDirty = true;
 }
 
+// Sets a part of the state. A value that is already set leaves the state as
+// it is recorded: the next draw then has the state of the draw before, and
+// the executor does not set it up again.
+template <typename T> inline void Set(T &field, const T &value)
+{
+    if (memcmp(&field, &value, sizeof(T)) != 0) {
+        field = value;
+        Touch();
+    }
+}
+
+// The vertices of a draw from a vertex buffer that is not drawn by reference
+// (the game locks it each frame): the range that was copied into the frame
+// last. A draw from inside that range takes the copy.
+struct CopiedRange {
+    const GfxVertexBuffer *buffer = NULL;
+    uint32_t version = 0, record = 0;
+    DWORD first = 0, count = 0;
+    uint32_t offset = 0;            // into the frame's vertex data
+};
+CopiedRange s_copied;
+
+// A draw that joins the draw before has at most this many vertices with it
+// (the indices are 16 bits wide).
+const DWORD kJoinedVertices = 4096;
+// A strip of at most this many vertices is recorded as a list, which joins.
+const DWORD kJoinedStrip = 6;
+
+// Adds a draw of vertices in the frame's data to the draw before, where the
+// executor takes joined draws (GfxExecutor::JoinsDraws) and both are lists of
+// one primitive with one state, one after the other in the frame's data. The
+// game draws each sprite and each line with a call of its own: a run of them
+// becomes one draw. The triangles keep their order.
+bool JoinDraw(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
+              DWORD indexCount)
+{
+    if (s_stateDirty || s_frame.commands.empty() || s_frame.states.empty())
+        return false;
+    if (primitive != GFX_TRIANGLELIST && primitive != GFX_LINELIST)
+        return false;
+    GfxCommand &last = s_frame.commands.back();
+    const size_t stride = transformed ? sizeof(GfxTLVertex) : sizeof(GfxVertex);
+    const DWORD corners = primitive == GFX_LINELIST ? 2 : 3;
+    if (last.type != GFX_CMD_DRAW || last.primitive != primitive || last.transformed != transformed ||
+        last.buffer != NULL || last.state != s_frame.states.size() - 1)
+        return false;
+    if ((last.firstIndex != ~0u) != (indices != NULL) || last.vertexCount + vertexCount > kJoinedVertices)
+        return false;
+    // The draw before ends the frame's data, in whole primitives.
+    if ((size_t)last.firstVertexByte + (size_t)last.vertexCount * stride != s_frame.vertices.size())
+        return false;
+    if (indices != NULL) {
+        if ((size_t)last.firstIndex + last.indexCount != s_frame.indices.size() || last.indexCount % corners != 0)
+            return false;
+    } else if (last.vertexCount % corners != 0) {
+        return false;
+    }
+    s_frame.vertices.insert(s_frame.vertices.end(), (const uint8_t *)vertices,
+                            (const uint8_t *)vertices + vertexCount * stride);
+    if (indices != NULL) {
+        for (DWORD i = 0; i < indexCount; i++)
+            s_frame.indices.push_back((uint16_t)(indices[i] + last.vertexCount));
+        last.indexCount += indexCount;
+    }
+    last.vertexCount += vertexCount;
+    return true;
+}
+
 uint32_t RecordState()
 {
     if (s_stateDirty || s_frame.states.empty()) {
@@ -159,6 +227,9 @@ static uint32_t TraceHash(uint32_t h, const void *data, size_t size)
     return h;
 }
 
+void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
+                   DWORD indexCount, GfxVertexBuffer *buffer, DWORD firstVertex);
+
 // Records a draw; fans become lists (SDL_GPU has no fans). With a buffer,
 // the vertices are firstVertex.. of that buffer.
 void RecordDraw(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
@@ -203,7 +274,30 @@ void RecordDraw(int primitive, bool transformed, const void *vertices, DWORD ver
         if (indexCount == 0)
             return;
     }
+    // A short strip (a sprite) as a list: lists join. The odd triangles of a
+    // strip have their first two corners in the other order.
+    WORD strip[(kJoinedStrip - 2) * 3];
+    if (buffer == NULL && s_executor->JoinsDraws()) {
+        if (primitive == GFX_TRIANGLESTRIP && indices == NULL && vertexCount >= 3 && vertexCount <= kJoinedStrip) {
+            indexCount = 0;
+            for (DWORD i = 0; i + 2 < vertexCount; i++) {
+                strip[indexCount++] = (WORD)(i + (i & 1));
+                strip[indexCount++] = (WORD)(i + 1 - (i & 1));
+                strip[indexCount++] = (WORD)(i + 2);
+            }
+            primitive = GFX_TRIANGLELIST;
+            indices = strip;
+        }
+        if (JoinDraw(primitive, transformed, vertices, vertexCount, indices, indexCount))
+            return;
+    }
+    RecordNewDraw(primitive, transformed, vertices, vertexCount, indices, indexCount, buffer, firstVertex);
+}
 
+// Records a draw as a command of its own.
+void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
+                   DWORD indexCount, GfxVertexBuffer *buffer, DWORD firstVertex)
+{
     GfxCommand cmd = {};
     cmd.type = GFX_CMD_DRAW;
     cmd.primitive = primitive;
@@ -216,9 +310,23 @@ void RecordDraw(int primitive, bool transformed, const void *vertices, DWORD ver
             buffer->referencedRecord = s_record;
             s_frame.buffers.push_back(buffer);
         }
+    } else if (buffer != NULL && s_copied.buffer == buffer && s_copied.version == buffer->version &&
+               s_copied.record == s_record && firstVertex >= s_copied.first &&
+               firstVertex + vertexCount <= s_copied.first + s_copied.count) {
+        // The game draws a mesh in parts, each with the vertex range of the
+        // mesh: one copy serves them.
+        cmd.firstVertexByte = s_copied.offset + (firstVertex - s_copied.first) * (uint32_t)sizeof(GfxVertex);
     } else {
         size_t stride = transformed ? sizeof(GfxTLVertex) : sizeof(GfxVertex);
         cmd.firstVertexByte = AppendVertices(vertices, vertexCount * stride, stride);
+        if (buffer != NULL) {
+            s_copied.buffer = buffer;
+            s_copied.version = buffer->version;
+            s_copied.record = s_record;
+            s_copied.first = firstVertex;
+            s_copied.count = vertexCount;
+            s_copied.offset = cmd.firstVertexByte;
+        }
     }
     if (indices != NULL) {
         cmd.firstIndex = (uint32_t)s_frame.indices.size();
@@ -553,8 +661,7 @@ extern "C" void Gfx_Clear(DWORD flags, DWORD color, float z)
 
 extern "C" void Gfx_SetViewport(const GfxViewport *viewport)
 {
-    s_state.viewport = *viewport;
-    Touch();
+    Set(s_state.viewport, *viewport);
 }
 
 extern "C" void Gfx_SetVirtualScreen(int width, int height)
@@ -612,9 +719,8 @@ extern "C" void Gfx_CaptureBackdrop(void)
 
 extern "C" void Gfx_SetDistanceFade(float start, float end)
 {
-    s_state.fadeStart = start;
-    s_state.fadeEnd = end;
-    Touch();
+    Set(s_state.fadeStart, start);
+    Set(s_state.fadeEnd, end);
 }
 
 // ---- fixed-function state --------------------------------------------------------------
@@ -622,13 +728,12 @@ extern "C" void Gfx_SetDistanceFade(float start, float end)
 extern "C" void Gfx_SetTransform(int type, const GfxMatrix *matrix)
 {
     switch (type) {
-    case GFX_TRANSFORM_WORLD: s_state.world = *matrix; break;
-    case GFX_TRANSFORM_VIEW: s_state.view = *matrix; break;
-    case GFX_TRANSFORM_PROJECTION: s_state.projection = *matrix; break;
-    case GFX_TRANSFORM_TEXTURE0: s_state.texture[0] = *matrix; break;
-    case GFX_TRANSFORM_TEXTURE1: s_state.texture[1] = *matrix; break;
+    case GFX_TRANSFORM_WORLD: Set(s_state.world, *matrix); break;
+    case GFX_TRANSFORM_VIEW: Set(s_state.view, *matrix); break;
+    case GFX_TRANSFORM_PROJECTION: Set(s_state.projection, *matrix); break;
+    case GFX_TRANSFORM_TEXTURE0: Set(s_state.texture[0], *matrix); break;
+    case GFX_TRANSFORM_TEXTURE1: Set(s_state.texture[1], *matrix); break;
     }
-    Touch();
 }
 
 extern "C" void Gfx_GetTransform(int type, GfxMatrix *matrix)
@@ -645,10 +750,8 @@ extern "C" void Gfx_GetTransform(int type, GfxMatrix *matrix)
 
 extern "C" void Gfx_SetLight(int index, const GfxLight *light)
 {
-    if (index >= 0 && index < 8) {
-        s_state.lights[index] = *light;
-        Touch();
-    }
+    if (index >= 0 && index < 8)
+        Set(s_state.lights[index], *light);
 }
 
 extern "C" void Gfx_GetLight(int index, GfxLight *light)
@@ -659,23 +762,19 @@ extern "C" void Gfx_GetLight(int index, GfxLight *light)
 
 extern "C" void Gfx_EnableLight(int index, BOOL enable)
 {
-    if (index >= 0 && index < 8) {
-        s_state.lightEnabled[index] = enable != 0;
-        Touch();
-    }
+    if (index >= 0 && index < 8)
+        Set<bool>(s_state.lightEnabled[index], enable != 0);
 }
 
 extern "C" void Gfx_SetMaterial(const GfxMaterial *material)
 {
-    s_state.material = *material;
-    Touch();
+    Set(s_state.material, *material);
 }
 
 #define SETTER(name, type, field)       \
     extern "C" void name(type value)    \
     {                                   \
-        s_state.field = value;          \
-        Touch();                        \
+        Set<decltype(s_state.field)>(s_state.field, value); \
     }
 
 SETTER(Gfx_SetAmbient, DWORD, ambient)
@@ -699,8 +798,7 @@ SETTER(Gfx_SetTextureFactor, DWORD, textureFactor)
 #define BOOL_SETTER(name, field)        \
     extern "C" void name(BOOL value)    \
     {                                   \
-        s_state.field = value != 0;     \
-        Touch();                        \
+        Set<bool>(s_state.field, value != 0); \
     }
 
 BOOL_SETTER(Gfx_SetLighting, lighting)
@@ -718,10 +816,8 @@ BOOL_SETTER(Gfx_SetAlphaTest, alphaTest)
     extern "C" void name(int stage, type value)     \
     {                                               \
         GfxStageState *s = Stage(stage);            \
-        if (s != NULL) {                            \
-            s->field = value;                       \
-            Touch();                                \
-        }                                           \
+        if (s != NULL)                              \
+            Set<decltype(s->field)>(s->field, value); \
     }
 
 STAGE_SETTER(Gfx_SetTexture, GfxTexture *, texture)
@@ -744,10 +840,8 @@ STAGE_SETTER(Gfx_SetStageBumpEnvLOffset, float, bumpLumOffset)
 extern "C" void Gfx_SetStageBumpEnvMat(int stage, int index, float value)
 {
     GfxStageState *s = Stage(stage);
-    if (s != NULL && index >= 0 && index < 4) {
-        s->bumpMat[index] = value;
-        Touch();
-    }
+    if (s != NULL && index >= 0 && index < 4)
+        Set(s->bumpMat[index], value);
 }
 
 // ---- geometry ----------------------------------------------------------------------
@@ -770,6 +864,8 @@ extern "C" void Gfx_DestroyVertexBuffer(GfxVertexBuffer *buffer)
         Flush();
     if (s_executor != NULL)
         s_executor->DestroyVertexBuffer(buffer);
+    if (s_copied.buffer == buffer)
+        s_copied = CopiedRange();
     TraceVertexBuffer(buffer, -1);
     delete buffer;
 }

@@ -1,6 +1,8 @@
 // The vertex uniforms of the GXM executor (src/render/gxm_vertex_uniforms.h):
 // an update from the state before gives the rows of a full fill, through a
-// chain of states that each change one part. No GXM.
+// chain of states that each change one part. The update tells whether a row
+// changed: a state that differs only in what the vertex program does not read
+// (a texture, the blending) changes none. No GXM.
 
 #include "render/gxm_vertex_uniforms.h"
 
@@ -22,16 +24,21 @@ GfxMatrix Matrix(float seed)
 
 float s_updated[VU_ROWS][4];    // the rows the chain of updates gives
 GfxDrawState s_before;          // the state they are of
+bool s_changed;                 // what the last update returned
 
 // Updates the rows to state and checks them against a full fill: the rows
-// before the lights always, the light rows with lighting.
+// before the lights always, the light rows with lighting. An update that
+// reports no change leaves those rows as they were.
 bool Step(const GfxDrawState &state, const GfxViewport &viewport)
 {
-    float filled[VU_ROWS][4];
+    float filled[VU_ROWS][4], before[VU_ROWS][4];
+    memcpy(before, s_updated, sizeof(before));
     Gxm_FillVertexUniforms(state, viewport, filled);
-    Gxm_UpdateVertexUniforms(s_before, state, viewport, s_updated);
+    s_changed = Gxm_UpdateVertexUniforms(s_before, state, viewport, s_updated);
     s_before = state;
     const int rows = state.lighting ? VU_ROWS : VU_UNLIT_ROWS;
+    if (!s_changed && memcmp(before, s_updated, sizeof(float) * 4 * rows) != 0)
+        return false;
     return memcmp(filled, s_updated, sizeof(float) * 4 * rows) == 0;
 }
 
@@ -59,16 +66,34 @@ int main()
 
     // Each part alone, without lighting.
     state.world = Matrix(4.0f);
-    REQUIRE(Step(state, viewport));
+    REQUIRE(Step(state, viewport) && s_changed);
     state.view = Matrix(5.0f);
-    REQUIRE(Step(state, viewport));
+    REQUIRE(Step(state, viewport) && s_changed);
     state.projection = Matrix(6.0f);
-    REQUIRE(Step(state, viewport));
+    REQUIRE(Step(state, viewport) && s_changed);
     state.texture[1] = Matrix(7.0f);
-    REQUIRE(Step(state, viewport));
+    REQUIRE(Step(state, viewport) && s_changed);
     state.material.diffuse.a = 0.5f;
     state.material.power = 12.0f;
-    REQUIRE(Step(state, viewport));
+    REQUIRE(Step(state, viewport) && s_changed);
+    // The same state again, another texture, another blending: the vertex
+    // program reads none of them, and no row changes.
+    REQUIRE(Step(state, viewport) && !s_changed);
+    GfxTexture road{}, grass{};
+    state.stages[0].texture = &road;
+    REQUIRE(Step(state, viewport) && !s_changed);
+    state.stages[0].texture = &grass;
+    state.stages[1].texture = &road;
+    state.alphaBlend = true;
+    state.depthWrite = false;
+    state.alphaRef = 0x80;
+    REQUIRE(Step(state, viewport) && !s_changed);
+    // A light that changes without lighting changes no row that is read.
+    state.lights[1].range = 60.0f;
+    state.lightEnabled[1] = true;
+    REQUIRE(Step(state, viewport) && !s_changed);
+    state.lightEnabled[1] = false;
+    REQUIRE(Step(state, viewport) && !s_changed);
     state.ambient = 0x80402010;
     state.fog = true;
     state.fogVertexMode = GFX_FOG_LINEAR;
@@ -76,9 +101,16 @@ int main()
     state.fogEnd = 90.0f;
     state.stages[1].texCoordIndex = 0x30001;
     state.stages[0].textureTransform = GFX_TTFF_DISABLE + 2;
-    REQUIRE(Step(state, viewport));
+    REQUIRE(Step(state, viewport) && s_changed);
+    // Each of the small rows alone.
+    state.fogEnd = 120.0f;
+    REQUIRE(Step(state, viewport) && s_changed);
+    state.normalizeNormals = true;
+    REQUIRE(Step(state, viewport) && s_changed);
+    state.diffuseSource = GFX_MCS_MATERIAL;
+    REQUIRE(Step(state, viewport) && s_changed);
     viewport.width = 256;
-    REQUIRE(Step(state, viewport));
+    REQUIRE(Step(state, viewport) && s_changed);
 
     // Lighting on: the light rows become current, with the lights that are on.
     state.lighting = true;
@@ -87,10 +119,13 @@ int main()
     state.lights[2].diffuse.r = 0.75f;
     state.lights[2].direction.z = 1.0f;
     state.lights[2].theta = 0.6f;
-    REQUIRE(Step(state, viewport));
+    REQUIRE(Step(state, viewport) && s_changed);
+    // With lighting also, another texture changes no row.
+    state.stages[0].texture = &road;
+    REQUIRE(Step(state, viewport) && !s_changed);
     // A light changes, another goes on, one goes off.
     state.lights[2].diffuse.g = 0.25f;
-    REQUIRE(Step(state, viewport));
+    REQUIRE(Step(state, viewport) && s_changed);
     state.lightEnabled[5] = true;
     state.lights[5].type = 1;
     state.lights[5].position.x = 30.0f;
