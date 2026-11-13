@@ -68,6 +68,9 @@ inline void Touch()
     s_stateDirty = true;
 }
 
+const GfxMatrix &RecordedWorldOf(bool worldSpace);
+bool StateIsRecorded(bool worldSpace);
+
 // Sets a part of the state. A value that is already set leaves the state as
 // it is recorded: the next draw then has the state of the draw before, and
 // the executor does not set it up again.
@@ -93,6 +96,36 @@ CopiedRange s_copied;
 // A draw that joins the draw before has at most this many vertices with it
 // (the indices are 16 bits wide).
 const DWORD kJoinedVertices = 4096;
+// A 3D draw of at most this many vertices is recorded in world space.
+const DWORD kSmallDrawVertices = 16;
+
+// The vertices of a small 3D draw in world space, for an executor that takes
+// joined draws: positions through the world matrix, normals through its
+// upper 3x3 part (as fixed3d_v.cg does it, with the view matrix after). The
+// game draws each trackside billboard as two triangles with a world matrix
+// of its own, some 300 in a frame: in world space they have one state, and
+// the executor sets up no matrix for each. False (the draw stays as it is)
+// for a world matrix that is the identity or not affine.
+bool SmallDrawToWorld(const GfxVertex *in, DWORD count, GfxVertex *out)
+{
+    const GfxMatrix &m = s_state.world;
+    if (m._14 != 0.0f || m._24 != 0.0f || m._34 != 0.0f || m._44 != 1.0f)
+        return false;
+    if (memcmp(&m, &RecordedWorldOf(true), sizeof(m)) == 0)
+        return false;
+    for (DWORD i = 0; i < count; i++) {
+        const GfxVertex &v = in[i];
+        GfxVertex &o = out[i];
+        o = v;
+        o.x = v.x * m._11 + v.y * m._21 + v.z * m._31 + m._41;
+        o.y = v.x * m._12 + v.y * m._22 + v.z * m._32 + m._42;
+        o.z = v.x * m._13 + v.y * m._23 + v.z * m._33 + m._43;
+        o.nx = v.nx * m._11 + v.ny * m._21 + v.nz * m._31;
+        o.ny = v.nx * m._12 + v.ny * m._22 + v.nz * m._32;
+        o.nz = v.nx * m._13 + v.ny * m._23 + v.nz * m._33;
+    }
+    return true;
+}
 // A strip of at most this many vertices is recorded as a list, which joins.
 const DWORD kJoinedStrip = 6;
 
@@ -102,9 +135,9 @@ const DWORD kJoinedStrip = 6;
 // game draws each sprite and each line with a call of its own: a run of them
 // becomes one draw. The triangles keep their order.
 bool JoinDraw(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
-              DWORD indexCount)
+              DWORD indexCount, bool worldSpace)
 {
-    if (s_stateDirty || s_frame.commands.empty() || s_frame.states.empty())
+    if (!StateIsRecorded(worldSpace) || s_frame.commands.empty())
         return false;
     if (primitive != GFX_TRIANGLELIST && primitive != GFX_LINELIST)
         return false;
@@ -136,10 +169,34 @@ bool JoinDraw(int primitive, bool transformed, const void *vertices, DWORD verte
     return true;
 }
 
-uint32_t RecordState()
+// The world matrix of the state recorded last. A change of the world matrix
+// alone does not make the state dirty: RecordState compares the matrix. A
+// small draw is recorded in world space, with the identity as its world
+// matrix (SmallDrawToWorld): a run of them with different world matrices has
+// one state.
+GfxMatrix s_recordedWorld;
+
+const GfxMatrix kIdentityMatrix = { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                                    0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f };
+
+// worldSpace: the draw's vertices are in world space.
+const GfxMatrix &RecordedWorldOf(bool worldSpace)
 {
-    if (s_stateDirty || s_frame.states.empty()) {
+    return worldSpace ? kIdentityMatrix : s_state.world;
+}
+
+bool StateIsRecorded(bool worldSpace)
+{
+    return !s_stateDirty && !s_frame.states.empty() &&
+           memcmp(&RecordedWorldOf(worldSpace), &s_recordedWorld, sizeof(GfxMatrix)) == 0;
+}
+
+uint32_t RecordState(bool worldSpace = false)
+{
+    if (!StateIsRecorded(worldSpace)) {
         s_frame.states.push_back(s_state);
+        s_frame.states.back().world = RecordedWorldOf(worldSpace);
+        s_recordedWorld = RecordedWorldOf(worldSpace);
         s_stateDirty = false;
     }
     return (uint32_t)s_frame.states.size() - 1;
@@ -228,7 +285,7 @@ static uint32_t TraceHash(uint32_t h, const void *data, size_t size)
 }
 
 void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
-                   DWORD indexCount, GfxVertexBuffer *buffer, DWORD firstVertex);
+                   DWORD indexCount, GfxVertexBuffer *buffer, DWORD firstVertex, bool worldSpace);
 
 // Records a draw; fans become lists (SDL_GPU has no fans). With a buffer,
 // the vertices are firstVertex.. of that buffer.
@@ -274,10 +331,21 @@ void RecordDraw(int primitive, bool transformed, const void *vertices, DWORD ver
         if (indexCount == 0)
             return;
     }
+    const bool joins = s_executor->JoinsDraws();
+    // A small 3D draw in world space, from the frame's data.
+    GfxVertex small[kSmallDrawVertices];
+    bool worldSpace = false;
+    if (joins && !transformed && vertexCount <= kSmallDrawVertices &&
+        SmallDrawToWorld((const GfxVertex *)vertices, vertexCount, small)) {
+        vertices = small;
+        buffer = NULL;
+        firstVertex = 0;
+        worldSpace = true;
+    }
     // A short strip (a sprite) as a list: lists join. The odd triangles of a
     // strip have their first two corners in the other order.
     WORD strip[(kJoinedStrip - 2) * 3];
-    if (buffer == NULL && s_executor->JoinsDraws()) {
+    if (buffer == NULL && joins) {
         if (primitive == GFX_TRIANGLESTRIP && indices == NULL && vertexCount >= 3 && vertexCount <= kJoinedStrip) {
             indexCount = 0;
             for (DWORD i = 0; i + 2 < vertexCount; i++) {
@@ -288,15 +356,16 @@ void RecordDraw(int primitive, bool transformed, const void *vertices, DWORD ver
             primitive = GFX_TRIANGLELIST;
             indices = strip;
         }
-        if (JoinDraw(primitive, transformed, vertices, vertexCount, indices, indexCount))
+        if (JoinDraw(primitive, transformed, vertices, vertexCount, indices, indexCount, worldSpace))
             return;
     }
-    RecordNewDraw(primitive, transformed, vertices, vertexCount, indices, indexCount, buffer, firstVertex);
+    RecordNewDraw(primitive, transformed, vertices, vertexCount, indices, indexCount, buffer, firstVertex, worldSpace);
 }
 
-// Records a draw as a command of its own.
+// Records a draw as a command of its own. worldSpace: its vertices are in
+// world space (SmallDrawToWorld).
 void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
-                   DWORD indexCount, GfxVertexBuffer *buffer, DWORD firstVertex)
+                   DWORD indexCount, GfxVertexBuffer *buffer, DWORD firstVertex, bool worldSpace)
 {
     GfxCommand cmd = {};
     cmd.type = GFX_CMD_DRAW;
@@ -336,7 +405,7 @@ void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD 
         cmd.firstIndex = ~0u;
         cmd.indexCount = 0;
     }
-    cmd.state = RecordState();
+    cmd.state = RecordState(worldSpace);
     s_frame.commands.push_back(cmd);
 }
 
@@ -728,7 +797,7 @@ extern "C" void Gfx_SetDistanceFade(float start, float end)
 extern "C" void Gfx_SetTransform(int type, const GfxMatrix *matrix)
 {
     switch (type) {
-    case GFX_TRANSFORM_WORLD: Set(s_state.world, *matrix); break;
+    case GFX_TRANSFORM_WORLD: s_state.world = *matrix; break;   // RecordState compares it
     case GFX_TRANSFORM_VIEW: Set(s_state.view, *matrix); break;
     case GFX_TRANSFORM_PROJECTION: Set(s_state.projection, *matrix); break;
     case GFX_TRANSFORM_TEXTURE0: Set(s_state.texture[0], *matrix); break;
