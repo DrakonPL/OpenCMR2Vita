@@ -263,10 +263,18 @@ struct GfxExecutor {
     virtual ~GfxExecutor() {}
     virtual bool SetVideoMode(int width, int height, bool fullscreen) = 0;
     virtual void SetFullscreen(bool fullscreen) = 0;
+    // Called before each Execute, on the recorder's thread, while no Execute
+    // runs: the part of the work that reads the recorder's objects (the
+    // textures, the vertex buffers, the readback). With the threaded
+    // executor (Gfx_CreateThreadedExecutor) Execute runs on a worker thread
+    // and reads only the frame.
+    virtual void Prepare(GfxFrame &, std::vector<GfxTexture *> &, GfxReadback &, bool) {}
     // Runs the recorded commands; with present, shows the back buffer and
     // ends the frame (otherwise the next commands continue it).
     virtual void Execute(GfxFrame &frame, std::vector<GfxTexture *> &textures, GfxReadback &readback, bool present,
                          bool vsync, bool stretch = false) = 0;
+    // Returns when no Execute runs (the threaded executor's worker is idle).
+    virtual void Wait() {}
     virtual void DestroyTexture(GfxTexture *texture) = 0;
     virtual void DestroyVertexBuffer(GfxVertexBuffer *) {}
     // Whether the recorder joins consecutive draws of one state from the
@@ -292,6 +300,15 @@ void Gfx_RecorderCountsText(char *text, size_t size);
 // (video.perf_stats, read at each present). Off, the recorder counts nothing
 // for the logs.
 bool Gfx_PerfStatsWanted(void);
+
+// An executor that runs inner's Execute on a worker thread while the game
+// records the next frame (gfx_threaded.cpp). It owns inner. Without a worker
+// thread it gives inner back. [video] threaded_render (1 on the PS Vita, 0
+// elsewhere: the OpenGL and SDL_GPU executors draw from the main thread).
+GfxExecutor *Gfx_CreateThreadedExecutor(GfxExecutor *inner);
+// Returns when the executor runs no frame: for code that uses the GPU
+// outside the executor (a system dialog). From the worker it returns at once.
+void Gfx_WaitForExecutor(void);
 
 GfxExecutor *Gfx_CreateGpuExecutor(void);
 GfxExecutor *Gfx_CreateNullExecutor(void);

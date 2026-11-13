@@ -201,6 +201,10 @@ struct Stats {
     unsigned rangesMeasured = 0, rangeVertices = 0;     // vertex buffer ranges that the cache did not have
     unsigned snapshotBytes = 0;                         // vertices of buffers copied into the ring
     unsigned ownDraws = 0, ownVertices = 0;             // draws of the frame's vertices that were walked for the fade
+    // The time of Prepare (the game's thread) and of Execute without the
+    // wait of its present (the worker with the threaded executor), and the
+    // frames presented.
+    unsigned prepareMicros = 0, executeMicros = 0, frames = 0;
 };
 
 // The frame time probe of dev builds. A tap on the front touch screen starts
@@ -436,6 +440,10 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     Stats stats;
     uint64_t statsStart = 0;
     Probe probe;
+    // Set in Prepare, read in Execute: the performance stats are on
+    // (Gfx_PerfStatsWanted), and the readback the next present asks for.
+    bool statsWanted = true;
+    GxmReadbackRect nextRead;
 
     ~Executor() override
     {
@@ -1127,6 +1135,10 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                     gpuTextures.Ensure(c.textures[i]);
             }
         }
+        // The textures of the small batches, which become draws later.
+        for (GfxTexture *t : frame.smallTextures)
+            if (GfxTexture *drawn = Gfx_DrawnTexture(t))
+                gpuTextures.Ensure(drawn);
     }
 
     void StartFrame()
@@ -1229,22 +1241,36 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                          scratch);
             return &scratch;
         }
+        // The vertices as the GPU draws them: the game may change the CPU
+        // copy of the buffer while the worker of the threaded executor runs
+        // the frame. The vertex count of a buffer does not change.
         GxmVertexBuffer *g = (GxmVertexBuffer *)c.buffer->gpu;
         const size_t first = c.firstVertexByte / sizeof(GfxVertex);
         if (g == nullptr || first + c.vertexCount > c.buffer->vertices.size())
             return nullptr;
+        if (c.snapshot) {
+            // The frame's snapshot, which starts at its first vertex.
+            if (g->snapshotExecute != executeCount || g->snapshotOffset == GxmFrameRing::kFull ||
+                first < g->snapshotFirst)
+                return nullptr;
+            const GfxVertex *copy = (const GfxVertex *)memory.FrameRing().At(g->snapshotOffset);
+            MeasureRange(copy + (first - g->snapshotFirst), c.vertexCount, box, alpha, scratch);
+            return &scratch;
+        }
+        if (g->memory == nullptr)
+            return nullptr;
         if (g->ranges == nullptr) {
             g->ranges.reset(new GxmKeyCache<DrawRange, 8>());
-            g->rangesVersion = c.buffer->version;
-        } else if (g->rangesVersion != c.buffer->version) {
+            g->rangesVersion = g->version;
+        } else if (g->rangesVersion != g->version) {
             g->ranges->Clear();
-            g->rangesVersion = c.buffer->version;
+            g->rangesVersion = g->version;
         }
         const uint64_t key = (uint64_t)first << 32 | c.vertexCount;
         if (DrawRange *range = g->ranges->Find(key))
             return range;
         DrawRange &range = g->ranges->Put(key);
-        MeasureRange(&c.buffer->vertices[first], c.vertexCount, true, true, range);
+        MeasureRange((const GfxVertex *)g->memory + first, c.vertexCount, true, true, range);
         stats.rangesMeasured++;
         stats.rangeVertices += c.vertexCount;
         return &range;
@@ -1579,6 +1605,8 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
 
     void BeginDialog() override
     {
+        // The worker of the threaded executor finishes its frame first.
+        Gfx_WaitForExecutor();
         EndScene();
         device.Finish();
     }
@@ -1622,7 +1650,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         uint64_t start = 0;
 #ifdef OPENCMR2_DEV
         // The time waits for the GPU twice: not with the stats off.
-        if (presented >= nextBackdropTiming && Gfx_PerfStatsWanted()) {
+        if (presented >= nextBackdropTiming && statsWanted) {
             nextBackdropTiming = presented + kBackdropTimingFrames;
             timed = true;
             device.Finish();
@@ -1692,8 +1720,12 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
 
     // ---- frame execution ----
 
-    void Execute(GfxFrame &frame, std::vector<GfxTexture *> &textures, GfxReadback &readback, bool present,
-                 bool vsync, bool) override
+    // What reads the recorder's objects: the textures and the vertex buffers
+    // go to the GPU, the snapshots of the buffers into the ring, and the
+    // readback is taken and asked for. With the threaded executor this runs
+    // on the game's thread while no Execute runs, and Execute reads only the
+    // frame (gfx_threaded.cpp).
+    void Prepare(GfxFrame &frame, std::vector<GfxTexture *> &textures, GfxReadback &readback, bool present) override
     {
         if (!ready) {
             for (GfxTexture *t : textures)
@@ -1701,25 +1733,25 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             return;
         }
         const uint64_t entered = sceKernelGetProcessTimeWide();
+        // The lines of the frames before: no Execute changes the counts now.
+        if (present) {
+            LogTextures();
+            LogStats();
+        }
+        statsWanted = Gfx_PerfStatsWanted();
         if (!frameStarted)
             StartFrame();
-        // The read of a display buffer is taken before it is drawn again.
+        // The read of a display buffer is taken before it is drawn again,
+        // else when the GPU has done it.
         CollectRead(readback, pendingRead.active && pendingRead.buffer == device.BackBuffer());
+        CollectRead(readback, false);
         EnsureTextures(frame);
         gpuTextures.Upload(textures, presented);
         texturesChanged = gpuTextures.TakeChanged() || texturesChanged;
         UploadVertexBuffers(frame);
-
-        // The frame's vertices and indices, after those of its earlier Execute calls.
-        GxmFrameRing &ring = memory.FrameRing();
-        const unsigned vertexOffset = ring.Alloc((unsigned)frame.vertices.size(), 16);
-        const unsigned indexOffset = ring.Alloc((unsigned)(frame.indices.size() * 2), 4);
-        if (vertexOffset != GxmFrameRing::kFull)
-            memcpy(ring.At(vertexOffset), frame.vertices.data(), frame.vertices.size());
-        if (indexOffset != GxmFrameRing::kFull)
-            memcpy(ring.At(indexOffset), frame.indices.data(), frame.indices.size() * 2);
         // The part of each buffer locked recently that the frame draws, once.
         executeCount++;
+        GxmFrameRing &ring = memory.FrameRing();
         for (const GfxSnapshot &snapshot : frame.snapshots) {
             GfxVertexBuffer *b = snapshot.buffer;
             GxmVertexBuffer *g = (GxmVertexBuffer *)b->gpu;
@@ -1737,6 +1769,37 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                 loggedRing = true;
             }
         }
+        // The readback of this frame: a rectangle of its display buffer, read
+        // when the GPU has done it (the lens flare test of a later frame
+        // takes it, as on the PC). A read that the GPU has not done yet
+        // stays, and the game gets its pixels a frame later: a wait for it
+        // here would stop the game until the GPU has drawn the frame before.
+        nextRead = GxmReadbackRect();
+        if (present && readback.requested) {
+            if (!pendingRead.active)
+                nextRead = Gxm_ClampReadback(readback.x, readback.y, readback.width, readback.height, device.Width(),
+                                             device.Height());
+            readback.requested = false;
+        }
+        stats.prepareMicros += (unsigned)(sceKernelGetProcessTimeWide() - entered);
+    }
+
+    // The frame's commands, and with present the frame on the display. Reads
+    // only the frame and the executor's own objects (see Prepare).
+    void Execute(GfxFrame &frame, std::vector<GfxTexture *> &, GfxReadback &, bool present, bool vsync,
+                 bool) override
+    {
+        if (!ready)
+            return;
+        const uint64_t entered = sceKernelGetProcessTimeWide();
+        // The frame's vertices and indices, after those of its earlier Execute calls.
+        GxmFrameRing &ring = memory.FrameRing();
+        const unsigned vertexOffset = ring.Alloc((unsigned)frame.vertices.size(), 16);
+        const unsigned indexOffset = ring.Alloc((unsigned)(frame.indices.size() * 2), 4);
+        if (vertexOffset != GxmFrameRing::kFull)
+            memcpy(ring.At(vertexOffset), frame.vertices.data(), frame.vertices.size());
+        if (indexOffset != GxmFrameRing::kFull)
+            memcpy(ring.At(indexOffset), frame.indices.data(), frame.indices.size() * 2);
         if ((vertexOffset == GxmFrameRing::kFull || indexOffset == GxmFrameRing::kFull) && !loggedRing) {
             Sys_Log("gxm: a frame is larger than its ring slot: its draws are dropped");
             loggedRing = true;
@@ -1787,19 +1850,11 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         viewportState = nullptr;
         fragmentRowsState = nullptr;
         probe.submitMicros += sceKernelGetProcessTimeWide() - entered;
-        if (!present)
+        if (!present) {
+            stats.executeMicros += (unsigned)(sceKernelGetProcessTimeWide() - entered);
             return;
-
-        // The readback: a rectangle of this frame, read from its display
-        // buffer when the GPU has done it (the lens flare test of a later
-        // frame takes it, as on the PC).
-        GxmReadbackRect read;
-        if (readback.requested) {
-            CollectRead(readback, true);
-            read = Gxm_ClampReadback(readback.x, readback.y, readback.width, readback.height, device.Width(),
-                                     device.Height());
-            readback.requested = false;
         }
+        const GxmReadbackRect read = nextRead;
         if (!loggedInit) {
             Sys_Log("gxm: init ok %dx%d vsync %d, %d memblocks", device.Width(), device.Height(), vsync ? 1 : 0,
                     Gxm_LiveBlocks());
@@ -1822,12 +1877,13 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         EndScene(fragment);
         backdropAhead = false;
         ProbeCheckFrame();
+        // The time of the frame's commands, without the wait of the present.
+        stats.executeMicros += (unsigned)(sceKernelGetProcessTimeWide() - entered);
+        stats.frames++;
         device.Present(vsync && probe.mode == PROBE_OFF);
         ProbeTick();
         presented++;
         frameStarted = false;
-        LogTextures();
-        LogStats();
     }
 
     // The frame time probe, after each present (dev builds).
@@ -2012,6 +2068,11 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                 "recorder: %s",
                 stats.rangesMeasured, stats.rangeVertices, stats.ownVertices, stats.ownDraws, stats.snapshotBytes / 1024,
                 recorder);
+        // Prepare runs on the game's thread; Execute on the worker with the
+        // threaded executor.
+        const double frames = stats.frames > 0 ? (double)stats.frames : 1.0;
+        Sys_Log("gxm: per frame ms: prepare %.2f, execute %.2f (without the wait of the present)",
+                stats.prepareMicros / 1000.0 / frames, stats.executeMicros / 1000.0 / frames);
         stats = Stats();
         statsStart = now;
 #endif
