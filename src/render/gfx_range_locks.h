@@ -6,11 +6,14 @@
 // that changed.
 //
 // The buffer is in blocks of kBlock vertices. A block that a lock touched is
-// recent for kRecentFrames frames: a draw that touches it copies its
-// vertices, each other draw refers to the GPU copy. A block that rested is
+// recent for kRecentFrames frames: a draw that touches it takes its vertices
+// from the frame's snapshot of the buffer (GfxFrame::snapshots), each other
+// draw refers to the GPU copy. In a wood the stage lighting writes each mesh
+// in the view again in each frame: all of them are recent then, and the
+// frame copies each vertex once, as with a lock of the whole buffer. A block that rested is
 // written into the GPU copy (a patch) before the first draw that refers to
-// it: the frames that the GPU still draws took its vertices as copies, so no
-// frame reads the part of the GPU copy that changes. kRecentFrames is the
+// it: the frames that the GPU still draws took its vertices from their
+// snapshots, so no frame reads the part of the GPU copy that changes. kRecentFrames is the
 // number of frames that can wait for the GPU when a frame starts (two of the
 // three in flight, gxm_frame_ring.h).
 #ifndef OPENCMR2_GFX_RANGE_LOCKS_H
