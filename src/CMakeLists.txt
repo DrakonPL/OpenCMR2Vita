@@ -331,6 +331,7 @@ if(VITA)
         render/gxm_device.cpp
         render/gxm_memory.cpp
         render/gxm_textures.cpp
+        audio/audio_mixer.cpp
         audio/audio_vita.cpp
         input/bindings.cpp
         input/input_math.cpp
