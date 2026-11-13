@@ -65,6 +65,17 @@ add_library(opencmr2_platform STATIC
     port/replay_disk.cpp
     $<TARGET_OBJECTS:cmr2_game>)
 target_sources(opencmr2_platform PRIVATE diagnostics/observer.cpp)
+# A profiling build: the compiler calls the hooks of function_profile.cpp at
+# the entry and the exit of each function in game/*.cpp (not of the inline
+# functions of the headers: they are too small and too many).
+if(OPENCMR2_PROFILE_FUNCTIONS)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(cmr2_game PRIVATE -finstrument-functions -finstrument-functions-exclude-file-list=.h)
+    else()
+        target_compile_options(cmr2_game PRIVATE -finstrument-functions-after-inlining)
+    endif()
+    target_sources(opencmr2_platform PRIVATE diagnostics/function_profile.cpp)
+endif()
 target_include_directories(opencmr2_platform PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${GAME_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/port/compat)
 if(NOT VITA)
     target_link_libraries(opencmr2_platform PUBLIC SDL3::SDL3)
