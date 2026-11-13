@@ -1513,14 +1513,21 @@ int main()
                 Gfx_SetTexture(0, NULL);
                 Sprite(1.0f);
             };
+            // (Without the bark: that texture is gone.)
+            const GfxBatchDraw live[5] = { draws[0], draws[1], draws[3], draws[4], draws[5] };
             sprite();
             start();
-            alone();
+            for (const GfxBatchDraw &d : live) {
+                Gfx_SetTransform(GFX_TRANSFORM_WORLD, d.world);
+                Gfx_SetTexture(0, d.texture);
+                Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, d.buffer, d.firstVertex, d.vertexCount, d.indices,
+                                           d.indexCount);
+            }
             Gfx_Present(FALSE);
             const std::string made = FrameText();
             sprite();
             start();
-            Gfx_DrawBatch(draws, 6);
+            Gfx_DrawBatch(live, 5);
             Gfx_Present(FALSE);
             REQUIRE(FrameText() == made && Draw(1).firstVertexByte != 0 && Draw(1).firstIndex != 0);
             Gfx_StopBatchThread();
