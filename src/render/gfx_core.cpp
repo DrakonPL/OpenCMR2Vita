@@ -379,12 +379,27 @@ void VertexBox(const GfxVertex *vertices, DWORD count, float low[3], float high[
 // (then on with an executor that takes joined draws). Read again at each
 // present.
 int s_cullSetting = -2, s_snapshotSetting = -2, s_mergeGroundSetting = -2;
+// video.transparent_3d: 0 leaves out the 3D draws that blend or test their
+// alpha (the trees, the fences, the shadows, the particles), for a test of
+// what they cost. The 2D draws (the HUD, the menus) stay. The screen options
+// of the graphics menu set it.
+int s_transparentSetting = 1;
 
 void ReadDrawSettings()
 {
     s_cullSetting = Platform_GetSettingInt("video.cull_draws", -1);
     s_snapshotSetting = Platform_GetSettingInt("video.buffer_snapshots", -1);
     s_mergeGroundSetting = Platform_GetSettingInt("video.merge_ground", -1);
+    s_transparentSetting = Platform_GetSettingInt("video.transparent_3d", 1);
+}
+
+// Whether a 3D draw with the state is left out (video.transparent_3d).
+bool TransparentLeftOut()
+{
+    if (s_cullSetting == -2)
+        ReadDrawSettings();
+    return s_transparentSetting == 0 &&
+           (s_state.alphaBlend || (s_state.alphaTest && s_state.alphaFunc != GFX_CMP_ALWAYS));
 }
 
 bool CullWanted()
@@ -810,6 +825,8 @@ void RecordDrawNow(int primitive, bool transformed, const void *vertices, DWORD 
         if (indexCount == 0)
             return;
     }
+    if (!transformed && TransparentLeftOut())
+        return;
     const bool joins = s_executor->JoinsDraws();
     // A small 3D draw in world space, from the frame's data, with the atlas
     // as its texture where its texture is in the atlas.
