@@ -213,6 +213,11 @@ add_executable(gfx_threaded_test gfx_threaded.cpp
 target_include_directories(gfx_threaded_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(gfx_threaded_test PRIVATE SDL3::SDL3 Threads::Threads)
 add_test(NAME gfx_threaded COMMAND gfx_threaded_test)
+# The function profile of a profiling build: the game's thread only.
+add_executable(function_profile_test function_profile.cpp ${PROJECT_SOURCE_DIR}/src/diagnostics/function_profile.cpp)
+target_include_directories(function_profile_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(function_profile_test PRIVATE Threads::Threads)
+add_test(NAME function_profile COMMAND function_profile_test)
 add_executable(readback_pack_test readback_pack.cpp)
 target_include_directories(readback_pack_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME readback_pack COMMAND readback_pack_test)
