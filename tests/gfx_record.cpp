@@ -3,9 +3,10 @@
 // executor that takes joined draws gets a run of sprites or lines as one
 // draw, and a small 3D draw in world space: a run of billboards, each with a
 // world matrix of its own, has one state. For that executor a new texture
-// alone starts no new state: each draw has its textures. The parts of a mesh
-// in a vertex buffer that is not drawn by reference share one copy of its
-// vertices.
+// alone starts no new state: each draw has its textures. Small quads with
+// clamped BC3 textures draw from an atlas of those textures, so a run of
+// them with different textures is one draw. The parts of a mesh in a vertex
+// buffer that is not drawn by reference share one copy of its vertices.
 
 #include "port/sys.h"
 #include "render/gfx_internal.h"
@@ -122,6 +123,30 @@ bool IsIdentity(const GfxMatrix &m)
 {
     const GfxMatrix identity = Identity();
     return memcmp(&m, &identity, sizeof(m)) == 0;
+}
+
+// A BC3 texture whose blocks all differ, by a seed.
+GfxTexture *TreeTexture(int width, int height, unsigned seed)
+{
+    GfxTexture *t = Gfx_CreateTexture(width, height, GFX_FORMAT_BC3, 1, 0);
+    GfxLockedRect locked;
+    if (t == NULL || !Gfx_LockTexture(t, 0, 0, &locked))
+        return NULL;
+    uint8_t *p = (uint8_t *)locked.pixels;
+    for (int i = 0; i < width / 4 * (height / 4) * 16; i++) {
+        seed = seed * 1664525u + 1013904223u;
+        p[i] = (uint8_t)(seed >> 24);
+    }
+    Gfx_UnlockTexture(t, 0, 0);
+    return t;
+}
+
+// The texel of a BC3 texture's CPU copy, decoded.
+uint32_t Texel(const GfxTexture *t, int x, int y)
+{
+    uint32_t out[16];
+    Gfx_DecodeBlock(GFX_FORMAT_BC3, &t->levels[0][0][((size_t)(y / 4) * (t->width / 4) + x / 4) * 16], out);
+    return out[(y % 4) * 4 + x % 4];
 }
 
 // A mesh that is not small: it keeps its world matrix.
@@ -369,6 +394,128 @@ int main()
         Gfx_Present(FALSE);
         Gfx_DestroyTexture(road);
         Gfx_SetAlphaRef(0);
+    }
+
+    // The atlas of the small quads. Two trees with two clamped BC3 textures
+    // are one draw from the atlas, in the game's order, with their texture
+    // coordinates in the places of their textures.
+    {
+        GfxTexture *oak = TreeTexture(128, 128, 1), *pine = TreeTexture(64, 64, 2);
+        REQUIRE(oak != NULL && pine != NULL);
+        s_joins = true;
+        Gfx_SetStageAddress(0, GFX_ADDRESS_CLAMP);
+        Gfx_SetTexture(1, NULL);
+        Gfx_SetTexture(0, oak);
+        Billboard(2.0f, 10.0f, 5.0f);
+        Gfx_SetTexture(0, pine);
+        Billboard(3.0f, 20.0f, 6.0f);
+        Gfx_SetTexture(0, oak);
+        Billboard(4.0f, 30.0f, 7.0f);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && s_frame.states.size() == 1 && Draw(0).vertexCount == 12 && Draw(0).indexCount == 18);
+        GfxTexture *atlas = Draw(0).textures[0];
+        REQUIRE(atlas != NULL && atlas != oak && atlas != pine && atlas->format == GFX_FORMAT_BC3);
+        REQUIRE(atlas->width == 1024 && atlas->height == 1024 && atlas->mipLevels == 1 && atlas->dirty);
+        // The oak is the first tile: its texels start one block in, after
+        // its border. The pine is next to it, after both borders.
+        const float size = 1024.0f;
+        const GfxVertex a0 = Vertex3D(Draw(0), 0), a3 = Vertex3D(Draw(0), 3);
+        REQUIRE(a0.u0 == 4.0f / size && a0.v0 == 4.0f / size);
+        REQUIRE(a3.u0 == (4.0f + 128.0f) / size && a3.x == 12.0f);
+        const GfxVertex p0 = Vertex3D(Draw(0), 4), p1 = Vertex3D(Draw(0), 5);
+        REQUIRE(p0.u0 == (136.0f + 4.0f) / size && p1.u0 == (136.0f + 4.0f + 64.0f) / size && p0.v0 == 4.0f / size);
+        const GfxVertex b0 = Vertex3D(Draw(0), 8);
+        REQUIRE(b0.u0 == a0.u0 && b0.x == 30.0f);
+        // The atlas has the textures' texels at those places, and the edge
+        // texel again beside each edge.
+        for (int y = 0; y < 128; y += 9)
+            for (int x = 0; x < 128; x += 7)
+                REQUIRE(Texel(atlas, 4 + x, 4 + y) == Texel(oak, x, y));
+        for (int y = 0; y < 64; y += 5)
+            for (int x = 0; x < 64; x += 3)
+                REQUIRE(Texel(atlas, 140 + x, 4 + y) == Texel(pine, x, y));
+        for (int i = 0; i < 128; i += 5) {
+            REQUIRE(Texel(atlas, 3, 4 + i) == Texel(oak, 0, i) && Texel(atlas, 132, 4 + i) == Texel(oak, 127, i));
+            REQUIRE(Texel(atlas, 4 + i, 3) == Texel(oak, i, 0) && Texel(atlas, 4 + i, 132) == Texel(oak, i, 127));
+        }
+        REQUIRE(Texel(atlas, 3, 3) == Texel(oak, 0, 0) && Texel(atlas, 139, 4) == Texel(pine, 0, 0));
+
+        // A quad stays with its texture where the atlas would not give the
+        // same pixels: a texture that repeats, coordinates outside the
+        // texture, a second texture, a texture that is not BC3.
+        GfxTexture *plain = Gfx_CreateTexture(64, 64, GFX_FORMAT_BGRA8, 1, 0);
+        Gfx_SetTexture(0, oak);
+        Gfx_SetStageAddress(0, GFX_ADDRESS_WRAP);
+        Billboard(2.0f, 10.0f, 5.0f);
+        Gfx_SetStageAddress(0, GFX_ADDRESS_CLAMP);
+        Gfx_SetTexture(1, pine);
+        Billboard(2.0f, 10.0f, 5.0f);
+        Gfx_SetTexture(1, NULL);
+        Gfx_SetTexture(0, plain);
+        Billboard(2.0f, 10.0f, 5.0f);
+        Gfx_SetTexture(0, oak);
+        {
+            GfxMatrix world = Identity();
+            world._41 = 50.0f;
+            Gfx_SetTransform(GFX_TRANSFORM_WORLD, &world);
+            GfxVertex v[4] = {};
+            v[1].x = 1.0f;
+            v[1].u0 = 2.0f;
+            v[2].y = 1.0f;
+            const WORD quad[6] = { 0, 1, 2, 2, 1, 3 };
+            Gfx_DrawIndexedPrimitive(GFX_TRIANGLELIST, v, 4, quad, 6);
+        }
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 4);
+        REQUIRE(Draw(0).textures[0] == oak && Draw(1).textures[0] == oak && Draw(1).textures[1] == pine);
+        REQUIRE(Draw(2).textures[0] == plain && Draw(3).textures[0] == oak && Vertex3D(Draw(3), 1).u0 == 2.0f);
+
+        // The distance fade: a run of quads joins among the quads without a
+        // vertex in the fade, and among those with one. The executor draws
+        // the fade only for a draw that reaches it.
+        Gfx_SetDistanceFade(100.0f, 200.0f);
+        Billboard(2.0f, 10.0f, 150.0f);
+        Billboard(2.0f, 10.0f, 120.0f);
+        Billboard(2.0f, 10.0f, 30.0f);
+        Billboard(2.0f, 10.0f, 20.0f);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 2 && Draw(0).vertexCount == 8 && Draw(1).vertexCount == 8);
+        REQUIRE(Draw(0).textures[0] == atlas && Vertex3D(Draw(1), 0).z == 30.0f);
+        Gfx_SetDistanceFade(0.0f, 0.0f);
+
+        // A texture that changes or goes: the atlas starts again, after the
+        // draws that are recorded with it. The next draw has the new texels.
+        Billboard(2.0f, 10.0f, 5.0f);
+        s_frame.commands.clear();
+        GfxLockedRect locked;
+        REQUIRE(Gfx_LockTexture(pine, 0, 0, &locked));
+        REQUIRE(Draws() == 1 && Draw(0).textures[0] == atlas);
+        ((uint8_t *)locked.pixels)[0] ^= 0x55;
+        ((uint8_t *)locked.pixels)[1] ^= 0xaa;
+        Gfx_UnlockTexture(pine, 0, 0);
+        Gfx_SetTexture(0, pine);
+        Billboard(2.0f, 10.0f, 5.0f);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && Draw(0).textures[0] == atlas && Vertex3D(Draw(0), 0).u0 == 4.0f / size);
+        REQUIRE(Texel(atlas, 4, 4) == Texel(pine, 0, 0) && Texel(atlas, 10, 9) == Texel(pine, 6, 5));
+        Gfx_SetTexture(0, NULL);
+        Gfx_DestroyTexture(pine);
+        Gfx_SetTexture(0, oak);
+        Billboard(2.0f, 10.0f, 5.0f);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && Draw(0).textures[0] == atlas && Vertex3D(Draw(0), 0).u0 == 4.0f / size);
+        REQUIRE(Texel(atlas, 4, 4) == Texel(oak, 0, 0));
+        // An executor that does not take joined draws has no atlas.
+        s_joins = false;
+        Billboard(2.0f, 10.0f, 5.0f);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && Draw(0).textures[0] == oak && Vertex3D(Draw(0), 1).u0 == 1.0f);
+        Gfx_SetTexture(0, NULL);
+        Gfx_DestroyTexture(oak);
+        Gfx_DestroyTexture(plain);
+        Gfx_SetStageAddress(0, GFX_ADDRESS_WRAP);
+        GfxMatrix world = Identity();
+        Gfx_SetTransform(GFX_TRANSFORM_WORLD, &world);
     }
 
     // The number of a recorded state for the vertex program: it changes with

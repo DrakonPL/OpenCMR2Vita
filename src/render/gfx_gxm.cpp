@@ -1321,10 +1321,19 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                                     probe.mode != PROBE_NO_DEPTH_PASS;
         const bool needAlpha = depthCandidate && probe.mode != PROBE_DEPTH_PASS_ALWAYS;
         DrawRange scratch;
-        const DrawRange *range = fadeKey || needAlpha ? RangeOf(c, frame, fadeKey, needAlpha, scratch) : nullptr;
+        // The frame's own vertices have no box that is kept: their farthest
+        // vertex is measured.
+        const bool ownVertices = c.buffer == nullptr;
+        const DrawRange *range =
+            fadeKey || needAlpha ? RangeOf(c, frame, fadeKey && !ownVertices, needAlpha, scratch) : nullptr;
         if ((key & kFadeKeyBit) != 0) {
-            const bool tooNear = fadeKey && range != nullptr &&
-                                 Gxm_EyeDistanceBound(range->box, &vertexUniforms[VU_WORLD_VIEW]) < s.fadeStart;
+            float reach = 0.0f;
+            if (fadeKey && range != nullptr)
+                reach = ownVertices ? Gxm_FarthestEyeDistance(frame.vertices.data() + c.firstVertexByte,
+                                                              sizeof(GfxVertex), c.vertexCount,
+                                                              &vertexUniforms[VU_WORLD_VIEW])
+                                    : Gxm_EyeDistanceBound(range->box, &vertexUniforms[VU_WORLD_VIEW]);
+            const bool tooNear = fadeKey && range != nullptr && reach < s.fadeStart;
             step(PROFILE_RANGE);
             if (tooNear)
                 resolved = Resolve(key & ~kFadeKeyBit, args, s, c.transformed);

@@ -9,6 +9,7 @@
 #include "port/sys.h"
 #include "port/diagnostics.h"
 #include "render/gfx_internal.h"
+#include "render/texture_atlas.h"
 #include "render/shader_key.h"
 
 #include <stdio.h>
@@ -18,6 +19,8 @@
 #include <string.h>
 
 #include <algorithm>
+
+static void Flush(void);
 
 namespace {
 
@@ -146,15 +149,139 @@ bool SmallDrawToWorld(const GfxVertex *in, DWORD count, GfxVertex *out)
 // A strip of at most this many vertices is recorded as a list, which joins.
 const DWORD kJoinedStrip = 6;
 
+// ---- the atlas of the small quads ----
+//
+// The game draws each trackside tree as a quad with a world matrix and a
+// texture of its own, sorted from far to near: some 300 draws in a frame of
+// a wood, with 17 textures in a stage. In world space they have one state
+// (SmallDrawToWorld). With their textures in one atlas they also have one
+// texture: a run of them is one draw, in the game's order. The atlas is a
+// BC3 texture that the recorder fills from the textures' own blocks, each
+// with a border (texture_atlas.h), at a texture's first draw.
+
+constexpr int kAtlasSize = 1024;        // texels on each side
+constexpr int kAtlasTextureSize = 256;  // the largest texture that goes in
+
+struct AtlasEntry {
+    GfxTexture *texture;
+    int x, y;       // the texel of the atlas where the texture starts
+};
+GfxTexture *s_atlas;
+int s_atlasWanted = -1;     // video.quad_atlas (1 by default); -1: not read yet
+AtlasPacker s_atlasPacker;
+std::vector<AtlasEntry> s_atlasEntries;
+uint32_t s_atlasRecord;     // the recording that last drew from the atlas
+
+// The place of a texture in the atlas, or NULL where it does not go in: not
+// a plain BC3 texture of one level, too large, or no room.
+const AtlasEntry *AtlasEntryOf(GfxTexture *t)
+{
+    for (const AtlasEntry &e : s_atlasEntries)
+        if (e.texture == t)
+            return &e;
+    if (t->format != GFX_FORMAT_BC3 || t->mipLevels != 1 || t->flags != 0 || t->cube != NULL ||
+        t->replacement != NULL)
+        return NULL;
+    if (t->width % 4 != 0 || t->height % 4 != 0 || t->width > kAtlasTextureSize || t->height > kAtlasTextureSize)
+        return NULL;
+    if (s_atlas == NULL) {
+        s_atlas = Gfx_CreateTexture(kAtlasSize, kAtlasSize, GFX_FORMAT_BC3, 1, 0);
+        if (s_atlas == NULL)
+            return NULL;
+        s_atlasPacker.Reset(kAtlasSize / 4, kAtlasSize / 4);
+    }
+    const int w = t->width / 4, h = t->height / 4;
+    int x, y;
+    if (!s_atlasPacker.Place(w + 2, h + 2, &x, &y))
+        return NULL;
+    Atlas_CopyBC3Tile(t->levels[0][0].data(), w, h, s_atlas->levels[0][0].data(), kAtlasSize / 4, x, y);
+    s_atlas->dirty = true;
+    s_atlasEntries.push_back({ t, (x + 1) * 4, (y + 1) * 4 });
+    return &s_atlasEntries.back();
+}
+
+// The atlas for a small draw in world space, with the draw's texture
+// coordinates moved into it: NULL where the draw stays with its texture. It
+// goes to the atlas with one clamped texture and coordinates inside it: the
+// atlas then gives each pixel what the texture gave.
+GfxTexture *AtlasSmallDraw(GfxVertex *vertices, DWORD count)
+{
+    if (s_atlasWanted < 0)
+        s_atlasWanted = Platform_GetSettingInt("video.quad_atlas", 1) != 0 ? 1 : 0;
+    if (s_atlasWanted == 0)
+        return NULL;
+    const GfxStageState &stage = s_state.stages[0];
+    if (stage.texture == NULL || s_state.stages[1].texture != NULL || stage.address != GFX_ADDRESS_CLAMP ||
+        stage.texCoordIndex != 0 || stage.textureTransform != GFX_TTFF_DISABLE)
+        return NULL;
+    for (DWORD i = 0; i < count; i++)
+        if (!(vertices[i].u0 >= 0.0f && vertices[i].u0 <= 1.0f && vertices[i].v0 >= 0.0f && vertices[i].v0 <= 1.0f))
+            return NULL;
+    const AtlasEntry *e = AtlasEntryOf(stage.texture);
+    if (e == NULL)
+        return NULL;
+    const float scale = 1.0f / kAtlasSize;
+    for (DWORD i = 0; i < count; i++) {
+        vertices[i].u0 = ((float)e->x + vertices[i].u0 * (float)stage.texture->width) * scale;
+        vertices[i].v0 = ((float)e->y + vertices[i].v0 * (float)stage.texture->height) * scale;
+    }
+    s_atlasRecord = s_record;
+    return s_atlas;
+}
+
+// A texture goes, or its texels change: the atlas starts again (the textures
+// of a stage go together). Draws recorded with the atlas run first.
+void AtlasForget(const GfxTexture *t)
+{
+    bool known = t == s_atlas;
+    for (const AtlasEntry &e : s_atlasEntries)
+        known = known || e.texture == t;
+    if (!known)
+        return;
+    if (s_atlasRecord == s_record)
+        Flush();
+    s_atlasEntries.clear();
+    s_atlasPacker.Reset(kAtlasSize / 4, kAtlasSize / 4);
+    if (t == s_atlas)
+        s_atlas = NULL;
+}
+
+// Whether a vertex of a small draw in world space is at the start of the
+// distance fade or beyond it. The executor draws a draw with the fade only
+// where a vertex reaches it, and the fade is the largest part of its
+// fragment program: a run of quads joins only inside one of the two kinds.
+bool SmallDrawIsFar(const GfxVertex *vertices, DWORD count)
+{
+    if (!(s_state.fadeEnd > s_state.fadeStart))
+        return false;
+    const GfxMatrix &v = s_state.view;
+    const float limit = s_state.fadeStart * s_state.fadeStart;
+    for (DWORD i = 0; i < count; i++) {
+        const GfxVertex &p = vertices[i];
+        const float x = p.x * v._11 + p.y * v._21 + p.z * v._31 + v._41;
+        const float y = p.x * v._12 + p.y * v._22 + p.z * v._32 + v._42;
+        const float z = p.x * v._13 + p.y * v._23 + p.z * v._33 + v._43;
+        if (x * x + y * y + z * z >= limit)
+            return true;
+    }
+    return false;
+}
+
+// The kind of the draw recorded last: 1 a small draw in world space with a
+// vertex in the fade, 0 one with none, -1 another draw.
+int s_lastSmallFar = -1;
+
 // Adds a draw of vertices in the frame's data to the draw before, where the
 // executor takes joined draws (GfxExecutor::JoinsDraws) and both are lists of
 // one primitive with one state, one after the other in the frame's data. The
 // game draws each sprite and each line with a call of its own: a run of them
 // becomes one draw. The triangles keep their order.
 bool JoinDraw(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
-              DWORD indexCount, bool worldSpace)
+              DWORD indexCount, bool worldSpace, GfxTexture *const textures[2], bool isFar)
 {
     if (!StateIsRecorded(worldSpace) || s_frame.commands.empty())
+        return false;
+    if (worldSpace && s_lastSmallFar != (isFar ? 1 : 0))
         return false;
     if (primitive != GFX_TRIANGLELIST && primitive != GFX_LINELIST)
         return false;
@@ -164,7 +291,7 @@ bool JoinDraw(int primitive, bool transformed, const void *vertices, DWORD verte
     if (last.type != GFX_CMD_DRAW || last.primitive != primitive || last.transformed != transformed ||
         last.buffer != NULL || last.state != s_frame.states.size() - 1)
         return false;
-    if (last.textures[0] != s_state.stages[0].texture || last.textures[1] != s_state.stages[1].texture)
+    if (last.textures[0] != textures[0] || last.textures[1] != textures[1])
         return false;
     if ((last.firstIndex != ~0u) != (indices != NULL) || last.vertexCount + vertexCount > kJoinedVertices)
         return false;
@@ -309,7 +436,8 @@ static uint32_t TraceHash(uint32_t h, const void *data, size_t size)
 }
 
 void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
-                   DWORD indexCount, GfxVertexBuffer *buffer, DWORD firstVertex, bool worldSpace);
+                   DWORD indexCount, GfxVertexBuffer *buffer, DWORD firstVertex, bool worldSpace,
+                   GfxTexture *const textures[2], bool isFar);
 
 void RecordDrawNow(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
                    DWORD indexCount, GfxVertexBuffer *buffer, DWORD firstVertex);
@@ -375,15 +503,20 @@ void RecordDrawNow(int primitive, bool transformed, const void *vertices, DWORD 
             return;
     }
     const bool joins = s_executor->JoinsDraws();
-    // A small 3D draw in world space, from the frame's data.
+    // A small 3D draw in world space, from the frame's data, with the atlas
+    // as its texture where its texture is in the atlas.
     GfxVertex small[kSmallDrawVertices];
-    bool worldSpace = false;
+    GfxTexture *textures[2] = { s_state.stages[0].texture, s_state.stages[1].texture };
+    bool worldSpace = false, isFar = false;
     if (joins && !transformed && vertexCount <= kSmallDrawVertices &&
         SmallDrawToWorld((const GfxVertex *)vertices, vertexCount, small)) {
         vertices = small;
         buffer = NULL;
         firstVertex = 0;
         worldSpace = true;
+        isFar = SmallDrawIsFar(small, vertexCount);
+        if (GfxTexture *atlas = AtlasSmallDraw(small, vertexCount))
+            textures[0] = atlas;
     }
     // A short strip (a sprite) as a list: lists join. The odd triangles of a
     // strip have their first two corners in the other order.
@@ -399,17 +532,20 @@ void RecordDrawNow(int primitive, bool transformed, const void *vertices, DWORD 
             primitive = GFX_TRIANGLELIST;
             indices = strip;
         }
-        if (JoinDraw(primitive, transformed, vertices, vertexCount, indices, indexCount, worldSpace))
+        if (JoinDraw(primitive, transformed, vertices, vertexCount, indices, indexCount, worldSpace, textures, isFar))
             return;
     }
-    RecordNewDraw(primitive, transformed, vertices, vertexCount, indices, indexCount, buffer, firstVertex, worldSpace);
+    RecordNewDraw(primitive, transformed, vertices, vertexCount, indices, indexCount, buffer, firstVertex, worldSpace,
+                  textures, isFar);
 }
 
 // Records a draw as a command of its own. worldSpace: its vertices are in
-// world space (SmallDrawToWorld).
+// world space (SmallDrawToWorld). textures: those of its two stages.
 void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
-                   DWORD indexCount, GfxVertexBuffer *buffer, DWORD firstVertex, bool worldSpace)
+                   DWORD indexCount, GfxVertexBuffer *buffer, DWORD firstVertex, bool worldSpace,
+                   GfxTexture *const textures[2], bool isFar)
 {
+    s_lastSmallFar = worldSpace ? (isFar ? 1 : 0) : -1;
     GfxCommand cmd = {};
     cmd.type = GFX_CMD_DRAW;
     cmd.primitive = primitive;
@@ -449,8 +585,8 @@ void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD 
         cmd.indexCount = 0;
     }
     cmd.state = RecordState(worldSpace);
-    cmd.textures[0] = s_state.stages[0].texture;
-    cmd.textures[1] = s_state.stages[1].texture;
+    cmd.textures[0] = textures[0];
+    cmd.textures[1] = textures[1];
     s_frame.commands.push_back(cmd);
 }
 
@@ -1143,6 +1279,7 @@ extern "C" void Gfx_DestroyTexture(GfxTexture *texture)
 {
     if (texture == NULL || texture->cube != NULL)
         return;     // face views go with their cube
+    AtlasForget(texture);
     for (int i = 0; i < 2; i++)
         if (Root(s_state.stages[i].texture) == texture)
             s_state.stages[i].texture = NULL;
@@ -1242,6 +1379,9 @@ extern "C" BOOL Gfx_LockTexture(GfxTexture *texture, int face, int mip, GfxLocke
     }
     if (mip < 0 || mip >= texture->mipLevels || face < 0 || face > 5 || texture->levels[face][mip].empty())
         return FALSE;
+    // The atlas has a copy of its texels.
+    if (texture != s_atlas)
+        AtlasForget(texture);
     if (texture->renderedTo && s_executor != NULL) {
         s_executor->ReadTexture(texture);
         texture->renderedTo = false;

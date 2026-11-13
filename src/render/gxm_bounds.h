@@ -59,4 +59,25 @@ inline float Gxm_EyeDistanceBound(const GxmBounds &b, const float worldView[4][4
     return sqrtf(squared);
 }
 
+// The distance from the eye of the farthest of count vertices (positions as
+// for Gxm_VertexBounds) after worldView. Exact, at the cost of each vertex:
+// for the frame's own vertices, which no box is kept of. A run of joined
+// quads is as far as its farthest quad, not as the box around all of them.
+inline float Gxm_FarthestEyeDistance(const void *vertices, size_t stride, unsigned count, const float worldView[4][4])
+{
+    const unsigned char *p = (const unsigned char *)vertices;
+    float farthest = 0.0f;
+    for (unsigned i = 0; i < count; i++) {
+        float v[3];
+        memcpy(v, p + (size_t)i * stride, sizeof(v));
+        float squared = 0.0f;
+        for (int k = 0; k < 3; k++) {
+            const float eye = v[0] * worldView[0][k] + v[1] * worldView[1][k] + v[2] * worldView[2][k] + worldView[3][k];
+            squared += eye * eye;
+        }
+        farthest = squared > farthest ? squared : farthest;
+    }
+    return sqrtf(farthest);
+}
+
 #endif

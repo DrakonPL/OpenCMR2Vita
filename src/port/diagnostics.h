@@ -16,6 +16,12 @@ enum {
     SCENE_PART_BILLBOARDS,  // the stage objects that are drawn sorted
     SCENE_PART_NODES,       // the nodes of the sectors: the cars and what moves
     SCENE_PART_LAYERS,      // the glow, the 2D and 3D layers, the lines
+    // The parts of the update of a view, before its scene is drawn.
+    SCENE_PART_VIEW,        // the nodes of the view, the weather lighting, the skid effects
+    SCENE_PART_PREPARE,     // Game_PrepareScene
+    SCENE_PART_CAR_SHADOWS, // the shadow geometry of the cars
+    SCENE_PART_REFLECTIONS, // the cube maps of the car reflections, and the view masks of the cars
+    SCENE_PART_HUD,         // the dash and the HUD of the view
     SCENE_PART_COUNT
 };
 
@@ -32,5 +38,18 @@ struct Observer {
     virtual void ScenePart(int part) {}
 };
 extern Observer *observer;
+
+// Names the part that starts. No observer: no cost.
+inline void ScenePart(int part)
+{
+    if (observer)
+        observer->ScenePart(part);
+}
+
+// A part for the rest of a function: no part when the function returns.
+struct ScenePartScope {
+    explicit ScenePartScope(int part) { ScenePart(part); }
+    ~ScenePartScope() { ScenePart(SCENE_PART_NONE); }
+};
 }
 #endif
