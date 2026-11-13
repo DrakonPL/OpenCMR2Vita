@@ -15,6 +15,7 @@
 #include "render/gxm_vertex_uniforms.h"
 
 #include <functional>
+#include <string>
 
 #include <cstdio>
 #include <cstring>
@@ -163,6 +164,36 @@ uint32_t Texel(const GfxTexture *t, int x, int y)
     uint32_t out[16];
     Gfx_DecodeBlock(GFX_FORMAT_BC3, &t->levels[0][0][((size_t)(y / 4) * (t->width / 4) + x / 4) * 16], out);
     return out[(y % 4) * 4 + x % 4];
+}
+
+// The draws of the frame of the last present as text: each draw's state,
+// kind, textures, counts, box and reach, and its vertices and indices (not
+// their place in the frame's data), to compare two frames.
+std::string FrameText()
+{
+    std::string text;
+    char line[320];
+    snprintf(line, sizeof(line), "states %zu snapshots %zu\n", s_frame.states.size(), s_frame.snapshots.size());
+    text += line;
+    for (const GfxCommand &c : s_frame.commands) {
+        if (c.type != GFX_CMD_DRAW) {
+            snprintf(line, sizeof(line), "command %d\n", (int)c.type);
+            text += line;
+            continue;
+        }
+        snprintf(line, sizeof(line), "draw s%u p%d t%p %p n%u i%u b%p v%u snap%d box%d %g %g %g %g %g %g r%g\n",
+                 c.state, c.primitive, (void *)c.textures[0], (void *)c.textures[1], c.vertexCount, c.indexCount,
+                 (void *)c.buffer, c.buffer != NULL ? c.firstVertexByte : 0u, c.snapshot ? 1 : 0, c.hasBox ? 1 : 0,
+                 c.boxLow[0], c.boxLow[1], c.boxLow[2], c.boxHigh[0], c.boxHigh[1], c.boxHigh[2], c.reach);
+        text += line;
+        const size_t stride = c.transformed ? sizeof(GfxTLVertex) : sizeof(GfxVertex);
+        if (c.buffer == NULL && c.firstVertexByte + c.vertexCount * stride <= s_frame.vertices.size())
+            text.append((const char *)s_frame.vertices.data() + c.firstVertexByte, c.vertexCount * stride);
+        if (c.firstIndex != ~0u && c.firstIndex + c.indexCount <= s_frame.indices.size())
+            text.append((const char *)&s_frame.indices[c.firstIndex], c.indexCount * sizeof(uint16_t));
+        text += "\n";
+    }
+    return text;
 }
 
 // A mesh that is not small: it keeps its world matrix.
@@ -1061,6 +1092,111 @@ int main()
         Gfx_SetAlphaTest(FALSE);
         Gfx_SetAlphaFunc(GFX_CMP_ALWAYS);
         Gfx_SetAlphaRef(0);
+    }
+
+    // A batch (Gfx_DrawBatch) gives the frame the draws that the same draws
+    // made alone give: the small ones in world space, from the atlas where
+    // their texture goes in, joined, those outside the view left out, and a
+    // large one as it is (here a snapshot of its buffer). The world matrix
+    // after the batch is that of its last draw. With an executor that does
+    // not take joined draws, too.
+    {
+        GfxTexture *oak = TreeTexture(64, 64, 7), *pine = TreeTexture(32, 32, 8);
+        GfxTexture *bark = Gfx_CreateTexture(16, 16, GFX_FORMAT_BGRA8, 1, 0);
+        GfxVertexBuffer *buffer = Gfx_CreateVertexBuffer(40);
+        REQUIRE(oak != NULL && pine != NULL && bark != NULL && buffer != NULL);
+        GfxVertex *b = Gfx_LockVertexBuffer(buffer);
+        for (int i = 0; i < 40; i++) {
+            b[i].x = (float)(i & 1) * 0.5f + (i >= 8 ? 0.01f * (float)i : 0.0f);
+            b[i].y = (float)((i >> 1) & 1) * 0.5f;
+            b[i].nz = -1.0f;
+            b[i].diffuse = 0xff203040u + (DWORD)i;
+            b[i].u0 = (float)(i & 1);
+            b[i].v0 = (float)((i >> 1) & 1);
+        }
+        Gfx_UnlockVertexBuffer(buffer);
+        const WORD quad[6] = { 0, 1, 2, 2, 1, 3 };
+        WORD mesh[30];
+        for (int i = 0; i < 30; i++)
+            mesh[i] = (WORD)i;
+        GfxMatrix m[6];
+        for (int i = 0; i < 6; i++) {
+            m[i] = Identity();
+            m[i]._11 = m[i]._22 = m[i]._33 = 0.5f + 0.1f * (float)i;
+            m[i]._41 = -0.9f + 0.25f * (float)i;
+            m[i]._43 = 0.25f + 0.05f * (float)i;
+        }
+        m[4]._41 = 100.0f;      // outside the view
+        const GfxBatchDraw draws[6] = {
+            { &m[0], oak, buffer, 0, 4, quad, 6 },  { &m[1], pine, buffer, 4, 4, quad, 6 },
+            { &m[2], bark, buffer, 0, 4, quad, 6 }, { &m[3], oak, buffer, 8, 32, mesh, 30 },
+            { &m[4], oak, buffer, 0, 4, quad, 6 },  { &m[5], pine, buffer, 4, 4, quad, 6 },
+        };
+        const GfxMatrix identity = Identity();
+        const auto start = [&] {
+            Gfx_SetTransform(GFX_TRANSFORM_VIEW, &identity);
+            Gfx_SetTransform(GFX_TRANSFORM_PROJECTION, &identity);
+            Gfx_SetStageAddress(0, GFX_ADDRESS_CLAMP);
+            Gfx_SetStageTexCoordIndex(0, 0);
+            Gfx_SetStageTextureTransform(0, GFX_TTFF_DISABLE);
+            Gfx_SetTexture(1, NULL);
+            Gfx_SetStageColorOp(1, GFX_TOP_DISABLE);
+            Gfx_SetAlphaBlend(FALSE);
+            Gfx_SetAlphaTest(FALSE);
+        };
+        const auto alone = [&] {
+            for (const GfxBatchDraw &d : draws) {
+                Gfx_SetTransform(GFX_TRANSFORM_WORLD, d.world);
+                Gfx_SetTexture(0, d.texture);
+                Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, d.buffer, d.firstVertex, d.vertexCount, d.indices,
+                                           d.indexCount);
+            }
+        };
+        for (int joins = 1; joins >= 0; joins--) {
+            s_joins = joins != 0;
+            s_cullDraws = 1;
+            Gfx_Present(FALSE);
+            start();
+            alone();
+            Gfx_Present(FALSE);
+            const std::string made = FrameText();
+            start();
+            Gfx_DrawBatch(draws, 6);
+            GfxMatrix after;
+            Gfx_GetTransform(GFX_TRANSFORM_WORLD, &after);
+            REQUIRE(memcmp(&after, &m[5], sizeof(after)) == 0);
+            Gfx_Present(FALSE);
+            REQUIRE(FrameText() == made);
+            if (joins) {
+                // Oak and pine from the atlas joined, the bark alone, the
+                // snapshot of the mesh, the last pine; the tree outside the
+                // view is left out.
+                REQUIRE(Draws() == 4 && Draw(0).vertexCount == 8 && Draw(1).textures[0] == bark);
+                REQUIRE(Draw(2).snapshot && Draw(3).vertexCount == 4 && Draw(0).textures[0] == Draw(3).textures[0]);
+                REQUIRE(Draw(0).textures[0] != oak && Draw(0).reach > 0.0f && Draw(0).hasBox);
+            } else {
+                // Each draw alone; the box of the tree outside the view is
+                // outside it.
+                REQUIRE(Draws() == 5);
+            }
+        }
+        // A texture that only a draw of a batch reads (the state of the batch
+        // has the texture of its first draw) is drawn before it goes: the
+        // frame so far runs first.
+        s_joins = true;
+        start();
+        const GfxBatchDraw two[2] = { draws[0], draws[2] };
+        Gfx_DrawBatch(two, 2);
+        s_frame = GfxFrame();
+        Gfx_DestroyTexture(bark);
+        REQUIRE(Draws() == 2 && Draw(1).textures[0] == bark);
+        Gfx_Present(FALSE);
+        s_cullDraws = 0;
+        Gfx_Present(FALSE);
+        Gfx_DestroyVertexBuffer(buffer);
+        Gfx_DestroyTexture(oak);
+        Gfx_DestroyTexture(pine);
+        Gfx_SetStageAddress(0, GFX_ADDRESS_WRAP);
     }
 
     // The performance stats (video.perf_stats = 0): the recorder counts no

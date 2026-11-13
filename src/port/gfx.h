@@ -359,6 +359,25 @@ void Gfx_DrawIndexedPrimitiveVB(int primitive, GfxVertexBuffer *buffer, DWORD fi
 void Gfx_DrawPrimitive(int primitive, const GfxVertex *vertices, DWORD vertexCount);
 void Gfx_DrawIndexedPrimitive(int primitive, const GfxVertex *vertices, DWORD vertexCount, const WORD *indices,
                               DWORD indexCount);
+/* One draw of a batch (Gfx_DrawBatch): an indexed triangle list from a vertex
+   buffer, with its world matrix and the texture of stage 0. The indices are
+   relative to firstVertex. */
+typedef struct GfxBatchDraw {
+    const GfxMatrix *world;
+    GfxTexture *texture;
+    GfxVertexBuffer *buffer;
+    DWORD firstVertex, vertexCount;
+    const WORD *indices;
+    DWORD indexCount;
+} GfxBatchDraw;
+/* The draws in their order, each as Gfx_SetTransform(GFX_TRANSFORM_WORLD,
+   world), Gfx_SetTexture(0, texture) and Gfx_DrawIndexedPrimitiveVB(
+   GFX_TRIANGLELIST, ...) draw it: the same pixels, and the same state after
+   them. The vertices and the matrices are read during the call. For an
+   executor that takes joined draws, the small draws (the trees of a stage)
+   go into the frame as one batch: the renderer moves them into world space,
+   tests them against the view and joins them when the frame runs. */
+void Gfx_DrawBatch(const GfxBatchDraw *draws, DWORD count);
 void Gfx_DrawPrimitiveTL(int primitive, const GfxTLVertex *vertices, DWORD vertexCount);
 void Gfx_DrawIndexedPrimitiveTL(int primitive, const GfxTLVertex *vertices, DWORD vertexCount, const WORD *indices,
                                 DWORD indexCount);
