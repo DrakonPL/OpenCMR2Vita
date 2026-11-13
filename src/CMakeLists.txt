@@ -18,8 +18,8 @@ add_library(cmr2_game OBJECT ${GAME_SOURCES})
 target_include_directories(cmr2_game PUBLIC ${GAME_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/port/compat)
 target_compile_options(cmr2_game PRIVATE
     $<$<COMPILE_LANGUAGE:C>:-x c>
-    "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/port/types.h"
-    "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/port/msvcrt.h"
+    "SHELL:-include \"${CMAKE_CURRENT_SOURCE_DIR}/port/types.h\""
+    "SHELL:-include \"${CMAKE_CURRENT_SOURCE_DIR}/port/msvcrt.h\""
     -fms-extensions)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     # GCC rejects two MSVC habits that Clang takes in its MS mode: member functions

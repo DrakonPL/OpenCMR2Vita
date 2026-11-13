@@ -9,11 +9,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <new>
 #include <vector>
 
 #define REQUIRE(x) do { if (!(x)) { fprintf(stderr, "failed line %d: %s\n", __LINE__, #x); return 1; } } while (0)
 
 namespace {
+
+constexpr std::align_val_t kArenaAlign{4096};   // bytes, as memblocks are
 
 // Heap arenas, aligned as memblocks are, counted.
 struct HeapSource : GpuArenaSource {
@@ -25,7 +28,7 @@ struct HeapSource : GpuArenaSource {
     {
         if (live >= limit)
             return nullptr;
-        unsigned char *p = (unsigned char *)aligned_alloc(4096, (bytes + 4095) / 4096 * 4096);
+        unsigned char *p = (unsigned char *)::operator new((bytes + 4095) / 4096 * 4096, kArenaAlign);
         *handle = (int)blocks.size();
         blocks.push_back(p);
         live++;
@@ -33,7 +36,7 @@ struct HeapSource : GpuArenaSource {
     }
     void Free(int handle) override
     {
-        free(blocks[handle]);
+        ::operator delete(blocks[handle], kArenaAlign);
         blocks[handle] = nullptr;
         live--;
     }

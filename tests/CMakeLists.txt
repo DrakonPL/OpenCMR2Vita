@@ -16,7 +16,7 @@ endif()
 
 add_executable(net_session_test net_session.cpp)
 target_link_libraries(net_session_test PRIVATE opencmr2_net)
-target_compile_options(net_session_test PRIVATE "SHELL:-include ${PROJECT_SOURCE_DIR}/src/port/types.h")
+target_compile_options(net_session_test PRIVATE "SHELL:-include \"${PROJECT_SOURCE_DIR}/src/port/types.h\"")
 add_test(NAME net_session COMMAND net_session_test)
 set_tests_properties(net_session PROPERTIES TIMEOUT 60)
 
@@ -38,7 +38,7 @@ add_test(NAME movie_render_state COMMAND movie_render_state_test)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "i[3-6]86|x86|AMD64|amd64")
     add_executable(ftoi_fistp_test ftoi_fistp.cpp)
     target_include_directories(ftoi_fistp_test PRIVATE ${PROJECT_SOURCE_DIR}/game)
-    target_compile_options(ftoi_fistp_test PRIVATE "SHELL:-include ${PROJECT_SOURCE_DIR}/src/port/types.h")
+    target_compile_options(ftoi_fistp_test PRIVATE "SHELL:-include \"${PROJECT_SOURCE_DIR}/src/port/types.h\"")
     add_test(NAME ftoi_fistp COMMAND ftoi_fistp_test)
 endif()
 
