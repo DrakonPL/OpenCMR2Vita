@@ -27,11 +27,13 @@ extern "C" int Sys_GetOption(const char *, int fallback) { return fallback; }
 // video.cull_draws: the view test is off in the tests unless a test turns it
 // on. The recorder reads the settings again at each present.
 int s_cullDraws = 0;
-int s_transparent3d = 1;    // video.transparent_3d
+int s_alphaBlend = 1, s_alphaTest = 1;     // video.alpha_blend, video.alpha_test
 int Platform_GetSettingInt(const char *key, int value)
 {
-    if (strcmp(key, "video.transparent_3d") == 0)
-        return s_transparent3d;
+    if (strcmp(key, "video.alpha_blend") == 0)
+        return s_alphaBlend;
+    if (strcmp(key, "video.alpha_test") == 0)
+        return s_alphaTest;
     return strcmp(key, "video.cull_draws") == 0 ? s_cullDraws : value;
 }
 const char *Platform_GetSetting(const char *, const char *value) { return value; }
@@ -1004,39 +1006,58 @@ int main()
         Gfx_Present(FALSE);
     }
 
-    // The test of the transparent 3D draws (video.transparent_3d = 0): a 3D
-    // draw that blends or tests its alpha is left out. An opaque one, one
-    // whose alpha test passes always, and the 2D draws stay.
+    // The tests of the transparent objects (video.alpha_blend = 0,
+    // video.alpha_test = 0): each 3D draw is recorded without blending, or
+    // without the alpha test. The 2D draws keep both, with the same state of
+    // the game: a 3D and a 2D draw get two recorded states.
     {
-        s_transparent3d = 0;
-        Gfx_Present(FALSE);
         GfxMatrix m = Identity();
         Gfx_SetTransform(GFX_TRANSFORM_WORLD, &m);
         GfxVertex v[3] = {};
         v[1].x = 1.0f;
         Gfx_SetAlphaBlend(TRUE);
-        Gfx_DrawPrimitive(GFX_TRIANGLELIST, v, 3);      // blended: left out
-        Sprite(10.0f);                                  // 2D: stays
-        Gfx_SetAlphaBlend(FALSE);
         Gfx_SetAlphaTest(TRUE);
         Gfx_SetAlphaFunc(GFX_CMP_GREATEREQUAL);
-        Gfx_DrawPrimitive(GFX_TRIANGLELIST, v, 3);      // alpha test: left out
-        Gfx_SetAlphaFunc(GFX_CMP_ALWAYS);
-        v[0].z = 0.5f;
-        Gfx_DrawPrimitive(GFX_TRIANGLELIST, v, 3);      // a test that passes always: stays
-        Gfx_SetAlphaTest(FALSE);
-        v[0].z = 0.25f;
-        Gfx_DrawPrimitive(GFX_TRIANGLELIST, v, 3);      // opaque: stays
+        Gfx_SetAlphaRef(1);
+        const auto frame = [&] {
+            Gfx_DrawPrimitive(GFX_TRIANGLELIST, v, 3);
+            Sprite(10.0f);
+            Gfx_DrawPrimitive(GFX_TRIANGLELIST, v, 3);
+            Gfx_Present(FALSE);
+        };
+        frame();
+        REQUIRE(Draws() == 3 && s_frame.states.size() == 1);
+        REQUIRE(s_frame.states[0].alphaBlend && s_frame.states[0].alphaTest);
+        s_alphaBlend = 0;
         Gfx_Present(FALSE);
-        REQUIRE(Draws() == 3 && Draw(0).transformed && !Draw(1).transformed && !Draw(2).transformed);
-        REQUIRE(Vertex3D(Draw(1), 0).z == 0.5f && Vertex3D(Draw(2), 0).z == 0.25f);
-        s_transparent3d = 1;
+        frame();
+        REQUIRE(Draws() == 3 && s_frame.states.size() == 3);
+        REQUIRE(!s_frame.states[Draw(0).state].alphaBlend && s_frame.states[Draw(0).state].alphaTest);
+        REQUIRE(s_frame.states[Draw(1).state].alphaBlend && s_frame.states[Draw(1).state].alphaTest);
+        REQUIRE(!s_frame.states[Draw(2).state].alphaBlend && Draw(1).transformed && !Draw(2).transformed);
+        s_alphaBlend = 1;
+        s_alphaTest = 0;
         Gfx_Present(FALSE);
-        Gfx_SetAlphaBlend(TRUE);
+        frame();
+        REQUIRE(Draws() == 3 && s_frame.states[Draw(0).state].alphaBlend && !s_frame.states[Draw(0).state].alphaTest);
+        REQUIRE(s_frame.states[Draw(1).state].alphaTest && !s_frame.states[Draw(2).state].alphaTest);
+        // Both, and two 3D draws in a row share their recorded state.
+        s_alphaBlend = 0;
+        Gfx_Present(FALSE);
         Gfx_DrawPrimitive(GFX_TRIANGLELIST, v, 3);
-        Gfx_SetAlphaBlend(FALSE);
+        v[0].z = 0.5f;
+        Gfx_DrawPrimitive(GFX_TRIANGLELIST, v, 3);
         Gfx_Present(FALSE);
-        REQUIRE(Draws() == 1);
+        REQUIRE(s_frame.states.size() == 1 && !s_frame.states[0].alphaBlend && !s_frame.states[0].alphaTest);
+        s_alphaBlend = 1;
+        s_alphaTest = 1;
+        Gfx_Present(FALSE);
+        frame();
+        REQUIRE(Draws() == 3 && s_frame.states.size() == 1 && s_frame.states[0].alphaBlend);
+        Gfx_SetAlphaBlend(FALSE);
+        Gfx_SetAlphaTest(FALSE);
+        Gfx_SetAlphaFunc(GFX_CMP_ALWAYS);
+        Gfx_SetAlphaRef(0);
     }
 
     printf("gfx_record: ok\n");

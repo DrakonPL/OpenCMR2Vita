@@ -12070,8 +12070,10 @@ void FrontendMenu_DrawNetworkSessionSetup(Menu *pMenu)
 // PORT: the screen options, a page of the graphics menu: the sizes of the
 // HUD and of the menus ([video] hud_scale and menu_scale, in percent of the
 // original's at the screen's height), the vertical sync, the fullscreen
-// window, and a test that leaves out the transparent 3D draws ([video]
-// transparent_3d: the trees, the fences, the shadows, the particles). They are saved in opencmr2.ini when OK is chosen; Back leaves them
+// window, and two tests that draw the transparent 3D objects opaque (the
+// trees, the fences, the shadows, the particles): without the alpha
+// blending ([video] alpha_blend) and without the alpha test ([video]
+// alpha_test). They are saved in opencmr2.ini when OK is chosen; Back leaves them
 // as they were. The original's layout in pixels (a size of 0) stays an
 // opencmr2.ini setting.
 
@@ -12082,7 +12084,8 @@ enum ScreenOptionsItem {
     SCREEN_ITEM_MENU,
     SCREEN_ITEM_VSYNC,
     SCREEN_ITEM_FULLSCREEN,
-    SCREEN_ITEM_TRANSPARENT,
+    SCREEN_ITEM_ALPHA_BLEND,
+    SCREEN_ITEM_ALPHA_TEST,
     SCREEN_ITEM_OK = 0xe
 };
 
@@ -12092,22 +12095,26 @@ enum ScreenOptionsText {
     SCREEN_TEXT_MENU,
     SCREEN_TEXT_VSYNC,
     SCREEN_TEXT_FULLSCREEN,
-    SCREEN_TEXT_TRANSPARENT,
+    SCREEN_TEXT_ALPHA_BLEND,
+    SCREEN_TEXT_ALPHA_TEST,
     SCREEN_TEXT_COUNT
 };
 
 // In the game's character set (Windows-1252; Polish letters in place of
 // some symbols: 0xb1 is l with a stroke).
 static const char *const g_screenOptionsText[6][SCREEN_TEXT_COUNT] = {
-    { "Screen", "HUD Size", "Menu Size", "Vertical Sync", "Full Screen", "Transparent 3D (Test)" },
+    { "Screen", "HUD Size", "Menu Size", "Vertical Sync", "Full Screen", "Alpha Blending (Test)",
+      "Alpha Test (Test)" },
     { "\xc9" "cran", "Taille du HUD", "Taille des menus", "Synchro verticale", "Plein \xe9" "cran",
-      "3D transparente (test)" },
+      "Fusion alpha (test)", "Test alpha (test)" },
     { "Pantalla", "Tama\xf1o del HUD", "Tama\xf1o de los men\xfas", "Sincronizaci\xf3n vertical", "Pantalla completa",
-      "3D transparente (prueba)" },
+      "Mezcla alfa (prueba)", "Prueba alfa (prueba)" },
     { "Schermo", "Dimensione HUD", "Dimensione menu", "Sincronia verticale", "Schermo intero",
-      "3D trasparente (test)" },
-    { "Bildschirm", "HUD-Gr\xf6\xdf" "e", "Men\xfcgr\xf6\xdf" "e", "VSync", "Vollbild", "Transparentes 3D (Test)" },
-    { "Ekran", "Rozmiar HUD", "Rozmiar menu", "Synchronizacja pionowa", "Pe\xb1ny ekran", "Przezroczyste 3D (test)" },
+      "Fusione alfa (test)", "Test alfa (test)" },
+    { "Bildschirm", "HUD-Gr\xf6\xdf" "e", "Men\xfcgr\xf6\xdf" "e", "VSync", "Vollbild", "Alpha-Blending (Test)",
+      "Alpha-Test (Test)" },
+    { "Ekran", "Rozmiar HUD", "Rozmiar menu", "Synchronizacja pionowa", "Pe\xb1ny ekran", "Mieszanie alfa (test)",
+      "Test alfa (test)" },
 };
 
 // Sizes offered, in percent.
@@ -12147,7 +12154,7 @@ static int ScreenOptions_SizeIndex(int percent, int count)
 
 // The values the page opened with: unchanged ones are not written, so that a
 // size set in opencmr2.ini between the steps offered stays.
-static BYTE g_screenOptionsShown[5];
+static BYTE g_screenOptionsShown[6];
 
 void FrontendMenu_EnterScreenOptions(Menu *pMenu, int param)
 {
@@ -12163,8 +12170,9 @@ void FrontendMenu_EnterScreenOptions(Menu *pMenu, int param)
     // On is the first choice, as in the graphics menu.
     Menu_GetItem(pMenu, SCREEN_ITEM_VSYNC)->max = Sys_GetOption("video.vsync", 1) != 0 ? 0 : 1;
     Menu_GetItem(pMenu, SCREEN_ITEM_FULLSCREEN)->max = g_pGraphics->isFullscreen ? 0 : 1;
-    Menu_GetItem(pMenu, SCREEN_ITEM_TRANSPARENT)->max = Sys_GetOption("video.transparent_3d", 1) != 0 ? 0 : 1;
-    for (int i = 0; i < 5; i++)
+    Menu_GetItem(pMenu, SCREEN_ITEM_ALPHA_BLEND)->max = Sys_GetOption("video.alpha_blend", 1) != 0 ? 0 : 1;
+    Menu_GetItem(pMenu, SCREEN_ITEM_ALPHA_TEST)->max = Sys_GetOption("video.alpha_test", 1) != 0 ? 0 : 1;
+    for (int i = 0; i < 6; i++)
         g_screenOptionsShown[i] = Menu_GetItem(pMenu, i)->max;
 }
 
@@ -12188,9 +12196,12 @@ void FrontendMenu_ApplyScreenOptions(Menu *pMenu, MenuItem *pItem)
         Gfx_SetFullscreen(g_pGraphics->isFullscreen);
         Sys_SetOption("video.fullscreen", g_pGraphics->isFullscreen);
     }
-    value = Menu_GetItem(pMenu, SCREEN_ITEM_TRANSPARENT)->max;
-    if (value != g_screenOptionsShown[SCREEN_ITEM_TRANSPARENT])
-        Sys_SetOption("video.transparent_3d", value == 0);
+    value = Menu_GetItem(pMenu, SCREEN_ITEM_ALPHA_BLEND)->max;
+    if (value != g_screenOptionsShown[SCREEN_ITEM_ALPHA_BLEND])
+        Sys_SetOption("video.alpha_blend", value == 0);
+    value = Menu_GetItem(pMenu, SCREEN_ITEM_ALPHA_TEST)->max;
+    if (value != g_screenOptionsShown[SCREEN_ITEM_ALPHA_TEST])
+        Sys_SetOption("video.alpha_test", value == 0);
 }
 
 // The rows of the advanced graphics page: a label, then the value as
@@ -12255,11 +12266,13 @@ void FrontendMenu_DrawScreenOptions(Menu *pMenu)
             break;
         case SCREEN_ITEM_VSYNC:
         case SCREEN_ITEM_FULLSCREEN:
-        case SCREEN_ITEM_TRANSPARENT:
+        case SCREEN_ITEM_ALPHA_BLEND:
+        case SCREEN_ITEM_ALPHA_TEST:
             strcpy(CFrontend::m_stringDest,
-                   ScreenOptions_Text(pItem->value == SCREEN_ITEM_VSYNC        ? SCREEN_TEXT_VSYNC
-                                      : pItem->value == SCREEN_ITEM_FULLSCREEN ? SCREEN_TEXT_FULLSCREEN
-                                                                               : SCREEN_TEXT_TRANSPARENT));
+                   ScreenOptions_Text(pItem->value == SCREEN_ITEM_VSYNC         ? SCREEN_TEXT_VSYNC
+                                      : pItem->value == SCREEN_ITEM_FULLSCREEN  ? SCREEN_TEXT_FULLSCREEN
+                                      : pItem->value == SCREEN_ITEM_ALPHA_BLEND ? SCREEN_TEXT_ALPHA_BLEND
+                                                                                : SCREEN_TEXT_ALPHA_TEST));
             Font_DrawText(1, CFrontend::m_stringDest, x, textY, (int *)pColour, 0x11);
             for (j = 0; j < pItem->min; j++) {
                 x += (int)(g_pGraphics->resX * 10) / 640 + Font_GetTextWidth(1, (BYTE *)CFrontend::m_stringDest);
@@ -12298,7 +12311,8 @@ void FrontendMenu_BuildScreenOptions(void)
                       SCREEN_ITEM_MENU);
     Menu_AddItemType3(&g_screenOptionsMenu, 0, -1, 2, 0, 0, 0, 0, SCREEN_ITEM_VSYNC);
     Menu_AddItemType3(&g_screenOptionsMenu, 0, -1, 2, 0, 0, 0, 0, SCREEN_ITEM_FULLSCREEN);
-    Menu_AddItemType3(&g_screenOptionsMenu, 0, -1, 2, 0, 0, 0, 0, SCREEN_ITEM_TRANSPARENT);
+    Menu_AddItemType3(&g_screenOptionsMenu, 0, -1, 2, 0, 0, 0, 0, SCREEN_ITEM_ALPHA_BLEND);
+    Menu_AddItemType3(&g_screenOptionsMenu, 0, -1, 2, 0, 0, 0, 0, SCREEN_ITEM_ALPHA_TEST);
     Menu_AddItemType1(&g_screenOptionsMenu, 0, 0x67, (MenuItemAction)FrontendMenu_ApplyScreenOptions, SCREEN_ITEM_OK);
     Menu_SetCallbacks(&g_screenOptionsMenu, FrontendMenu_EnterScreenOptions, NULL,
                       (MenuCallback)FrontendMenu_DrawScreenOptions, NULL);
