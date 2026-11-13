@@ -366,8 +366,16 @@ void AtlasForget(const GfxTexture *t)
         Flush(FLUSH_ATLAS);
     s_atlasEntries.clear();
     s_atlasPacker.Reset(s_atlasSize / 4, s_atlasSize / 4);
-    if (t == s_atlas)
+    if (t == s_atlas) {
         s_atlas = NULL;
+    } else if (s_atlas != NULL) {
+        // The textures that come now take the places of those that were
+        // there: all of the atlas changes (an executor that writes a changed
+        // part into the memory that the GPU reads takes new memory then).
+        s_atlas->changedRect.x0 = s_atlas->changedRect.y0 = 0;
+        s_atlas->changedRect.x1 = s_atlas->width;
+        s_atlas->changedRect.y1 = s_atlas->height;
+    }
 }
 
 // After a frame: the atlas that was full goes, and the next draw from an

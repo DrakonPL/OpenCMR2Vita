@@ -37,6 +37,7 @@ struct GxmTexture {
     // only (GfxTexture::changedRect).
     bool madeMips = false;
     std::unique_ptr<std::vector<uint8_t>[]> keptMips;
+    bool uploaded = false;          // each level is in memory: a changed part can go there alone
 };
 
 class GxmTextures {

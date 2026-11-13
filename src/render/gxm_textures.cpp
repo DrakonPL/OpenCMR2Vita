@@ -69,6 +69,25 @@ void CopyLevel(int format, const uint8_t *src, const GxmTextureLayout &layout, c
     }
 }
 
+// The blocks x0, y0 .. x1 - 1, y1 - 1 of a level of a swizzled texture of
+// blocks, from the CPU copy into the GPU layout. Returns the least alpha of
+// them.
+int CopyLevelBlocks(int format, const uint8_t *src, const GxmTextureLayout &layout, const GxmLevelLayout &l,
+                    GfxMipRect blocks, uint8_t *dst)
+{
+    const unsigned width = l.rowBytes / layout.blockBytes;
+    int minAlpha = 255;
+    for (int y = blocks.y0; y < blocks.y1; y++) {
+        const uint8_t *row = src + (size_t)y * l.sourceRowBytes + (size_t)blocks.x0 * layout.blockBytes;
+        for (int x = blocks.x0; x < blocks.x1; x++)
+            memcpy(dst + (size_t)Gxm_SwizzledBlock((unsigned)x, (unsigned)y, width, l.rows) * layout.blockBytes,
+                   row + (size_t)(x - blocks.x0) * layout.blockBytes, layout.blockBytes);
+        const int a = Gxm_MinAlpha(format, row, (size_t)(blocks.x1 - blocks.x0) * layout.blockBytes);
+        minAlpha = a < minAlpha ? a : minAlpha;
+    }
+    return minAlpha;
+}
+
 uint32_t SamplerKey(int minFilter, int magFilter, int mipFilter, int address)
 {
     return (uint32_t)(minFilter & 3) | (uint32_t)(magFilter & 3) << 2 | (uint32_t)(mipFilter & 3) << 4 |
@@ -240,6 +259,41 @@ void GxmTextures::Upload(std::vector<GfxTexture *> &textures, unsigned frame)
         t->dirty = false;
         if (g == nullptr)
             continue;
+        // A texture that keeps its levels and changed in a part (a texture
+        // that is new in the atlas): only the blocks of that part go to the
+        // GPU, into the memory that is there. The whole atlas of 2,048
+        // texels, into new memory, took 285 ms of a frame of a race. No
+        // frame that the GPU still draws reads the blocks of a texture that
+        // is new there. A part that is all of the texture (the atlas starts
+        // again) takes the whole way.
+        const GfxMipRect part = Gfx_MipPartOf(t->changedRect, t->width, t->height, g->layout.levels);
+        const bool partOnly = g->keptMips != nullptr && g->uploaded && g->layout.swizzled && g->layout.faceBytes == 0 &&
+                              !t->changedRect.Empty() &&
+                              !(part.x0 == 0 && part.y0 == 0 && part.x1 == t->width && part.y1 == t->height) &&
+                              !t->levels[0][0].empty();
+        if (partOnly) {
+            const uint64_t start = sceKernelGetProcessTimeWide();
+            Gfx_MakeBC3Mips(t->levels[0][0].data(), t->width, t->height, g->layout.levels, t->changedRect,
+                            g->keptMips.get());
+            mipMicros += sceKernelGetProcessTimeWide() - start;
+            mipTextures++;
+            t->changedRect = GfxMipRect();
+            int minAlpha = g->minAlpha;
+            for (int m = 0; m < g->layout.levels; m++) {
+                const GxmLevelLayout &l = g->layout.level[m];
+                const std::vector<uint8_t> &source = m < t->mipLevels ? t->levels[0][m] : g->keptMips[m];
+                if (source.size() < (size_t)l.sourceRowBytes * l.sourceRows) {
+                    minAlpha = 0;
+                    continue;
+                }
+                const int a = CopyLevelBlocks(t->format, source.data(), g->layout, l,
+                                              Gfx_MipPartBlocks(part, t->width, t->height, m),
+                                              (uint8_t *)g->memory + l.offset);
+                minAlpha = a < minAlpha ? a : minAlpha;
+            }
+            g->minAlpha = (uint8_t)minAlpha;
+            continue;
+        }
         if (g->lastDrawn != ~0u && frame - g->lastDrawn < (unsigned)kGxmFrameSlots && g->target == nullptr) {
             void *fresh = memory.Textures().Alloc(g->layout.bytes);
             if (fresh != nullptr) {
@@ -285,6 +339,7 @@ void GxmTextures::Upload(std::vector<GfxTexture *> &textures, unsigned frame)
                 }
             }
         g->minAlpha = (uint8_t)minAlpha;
+        g->uploaded = true;
     }
 }
 

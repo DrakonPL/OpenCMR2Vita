@@ -21,6 +21,17 @@ struct GfxMipRect {
 // (0: no limit).
 int Gfx_MipLevelCount(int width, int height, int limit);
 
+// The part of level 0 whose levels Gfx_MakeBC3Mips makes for a changed part:
+// out to whole blocks of the last level, and inside the texture. An empty
+// rectangle: all of the texture.
+GfxMipRect Gfx_MipPartOf(GfxMipRect changed, int width, int height, int count);
+
+// The blocks of a level (0: the texture) that have texels of a part of level
+// 0 (as Gfx_MipPartOf gives it): x0, y0 the first block, x1, y1 past the
+// last. An executor that has the levels on the GPU writes these blocks for
+// a changed part, and no other block changed.
+GfxMipRect Gfx_MipPartBlocks(GfxMipRect part, int width, int height, int level);
+
 // Levels 1 .. count - 1 of a BC3 texture into mips[1 .. count - 1], from
 // level0 (rows of 4x4 blocks, as GfxTexture::levels). changed: the part of
 // level 0 that changed since mips were made. The blocks of mips outside its
