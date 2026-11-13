@@ -346,6 +346,18 @@ struct FrameParts : Diagnostics::Observer {
     uint64_t tickMicros = 0, presentMicros = 0, frameMicros = 0, recorderMicros = 0;
     unsigned ticks = 0;
     bool inTick = false;
+    // The parts of the scene: the time of each, and the part that runs now.
+    uint64_t partMicros[Diagnostics::SCENE_PART_COUNT] = {};
+    uint64_t partStart = 0;
+    int part = Diagnostics::SCENE_PART_NONE;
+    void ScenePart(int next) override
+    {
+        const uint64_t now = sceKernelGetProcessTimeWide();
+        if (part != Diagnostics::SCENE_PART_NONE)
+            partMicros[part] += now - partStart;
+        part = next >= 0 && next < Diagnostics::SCENE_PART_COUNT ? next : Diagnostics::SCENE_PART_NONE;
+        partStart = now;
+    }
     void BeginTick(unsigned char) override
     {
         tickStart = sceKernelGetProcessTimeWide();
@@ -357,7 +369,12 @@ struct FrameParts : Diagnostics::Observer {
         ticks++;
         inTick = false;
     }
-    void BeginPresent() override { presentStart = sceKernelGetProcessTimeWide(); }
+    void BeginPresent() override
+    {
+        // A present is no part of the scene.
+        ScenePart(Diagnostics::SCENE_PART_NONE);
+        presentStart = sceKernelGetProcessTimeWide();
+    }
     void EndPresent() override
     {
         const uint64_t spent = sceKernelGetProcessTimeWide() - presentStart;
@@ -371,6 +388,7 @@ struct FrameParts : Diagnostics::Observer {
     {
         tickMicros = presentMicros = frameMicros = recorderMicros = 0;
         ticks = 0;
+        memset(partMicros, 0, sizeof(partMicros));
     }
 };
 FrameParts s_frameParts;
@@ -426,6 +444,21 @@ void SysVita_FramePresented(void)
                 p.tickMicros / perFrame, (double)p.ticks / periodFrames,
                 (p.frameMicros > known ? p.frameMicros - known : 0) / perFrame, p.recorderMicros / perFrame,
                 p.presentMicros / perFrame, sumMs / periodFrames - p.frameMicros / perFrame);
+        uint64_t parts = 0;
+        for (int i = 1; i < Diagnostics::SCENE_PART_COUNT; i++)
+            parts += p.partMicros[i];
+        if (parts > 0)
+            Sys_Log("heartbeat: scene parts ms: setup %.2f, particles %.2f, sky %.2f, ground %.2f, shadows %.2f, "
+                    "objects %.2f, billboards %.2f, nodes %.2f, layers %.2f",
+                    p.partMicros[Diagnostics::SCENE_PART_SETUP] / perFrame,
+                    p.partMicros[Diagnostics::SCENE_PART_PARTICLES] / perFrame,
+                    p.partMicros[Diagnostics::SCENE_PART_SKY] / perFrame,
+                    p.partMicros[Diagnostics::SCENE_PART_GROUND] / perFrame,
+                    p.partMicros[Diagnostics::SCENE_PART_SHADOWS] / perFrame,
+                    p.partMicros[Diagnostics::SCENE_PART_OBJECTS] / perFrame,
+                    p.partMicros[Diagnostics::SCENE_PART_BILLBOARDS] / perFrame,
+                    p.partMicros[Diagnostics::SCENE_PART_NODES] / perFrame,
+                    p.partMicros[Diagnostics::SCENE_PART_LAYERS] / perFrame);
     }
     s_frameParts.Reset();
     periodStart = now;

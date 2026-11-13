@@ -1,4 +1,5 @@
 #include "port/sys.h"
+#include "port/diagnostics.h"
 #include "RaceCallbackStorage.h"
 #include "FloatToInt.h"
 #include "StageBlock.h"
@@ -2596,6 +2597,14 @@ static void Game_BeginDistanceFade(void)
                         X87S_MUL(X87S_FILD(float, end), CGraphics::m_oneOver65536));
 }
 
+// PORT: names the part of the scene that starts, for the frame timing of dev
+// builds. No observer: no cost.
+static inline void Game_ScenePart(int part)
+{
+    if (Diagnostics::observer)
+        Diagnostics::observer->ScenePart(part);
+}
+
 // match 94%: the residual diff is register allocation (the relight loop walks
 // the sector list from a register where the original keeps the pointer in the
 // argument slot, and the inlined fixed point normalisation uses different
@@ -2617,6 +2626,9 @@ int Game_DrawSceneViewport(SceneNode *pRoot, SceneNode *pCamera, void *pRect, in
     CGame::m_unk0x0059ce20 = 0;
     // PORT: the renderer has no lost device to fail BeginScene.
     Gfx_BeginScene();
+    // PORT: the parts of the scene are named for the frame timing of dev
+    // builds (Diagnostics::Observer::ScenePart).
+    Game_ScenePart(Diagnostics::SCENE_PART_SETUP);
     memset(&viewport, 0, sizeof(viewport));
     viewport.x = ((short *)pRect)[0];
     viewport.y = ((short *)pRect)[1];
@@ -2649,7 +2661,9 @@ int Game_DrawSceneViewport(SceneNode *pRoot, SceneNode *pCamera, void *pRect, in
         }
         CGraphics::SetCullMode(CGame::GetSectorDrawState());
         FixMatrix_GetPosition(&cameraPosition, &pCamera->world);
+        Game_ScenePart(Diagnostics::SCENE_PART_PARTICLES);
         Particle_DrawAll(pCamera, (BYTE)bit);
+        Game_ScenePart(Diagnostics::SCENE_PART_SETUP);
         forward.x = g_unk0x0059be6c->world.forward.x;
         forward.y = 0;
         forward.z = g_unk0x0059be6c->world.forward.z;
@@ -2677,15 +2691,19 @@ int Game_DrawSceneViewport(SceneNode *pRoot, SceneNode *pCamera, void *pRect, in
             Graphics_SetLightingMode(5);
             farPlane = CGraphics::m_farPlaneFixed;
             CGraphics::SetProjection(0, 0, 0x960000, 0);
+            Game_ScenePart(Diagnostics::SCENE_PART_SKY);
             Game_DrawUnsortedNodes(bit);
             CGraphics::SetProjection(0, 0, farPlane, 0);
             // PORT: the scenery fades into the backdrop (Game_BeginDistanceFade).
             Game_BeginDistanceFade();
             Graphics_EnableFog();
             Graphics_SetLightingMode(0);
+            Game_ScenePart(Diagnostics::SCENE_PART_GROUND);
             Game_DrawCulledSectorMeshes();
             Graphics_SetLightingMode(5);
+            Game_ScenePart(Diagnostics::SCENE_PART_SHADOWS);
             Game_DrawCulledSectorShadows();
+            Game_ScenePart(Diagnostics::SCENE_PART_LAYERS);
             Graphics_SwitchAlphaBlendAndTest(1);
             Glow_Draw(pCamera, (BYTE)bit);
             Quad2D_DrawLayer(8);
@@ -2693,8 +2711,11 @@ int Game_DrawSceneViewport(SceneNode *pRoot, SceneNode *pCamera, void *pRect, in
             Quad2D_DrawLayer(0x20);
             Graphics_SetLightingMode(1);
             if (CGame::m_unk0x0059ce14 != 0) {
+                Game_ScenePart(Diagnostics::SCENE_PART_OBJECTS);
                 Game_DrawStaticStageObjects();
+                Game_ScenePart(Diagnostics::SCENE_PART_BILLBOARDS);
                 Game_DrawDeferredObjects();
+                Game_ScenePart(Diagnostics::SCENE_PART_LAYERS);
                 Gfx_SetTransform(GFX_TRANSFORM_WORLD, &g_identityWorldMatrix);
                 Graphics_SwitchAlphaBlendAndTest(1);
                 CGraphics::SetCachedSourceDestinationBlend(5, 6);
@@ -2704,18 +2725,24 @@ int Game_DrawSceneViewport(SceneNode *pRoot, SceneNode *pCamera, void *pRect, in
                 Line2D_Draw();
                 Billboard_Draw(pCamera);
                 Graphics_SetLightingMode(1);
+                Game_ScenePart(Diagnostics::SCENE_PART_NODES);
                 Game_QueueVisibleSectorNodes(bit);
                 Game_DrawSortedNodes(bit);
             } else {
+                Game_ScenePart(Diagnostics::SCENE_PART_OBJECTS);
                 Game_DrawStaticStageObjects();
+                Game_ScenePart(Diagnostics::SCENE_PART_NODES);
                 Game_QueueVisibleSectorNodes(bit);
                 Game_DrawSortedNodes(bit);
+                Game_ScenePart(Diagnostics::SCENE_PART_BILLBOARDS);
                 Game_DrawDeferredObjects();
             }
             Gfx_SetDistanceFade(0.0f, 0.0f);
         } else {
+            Game_ScenePart(Diagnostics::SCENE_PART_NODES);
             Game_DrawWorldMeshNodesAnd2DLayer();
         }
+        Game_ScenePart(Diagnostics::SCENE_PART_LAYERS);
         Gfx_SetTransform(GFX_TRANSFORM_WORLD, &g_identityWorldMatrix);
         Graphics_SwitchAlphaBlendAndTest(1);
         CGraphics::SetCachedSourceDestinationBlend(5, 6);
@@ -2753,6 +2780,7 @@ int Game_DrawSceneViewport(SceneNode *pRoot, SceneNode *pCamera, void *pRect, in
     Sprite_DrawLayer(1);
     CGraphics::SetCullMode(CGame::GetSectorDrawState());
     Graphics_UpdateFrameStatistics();
+    Game_ScenePart(Diagnostics::SCENE_PART_NONE);
     Gfx_EndScene();
     return 1;
 }
