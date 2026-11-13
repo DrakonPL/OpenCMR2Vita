@@ -185,6 +185,7 @@ struct Bound {
     unsigned vertexVersion = 0, vertexRows = 0;     // a 3D draw: the version and the rows of the vertex uniforms
     float target[2] = {};                           // a 2D draw: the screen size
     float fragment[FU_ROWS][4] = {};                // the rows of the fragment program
+    unsigned fragmentVersion = 0;                   // the fill of the executor's rows that these are equal to
 };
 
 struct Stats {
@@ -362,6 +363,16 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     const GfxDrawState *vertexUniformState = nullptr;
     int vertexUniformW = 0, vertexUniformH = 0;
     bool vertexUniformBackBuffer = false;
+    // The fragment uniforms of the state drawn last: filled again when the
+    // state, the target or the backdrop copy changes. The draws of one state
+    // have their own textures, and the rows of most programs have nothing of
+    // a texture. A program that reads the size of its texture gets the rows
+    // filled for each pass. The version goes up with each fill.
+    const GfxDrawState *fragmentRowsState = nullptr;
+    int fragmentRowsW = 0, fragmentRowsH = 0;
+    bool fragmentRowsFade = false;
+    unsigned fragmentRowsVersion = 1;
+    float fragmentRows[FU_ROWS][4];
     // The viewport of the state drawn last, in the target's pixels: the
     // draws of one state on one target have one viewport.
     const GfxDrawState *viewportState = nullptr;
@@ -1477,16 +1488,28 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             }
             const Variant &v = variants[index];
             if (v.uniforms != nullptr) {
-                float fragmentUniforms[FU_ROWS][4];
-                Gxm_FillFragmentUniforms(s, targetW, targetH, backdropCopied, fragmentUniforms);
-                const size_t bytes = std::min<size_t>(v.uniformRows, FU_ROWS) * sizeof(fragmentUniforms[0]);
-                if (always || !bound.fragmentUniforms || memcmp(bound.fragment, fragmentUniforms, bytes) != 0) {
+                const bool sizes = Gxm_KeyReadsTextureSize(kGxmFragmentVariants[index].key);
+                if (sizes || fragmentRowsState != &s || fragmentRowsW != targetW || fragmentRowsH != targetH ||
+                    fragmentRowsFade != backdropCopied) {
+                    Gxm_FillFragmentUniforms(s, targetW, targetH, backdropCopied, fragmentRows);
+                    fragmentRowsState = sizes ? nullptr : &s;
+                    fragmentRowsW = targetW;
+                    fragmentRowsH = targetH;
+                    fragmentRowsFade = backdropCopied;
+                    fragmentRowsVersion++;
+                }
+                const size_t bytes = std::min<size_t>(v.uniformRows, FU_ROWS) * sizeof(fragmentRows[0]);
+                // The buffer of the program has the rows of this fill, or
+                // rows that compare equal: then it stays.
+                if (always || !bound.fragmentUniforms ||
+                    (bound.fragmentVersion != fragmentRowsVersion && memcmp(bound.fragment, fragmentRows, bytes) != 0)) {
                     sceGxmReserveFragmentDefaultUniformBuffer(context, &buffer);
-                    sceGxmSetUniformDataF(buffer, v.uniforms, 0, v.uniformRows * 4, fragmentUniforms[0]);
+                    sceGxmSetUniformDataF(buffer, v.uniforms, 0, v.uniformRows * 4, fragmentRows[0]);
                     bound.fragmentUniforms = true;
-                    memcpy(bound.fragment, fragmentUniforms, bytes);
+                    memcpy(bound.fragment, fragmentRows, bytes);
                     stats.fragmentUploads++;
                 }
+                bound.fragmentVersion = fragmentRowsVersion;
             }
             BindTextures(s, kGxmFragmentVariants[index]);
             sceGxmSetVertexStream(context, 0, vertices + c.firstVertexByte);
@@ -1704,6 +1727,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         // The frame's states go with this Execute.
         vertexUniformState = nullptr;
         viewportState = nullptr;
+        fragmentRowsState = nullptr;
         probe.submitMicros += sceKernelGetProcessTimeWide() - entered;
         if (!present)
             return;

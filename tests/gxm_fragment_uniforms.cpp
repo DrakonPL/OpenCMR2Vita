@@ -78,6 +78,34 @@ int main()
     Gxm_FillFragmentUniforms(menu, 960, 544, false, rows);
     REQUIRE(rows[FU_TEX_SIZE1][0] == 16.0f && rows[FU_TEX_SIZE0][0] == 0.0f);
 
+    // The same from the fragment key of a state: the executor asks the key
+    // of the variant it draws with. A stage that is off reads no texture.
+    REQUIRE(!Gxm_KeyReadsTextureSize(Gfx_FragmentKey(scenery, true)));
+    REQUIRE(Gxm_KeyReadsTextureSize(Gfx_FragmentKey(hud, false)));
+    REQUIRE(Gxm_KeyReadsTextureSize(Gfx_FragmentKey(menu, false)));
+    {
+        GfxDrawState off = menu;
+        off.stages[1].colorOp = GFX_TOP_DISABLE;
+        REQUIRE(!Gxm_KeyReadsTextureSize(Gfx_FragmentKey(off, false)));
+        off = hud;
+        off.stages[0].colorOp = GFX_TOP_DISABLE;
+        REQUIRE(!Gxm_KeyReadsTextureSize(Gfx_FragmentKey(off, false)));
+        // The key's other bits (the alpha test, the fog, the fade) are not a size.
+        GfxDrawState flags = scenery;
+        flags.alphaTest = true;
+        flags.fog = true;
+        flags.fogTableMode = GFX_FOG_LINEAR;
+        flags.specular = true;
+        flags.fadeStart = 10.0f;
+        flags.fadeEnd = 20.0f;
+        REQUIRE(!Gxm_KeyReadsTextureSize(Gfx_FragmentKey(flags, true)));
+        // Each stage alone.
+        GfxDrawState second = scenery;
+        second.stages[1].colorOp = GFX_TOP_MODULATE;
+        second.stages[1].texture = &digits;
+        REQUIRE(Gxm_KeyReadsTextureSize(Gfx_FragmentKey(second, true)));
+    }
+
     // No backdrop copy: the fade range is beyond any distance, with different
     // edges.
     REQUIRE(rows[FU_DISTANCE_FADE][0] == kGxmNoFadeStart && rows[FU_DISTANCE_FADE][1] == kGxmNoFadeEnd);
