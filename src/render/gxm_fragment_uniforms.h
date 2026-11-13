@@ -26,6 +26,19 @@ inline bool Gxm_ReadsTextureSize(const GfxStageState &stage)
     return kind == 5 || kind == 6 || Gfx_ScaledPoint(stage);
 }
 
+// The same for the program of a fragment key (shader_key.h): the kind and
+// the scaled bit of its two stages. A stage that is off has no kind in the
+// key, and its program reads no texture.
+inline bool Gxm_KeyReadsTextureSize(uint64_t key)
+{
+    for (int shift = 0; shift <= 14; shift += 14) {
+        const unsigned kind = (unsigned)(key >> (shift + 10)) & 7;
+        if (kind == 5 || kind == 6 || (key >> (shift + 13) & 1) != 0)
+            return true;
+    }
+    return false;
+}
+
 // fade: the frame has its backdrop copy.
 inline void Gxm_FillFragmentUniforms(const GfxDrawState &s, int targetW, int targetH, bool fade, float u[FU_ROWS][4])
 {
