@@ -1749,16 +1749,22 @@ extern "C" GfxVertex *Gfx_LockVertexBuffer(GfxVertexBuffer *buffer)
     return buffer->vertices.data();
 }
 
-extern "C" GfxVertex *Gfx_LockVertexBufferRange(GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount)
+// Whether a lock of count vertices of a buffer from first is a range lock
+// (gfx_range_locks.h). Only a buffer whose draws refer to its GPU copy has
+// parts: a buffer that was locked whole a short time ago has a snapshot or
+// copies.
+static bool RangeLockPossible(const GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount)
 {
-    if (buffer == NULL)
-        return NULL;
-    // Only a buffer whose draws refer to its GPU copy has parts: a buffer
-    // that was locked whole a short time ago has a snapshot or copies.
-    if (!RangeLocksWanted() || buffer->streaming || vertexCount == 0 ||
-        firstVertex + vertexCount > buffer->vertices.size() ||
-        s_presentedFrames - buffer->lastLockFrame < kStaticAfterFrames)
-        return Gfx_LockVertexBuffer(buffer);
+    return RangeLocksWanted() && !buffer->streaming && vertexCount != 0 &&
+           firstVertex + vertexCount <= buffer->vertices.size() &&
+           s_presentedFrames - buffer->lastLockFrame >= kStaticAfterFrames;
+}
+
+// Before the game writes count vertices of a buffer from first, as a range
+// lock: what refers to the vertices as they are runs first, and their blocks
+// are recent.
+static void BeginRangeWrite(GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount)
+{
     SettleBatches(buffer, firstVertex, vertexCount);
     // The draws recorded so far that refer to the GPU copy keep its
     // contents: the copy changes only with a patch. A patch of this frame
@@ -1781,8 +1787,47 @@ extern "C" GfxVertex *Gfx_LockVertexBufferRange(GfxVertexBuffer *buffer, DWORD f
     if (s_copied.buffer == buffer)
         s_copied = CopiedRange();
     buffer->rangeLocks.Lock(firstVertex, vertexCount, s_presentedFrames);
+}
+
+extern "C" GfxVertex *Gfx_LockVertexBufferRange(GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount)
+{
+    if (buffer == NULL)
+        return NULL;
+    if (!RangeLockPossible(buffer, firstVertex, vertexCount))
+        return Gfx_LockVertexBuffer(buffer);
+    BeginRangeWrite(buffer, firstVertex, vertexCount);
+    // The caller can write any position: the boxes of these vertices are
+    // measured again.
     buffer->lockStamps.Mark(firstVertex, vertexCount, ++buffer->lockSerial);
     return buffer->vertices.data();
+}
+
+extern "C" void Gfx_WriteVertexBufferRange(GfxVertexBuffer *buffer, DWORD firstVertex, const GfxVertex *vertices,
+                                           DWORD vertexCount)
+{
+    if (buffer == NULL || vertices == NULL || vertexCount == 0 ||
+        firstVertex + vertexCount > buffer->vertices.size())
+        return;
+    const size_t bytes = (size_t)vertexCount * sizeof(GfxVertex);
+    if (!RangeLockPossible(buffer, firstVertex, vertexCount)) {
+        memcpy(Gfx_LockVertexBuffer(buffer) + firstVertex, vertices, bytes);
+        return;
+    }
+    GfxVertex *target = &buffer->vertices[firstVertex];
+    // The vertices that the buffer has: nothing changes, and no draw of
+    // them is a draw of changed vertices.
+    if (memcmp(target, vertices, bytes) == 0)
+        return;
+    BeginRangeWrite(buffer, firstVertex, vertexCount);
+    // The boxes of these vertices stay while their positions stay (the
+    // stage lighting writes colours: a box measured again for each draw of
+    // each mesh in the view took 1 to 2 ms of a frame of a wood).
+    bool moved = false;
+    for (DWORD i = 0; i < vertexCount && !moved; i++)
+        moved = memcmp(&target[i].x, &vertices[i].x, 3 * sizeof(float)) != 0;
+    memcpy(target, vertices, bytes);
+    if (moved)
+        buffer->lockStamps.Mark(firstVertex, vertexCount, ++buffer->lockSerial);
 }
 
 extern "C" void Gfx_UnlockVertexBuffer(GfxVertexBuffer *)

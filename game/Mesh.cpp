@@ -109,7 +109,6 @@ void Mesh_Rebuild(Mesh *pMesh)
     int n;
     int i;
     DWORD colour;
-    void *pVertices;
 
     vertexCount = pMesh->field_0x10;
     pVertexData = (BYTE *)pMesh->pVertexData;
@@ -120,12 +119,9 @@ void Mesh_Rebuild(Mesh *pMesh)
         MESH_SET_VERTEX_COLOUR(2);
     }
 
-    // PORT: a lock of the vertices of this mesh alone (see Mesh_RefreshVertices).
-    pVertices = Gfx_LockVertexBufferRange(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex],
-                                          (DWORD)pMesh->vertexOffset, (DWORD)vertexCount);
-    memcpy((char *)pVertices + pMesh->vertexOffset * 0x30, pMesh->pVertexData,
-           vertexCount * 0x30);
-    Gfx_UnlockVertexBuffer(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex]);
+    // PORT: a write of the vertices of this mesh alone (see Mesh_RefreshVertices).
+    Gfx_WriteVertexBufferRange(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex],
+                               (DWORD)pMesh->vertexOffset, (const GfxVertex *)pMesh->pVertexData, (DWORD)vertexCount);
 }
 
 // GLOBAL: CMR2 0x0052101c
@@ -256,16 +252,15 @@ void Mesh_UploadVertices(Mesh *pMesh)
 // FUNCTION: CMR2 0x004b2020
 void Mesh_RefreshVertices(Mesh *pMesh)
 {
-    void *pVertices;
 
-    // PORT: a lock of the vertices of this mesh alone. A vertex buffer has
-    // the vertices of many meshes: the original locked all of it, and the
-    // renderer then took each mesh of the buffer as changed (the stage
-    // lighting changes some meshes in each frame).
-    pVertices = Gfx_LockVertexBufferRange(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex],
-                                          (DWORD)pMesh->vertexOffset, (DWORD)pMesh->field_0x10);
-    memcpy((BYTE *)pVertices + pMesh->vertexOffset * 0x30, pMesh->pVertexData, pMesh->field_0x10 * 0x30);
-    Gfx_UnlockVertexBuffer(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex]);
+    // PORT: a write of the vertices of this mesh alone. A vertex buffer has
+    // the vertices of many meshes: the original locked all of it, copied
+    // the mesh and unlocked it, and the renderer then took each mesh of the
+    // buffer as changed (the stage lighting changes meshes in each frame).
+    // The renderer copies the vertices, and sees what changes in them.
+    Gfx_WriteVertexBufferRange(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex],
+                               (DWORD)pMesh->vertexOffset, (const GfxVertex *)pMesh->pVertexData,
+                               (DWORD)pMesh->field_0x10);
 }
 
 // Sets the diffuse colour of every vertex of a mesh and refreshes its vertex buffer copy.
@@ -275,17 +270,14 @@ void Mesh_SetColourAndRefresh(Mesh *pMesh, DWORD colour)
     DWORD *p;
     int count;
     int i;
-    void *pVertices;
 
     count = pMesh->field_0x10;
     p = pMesh->pVertexData;
     for (i = 0; i < count; i++)
         p[i * 12 + 6] = colour;
-    // PORT: a lock of the vertices of this mesh alone (see Mesh_RefreshVertices).
-    pVertices = Gfx_LockVertexBufferRange(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex],
-                                          (DWORD)pMesh->vertexOffset, (DWORD)count);
-    memcpy((BYTE *)pVertices + pMesh->vertexOffset * 0x30, pMesh->pVertexData, count * 0x30);
-    Gfx_UnlockVertexBuffer(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex]);
+    // PORT: a write of the vertices of this mesh alone (see Mesh_RefreshVertices).
+    Gfx_WriteVertexBufferRange(CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex],
+                               (DWORD)pMesh->vertexOffset, (const GfxVertex *)pMesh->pVertexData, (DWORD)count);
 }
 
 // Meshes cloned from others (see Mesh_CloneInto).
