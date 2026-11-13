@@ -1026,6 +1026,13 @@ void BuildModes()
     };
     for (const auto &c : classic)
         add(c[0], c[1]);
+#ifdef VITA
+    // The sizes that the display of the PS Vita scales to the whole screen
+    // (gxm_device.h): fewer pixels for the GPU, the picture of the screen's
+    // shape.
+    add(640, 368);
+    add(720, 408);
+#endif
     for (int h : heights)
         add((int)((long long)h * desktopW / desktopH) & ~1, h);
     add(desktopW, desktopH);
