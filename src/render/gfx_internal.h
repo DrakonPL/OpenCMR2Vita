@@ -58,6 +58,13 @@ struct GfxBox {
     float low[3], high[3];
 };
 
+// The box of a vertex range of a buffer, as of a range lock of the buffer
+// (GfxVertexBuffer::lockSerial).
+struct GfxRangeBox {
+    GfxBox box;
+    uint32_t serial;
+};
+
 struct GfxVertexBuffer {
     std::vector<GfxVertex> vertices;
     uint32_t version = 1;           // bumped by every lock
@@ -70,7 +77,7 @@ struct GfxVertexBuffer {
     // of the ground meshes again in each frame, and not their positions. A
     // lock makes the positions unknown. The first box after it compares a
     // hash of all positions with positionHash.
-    std::unique_ptr<GxmKeyCache<GfxBox, 6>> boxes;
+    std::unique_ptr<GxmKeyCache<GfxRangeBox, 6>> boxes;
     uint64_t positionHash = 0;
     bool positionsUnknown = true;
     // For an executor that takes joined draws: the frame has one copy of
@@ -85,10 +92,14 @@ struct GfxVertexBuffer {
     // an executor that takes joined draws: gfx_range_locks.h.
     GfxRangeLocks rangeLocks;
     uint32_t patchRecord = 0;       // the recording whose frame has patches of it (GfxFrame::patches)
-    // The range lock that is open, until the unlock: its vertices, and the
-    // hash of their positions before the game wrote them.
-    uint32_t openFirst = 0, openCount = 0;
-    uint64_t openHash = 0;
+    // The number of the last range lock, and for each block the number of
+    // the last one that touched it. The box of a vertex range stays while
+    // no later range lock touched its blocks: it is measured again then (the
+    // stage lighting writes each mesh in the view again in a frame of a
+    // wood, and a hash of the positions before and after each lock took 3 ms
+    // of a frame on the PS Vita).
+    uint32_t lockSerial = 0;
+    GfxBlockStamps lockStamps;
     // The recordings whose small batches refer to its vertices
     // (GfxSmallItem::buffer).
     GfxBlockStamps batchBlocks;

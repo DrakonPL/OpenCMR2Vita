@@ -888,9 +888,10 @@ int main()
 
     // The game changes one mesh of a vertex buffer of many
     // (Gfx_LockVertexBufferRange): for two frames the draws of that mesh
-    // copy its vertices, and the draws of the other meshes refer to the
-    // buffer. Then the frame has a patch of the blocks of the mesh, and its
-    // draws refer to the buffer again. The buffer's version stays.
+    // take its vertices from the frame's snapshot of them, and the draws of
+    // the other meshes refer to the buffer. Then the frame has a patch of
+    // the blocks of the mesh, and its draws refer to the buffer again. The
+    // buffer's version stays.
     {
         s_cullDraws = 1;
         Gfx_Present(FALSE);
@@ -926,13 +927,17 @@ int main()
         for (int frame = 0; frame < 2; frame++) {
             drawBoth();
             Gfx_Present(FALSE);
-            REQUIRE(Draws() == 2 && Draw(0).buffer == NULL && !Draw(0).snapshot && Draw(1).buffer == shared);
-            REQUIRE(Vertex3D(Draw(0), 5).diffuse == 7 && s_frame.patches.empty() && s_frame.snapshots.empty());
+            REQUIRE(Draws() == 2 && Draw(0).snapshot && Draw(0).buffer == shared);
+            REQUIRE(!Draw(1).snapshot && Draw(1).buffer == shared && s_frame.vertices.empty());
+            REQUIRE(s_frame.snapshots.size() == 1 && s_frame.snapshots[0].buffer == shared);
+            REQUIRE(s_frame.snapshots[0].first == 0 && s_frame.snapshots[0].end == 40);
+            REQUIRE(shared->vertices[5].diffuse == 7 && s_frame.patches.empty());
             REQUIRE(s_frame.buffers.size() == 1 && shared->version == version);
         }
         drawBoth();
         Gfx_Present(FALSE);
-        REQUIRE(Draws() == 2 && Draw(0).buffer == shared && Draw(1).buffer == shared && s_frame.vertices.empty());
+        REQUIRE(Draws() == 2 && !Draw(0).snapshot && Draw(0).buffer == shared && Draw(1).buffer == shared);
+        REQUIRE(s_frame.snapshots.empty() && s_frame.vertices.empty());
         REQUIRE(s_frame.patches.size() == 1 && s_frame.patches[0].buffer == shared);
         REQUIRE(s_frame.patches[0].first == 0 && s_frame.patches[0].end == 64);
         drawBoth();
@@ -940,13 +945,14 @@ int main()
         REQUIRE(Draws() == 2 && Draw(0).buffer == shared && s_frame.patches.empty() && shared->version == version);
 
         // A position of mesh A changes: the box of its draws is that of the
-        // new positions (the boxes of a buffer stay only with its positions).
+        // new positions (a box is measured again after a lock of its
+        // vertices). The box of mesh B stays.
         v = Gfx_LockVertexBufferRange(shared, 0, 40);
         v[3].x = 0.9f;
         Gfx_UnlockVertexBuffer(shared);
         drawBoth();
         Gfx_Present(FALSE);
-        REQUIRE(Draws() == 2 && Draw(0).buffer == NULL && Draw(0).hasBox && Draw(0).boxHigh[0] == 0.9f);
+        REQUIRE(Draws() == 2 && Draw(0).snapshot && Draw(0).hasBox && Draw(0).boxHigh[0] == 0.9f);
         REQUIRE(Draw(1).hasBox && Draw(1).boxHigh[0] == 139.0f * 0.001f);
 
         // The game changes the mesh after a draw of the frame that has its
@@ -960,15 +966,25 @@ int main()
         Gfx_UnlockVertexBuffer(shared);
         drawBoth();
         Gfx_Present(FALSE);
-        REQUIRE(Draws() == 2 && Draw(0).buffer == NULL && Vertex3D(Draw(0), 10).diffuse == 9 && s_frame.patches.empty());
-        // A change of a mesh with no patch in the frame runs no draw: the
-        // draws so far keep the GPU copy, which does not change yet.
+        REQUIRE(Draws() == 2 && Draw(0).snapshot && shared->vertices[10].diffuse == 9 && s_frame.patches.empty());
+        // A change of a mesh with no patch and no snapshot in the frame runs
+        // no draw: the draws so far keep the GPU copy, which does not
+        // change yet.
         drawBoth();
         v = Gfx_LockVertexBufferRange(shared, 100, 40);
         Gfx_UnlockVertexBuffer(shared);
         drawBoth();
         Gfx_Present(FALSE);
-        REQUIRE(Draws() == 4 && Draw(1).buffer == shared && Draw(3).buffer == NULL);
+        REQUIRE(Draws() == 4 && Draw(0).snapshot && !Draw(1).snapshot && Draw(1).buffer == shared && Draw(3).snapshot);
+        REQUIRE(s_frame.snapshots.size() == 1 && s_frame.snapshots[0].first == 0 && s_frame.snapshots[0].end == 140);
+        // A change of vertices that the frame has a snapshot of: the draws
+        // so far run first, with the snapshot of what the buffer had.
+        drawBoth();
+        s_frame = GfxFrame();
+        v = Gfx_LockVertexBufferRange(shared, 120, 4);
+        REQUIRE(Draws() == 2 && Draw(1).snapshot && s_frame.snapshots.size() == 1);
+        Gfx_UnlockVertexBuffer(shared);
+        Gfx_Present(FALSE);
 
         // A buffer that was locked whole a short time ago has no parts, and
         // an executor that takes no joined draws has none: a lock of all.

@@ -527,22 +527,17 @@ bool BoxOutsideView(const float *m, const GfxBox &b)
 
 // A hash of the positions of a buffer: the boxes of its ranges stay while
 // it is the same.
-uint64_t PositionHash(const GfxVertex *vertices, size_t count)
+uint64_t PositionHash(const GfxVertexBuffer *b)
 {
     uint64_t h = 0x9e3779b97f4a7c15ull;
-    for (size_t i = 0; i < count; i++) {
+    for (const GfxVertex &v : b->vertices) {
         uint32_t w[3];
-        memcpy(w, &vertices[i].x, sizeof(w));
+        memcpy(w, &v.x, sizeof(w));
         h = (h ^ w[0]) * 0x100000001b3ull;
         h = (h ^ w[1]) * 0x100000001b3ull;
         h = (h ^ w[2]) * 0x100000001b3ull;
     }
     return h;
-}
-
-uint64_t PositionHash(const GfxVertexBuffer *b)
-{
-    return PositionHash(b->vertices.data(), b->vertices.size());
 }
 
 // The box of the positions of a range of a buffer. A streaming buffer
@@ -562,12 +557,18 @@ GfxBox BufferRangeBox(GfxVertexBuffer *b, DWORD first, DWORD count)
         b->positionsUnknown = false;
     }
     if (b->boxes == NULL)
-        b->boxes.reset(new GxmKeyCache<GfxBox, 6>());
+        b->boxes.reset(new GxmKeyCache<GfxRangeBox, 6>());
     const uint64_t key = (uint64_t)first << 32 | count;
-    if (const GfxBox *known = b->boxes->Find(key))
-        return *known;
+    GfxRangeBox *known = b->boxes->Find(key);
+    // A range lock that touched the range after the box was measured: the
+    // game can have written other positions.
+    if (known != NULL && b->lockStamps.Latest(first, count) <= known->serial)
+        return known->box;
     VertexBox(&b->vertices[first], count, box.low, box.high);
-    b->boxes->Put(key) = box;
+    if (known == NULL)
+        known = &b->boxes->Put(key);
+    known->box = box;
+    known->serial = b->lockSerial;
     return box;
 }
 
@@ -978,8 +979,9 @@ void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD 
             memcpy(cmd.boxLow, knownBox->low, sizeof(cmd.boxLow));
             memcpy(cmd.boxHigh, knownBox->high, sizeof(cmd.boxHigh));
         }
-    } else if (buffer != NULL && !rested && !buffer->streaming && SnapshotsWanted()) {
-        // A buffer locked recently, before its draws: the executor copies
+    } else if (buffer != NULL && !buffer->streaming && SnapshotsWanted()) {
+        // A buffer locked recently, or a part of it (a block of
+        // gfx_range_locks.h), before its draws: the executor copies
         // the part that the frame draws once. The recorder copied each draw
         // range, and the executor copied the frame again: with the stage
         // lighting 3.6 MB twice in a frame.
@@ -1744,7 +1746,6 @@ extern "C" GfxVertex *Gfx_LockVertexBuffer(GfxVertexBuffer *buffer)
     buffer->version++;
     buffer->lastLockFrame = s_presentedFrames;
     buffer->positionsUnknown = true;
-    buffer->openCount = 0;
     return buffer->vertices.data();
 }
 
@@ -1770,24 +1771,22 @@ extern "C" GfxVertex *Gfx_LockVertexBufferRange(GfxVertexBuffer *buffer, DWORD f
         if (patched)
             Flush(FLUSH_BUFFER_LOCK);
     }
+    // The frame has a snapshot of these vertices, which the executor takes
+    // when the frame runs: the draws recorded so far run first.
+    if (buffer->snapshotRecord == s_record) {
+        const GfxSnapshot &snapshot = s_frame.snapshots[buffer->snapshotIndex];
+        if (snapshot.first < firstVertex + vertexCount && snapshot.end > firstVertex)
+            Flush(FLUSH_BUFFER_LOCK);
+    }
     if (s_copied.buffer == buffer)
         s_copied = CopiedRange();
     buffer->rangeLocks.Lock(firstVertex, vertexCount, s_presentedFrames);
-    buffer->openFirst = firstVertex;
-    buffer->openCount = vertexCount;
-    buffer->openHash = PositionHash(&buffer->vertices[firstVertex], vertexCount);
+    buffer->lockStamps.Mark(firstVertex, vertexCount, ++buffer->lockSerial);
     return buffer->vertices.data();
 }
 
-extern "C" void Gfx_UnlockVertexBuffer(GfxVertexBuffer *buffer)
+extern "C" void Gfx_UnlockVertexBuffer(GfxVertexBuffer *)
 {
-    // After a range lock: the boxes of the buffer stay while the game wrote
-    // the positions that were there (the stage lighting writes colours).
-    if (buffer == NULL || buffer->openCount == 0)
-        return;
-    if (PositionHash(&buffer->vertices[buffer->openFirst], buffer->openCount) != buffer->openHash)
-        buffer->positionsUnknown = true;
-    buffer->openCount = 0;
 }
 
 extern "C" BOOL Gfx_IsRangeVisible(GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount)
