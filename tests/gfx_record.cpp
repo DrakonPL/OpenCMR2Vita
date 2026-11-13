@@ -6,7 +6,9 @@
 // alone starts no new state: each draw has its textures. Small quads with
 // clamped BC3 textures draw from an atlas of those textures, so a run of
 // them with different textures is one draw. The parts of a mesh in a vertex
-// buffer that is not drawn by reference share one copy of its vertices.
+// buffer that the game locks between its draws share one copy of its
+// vertices. The draws of a buffer locked before them share one snapshot,
+// which the executor copies. A draw outside the view is left out.
 
 #include "port/sys.h"
 #include "render/gfx_internal.h"
@@ -22,7 +24,13 @@
 extern "C" void Sys_GetDesktopSize(int *w, int *h) { *w = 640; *h = 480; }
 extern "C" void Sys_Log(const char *, ...) {}
 extern "C" int Sys_GetOption(const char *, int fallback) { return fallback; }
-int Platform_GetSettingInt(const char *, int value) { return value; }
+// video.cull_draws: the view test is off in the tests unless a test turns it
+// on. The recorder reads the settings again at each present.
+int s_cullDraws = 0;
+int Platform_GetSettingInt(const char *key, int value)
+{
+    return strcmp(key, "video.cull_draws") == 0 ? s_cullDraws : value;
+}
 const char *Platform_GetSetting(const char *, const char *value) { return value; }
 
 namespace {
@@ -752,16 +760,71 @@ int main()
         Gfx_SetAlphaRef(0);
     }
 
-    // A vertex buffer the game has just locked is not drawn by reference:
-    // its vertices are copied into the frame. The parts of a mesh, each drawn
-    // with a range inside the range of the part before, share one copy.
+    // A vertex buffer the game has just locked is not drawn by reference.
+    // For an executor that takes joined draws the frame has a snapshot of
+    // the part of it that the draws use: the executor copies it once. The
+    // draws refer to the buffer, each with the box of its range.
     s_joins = true;
+    const WORD triangle[3] = { 0, 1, 2 };
+    {
+        GfxVertexBuffer *mesh = Gfx_CreateVertexBuffer(16);
+        GfxVertex *v = Gfx_LockVertexBuffer(mesh);
+        for (int i = 0; i < 16; i++)
+            v[i].x = (float)i;
+        Gfx_UnlockVertexBuffer(mesh);
+        Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, mesh, 2, 12, triangle, 3);
+        Gfx_SetAlphaRef(4);
+        Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, mesh, 6, 8, triangle, 3);
+        Gfx_SetAlphaRef(6);
+        Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, mesh, 0, 4, triangle, 3);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 3 && s_frame.vertices.empty() && s_frame.buffers.empty());
+        REQUIRE(s_frame.snapshots.size() == 1 && s_frame.snapshots[0].buffer == mesh);
+        REQUIRE(s_frame.snapshots[0].first == 0 && s_frame.snapshots[0].end == 14);
+        for (unsigned i = 0; i < 3; i++)
+            REQUIRE(Draw(i).snapshot && Draw(i).buffer == mesh && Draw(i).hasBox && Draw(i).reach < 0.0f);
+        REQUIRE(Draw(0).firstVertexByte == 2 * sizeof(GfxVertex) && Draw(1).firstVertexByte == 6 * sizeof(GfxVertex));
+        REQUIRE(Draw(0).boxLow[0] == 2.0f && Draw(0).boxHigh[0] == 13.0f);
+        REQUIRE(Draw(1).boxLow[0] == 6.0f && Draw(1).boxHigh[0] == 13.0f);
+        REQUIRE(Draw(2).boxLow[0] == 0.0f && Draw(2).boxHigh[0] == 3.0f);
+        // A lock after a draw of the frame runs the draws first: the
+        // executor copies the snapshot before the game changes the buffer.
+        // The buffer is streaming from then on: each draw copies its range.
+        Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, mesh, 0, 4, triangle, 3);
+        v = Gfx_LockVertexBuffer(mesh);
+        REQUIRE(Draws() == 1 && Draw(0).snapshot && s_frame.snapshots.size() == 1 && mesh->streaming);
+        v[0].x = 50.0f;
+        Gfx_UnlockVertexBuffer(mesh);
+        Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, mesh, 0, 4, triangle, 3);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && !Draw(0).snapshot && Draw(0).buffer == NULL && s_frame.snapshots.empty());
+        REQUIRE(Vertex3D(Draw(0), 0).x == 50.0f && Draw(0).boxHigh[0] == 50.0f);
+        Gfx_DestroyVertexBuffer(mesh);
+        // An executor that does not take joined draws gets no snapshot.
+        s_joins = false;
+        mesh = Gfx_CreateVertexBuffer(16);
+        Gfx_LockVertexBuffer(mesh);
+        Gfx_UnlockVertexBuffer(mesh);
+        Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, mesh, 0, 4, triangle, 3);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && !Draw(0).snapshot && Draw(0).buffer == NULL && s_frame.snapshots.empty());
+        Gfx_DestroyVertexBuffer(mesh);
+        s_joins = true;
+    }
+
+    // A streaming vertex buffer (the game locks it between its draws): its
+    // vertices are copied into the frame. The parts of a mesh, each drawn
+    // with a range inside the range of the part before, share one copy.
     GfxVertexBuffer *buffer = Gfx_CreateVertexBuffer(16);
     GfxVertex *locked = Gfx_LockVertexBuffer(buffer);
+    Gfx_UnlockVertexBuffer(buffer);
+    Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, buffer, 0, 4, triangle, 3);
+    locked = Gfx_LockVertexBuffer(buffer);
+    REQUIRE(buffer->streaming);
+    Gfx_Present(FALSE);
     for (int i = 0; i < 16; i++)
         locked[i].x = (float)i;
     Gfx_UnlockVertexBuffer(buffer);
-    const WORD triangle[3] = { 0, 1, 2 };
     Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, buffer, 2, 12, triangle, 3);
     Gfx_SetAlphaRef(4);
     Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, buffer, 6, 8, triangle, 3);
@@ -803,6 +866,121 @@ int main()
         REQUIRE(v.x == 100.0f);
     }
     Gfx_DestroyVertexBuffer(buffer);
+
+    // The view test. The view and the projection are the identity here: the
+    // clip space is -1 <= x, y <= 1, 0 <= z <= 1. A draw whose vertices are
+    // all outside one of these planes is left out; a draw with a vertex
+    // inside, or across the view, stays.
+    {
+        s_cullDraws = 1;
+        Gfx_Present(FALSE);
+        GfxMatrix m = Identity();
+        Gfx_SetTransform(GFX_TRANSFORM_WORLD, &m);
+        Gfx_SetTransform(GFX_TRANSFORM_VIEW, &m);
+        Gfx_SetTransform(GFX_TRANSFORM_PROJECTION, &m);
+        const auto mesh = [](float x0, float x1, float z) {
+            GfxVertex v[18] = {};
+            WORD list[18];
+            for (int i = 0; i < 18; i++) {
+                v[i].x = (i & 1) ? x1 : x0;
+                v[i].y = (i & 2) ? 0.5f : -0.5f;
+                v[i].z = z;
+                list[i] = (WORD)i;
+            }
+            Gfx_DrawIndexedPrimitive(GFX_TRIANGLELIST, v, 18, list, 18);
+        };
+        mesh(2.0f, 3.0f, 0.5f);         // right of the view
+        mesh(-3.0f, -2.0f, 0.5f);       // left
+        mesh(-0.5f, 0.5f, -1.0f);       // behind the eye
+        mesh(-0.5f, 0.5f, 2.0f);        // beyond the far plane
+        mesh(0.5f, 1.5f, 0.5f);         // across the right edge: stays
+        mesh(-0.2f, 0.2f, 0.5f);        // inside: stays
+        Gfx_Present(FALSE);
+        // The two that stay join: one draw.
+        REQUIRE(Draws() == 1 && Draw(0).vertexCount == 36);
+        REQUIRE(Vertex3D(Draw(0), 1).x == 1.5f && Vertex3D(Draw(0), 18 + 1).x == 0.2f);
+        // A vertex left of the view and one right of it: the draw crosses
+        // the view, though no vertex is inside.
+        {
+            GfxVertex v[18] = {};
+            WORD list[18];
+            for (int i = 0; i < 18; i++) {
+                v[i].x = (i & 1) ? 5.0f : -5.0f;
+                v[i].z = 0.5f;
+                list[i] = (WORD)i;
+            }
+            Gfx_DrawIndexedPrimitive(GFX_TRIANGLELIST, v, 18, list, 18);
+            Gfx_Present(FALSE);
+            REQUIRE(Draws() == 1);
+        }
+        // Small draws in world space: each against the view.
+        s_joins = true;
+        Billboard(0.2f, 0.1f, 0.5f);
+        Billboard(0.2f, 3.0f, 0.5f);
+        Billboard(0.2f, -0.1f, 0.6f);
+        Billboard(0.2f, 0.0f, 1.5f);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && Draw(0).vertexCount == 8 && Vertex3D(Draw(0), 4).x == -0.1f);
+        // A quad across the view, no corner inside: it stays.
+        Billboard(10.0f, -5.0f, 0.5f);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1);
+        // The test follows the view: moved 10 to the left, the view does
+        // not have the quad; moved back, it has it.
+        {
+            GfxMatrix moved = Identity();
+            moved._41 = -10.0f;
+            Gfx_SetTransform(GFX_TRANSFORM_VIEW, &moved);
+            Billboard(0.2f, 0.1f, 0.5f);
+            mesh(-0.2f, 0.2f, 0.5f);
+            Gfx_Present(FALSE);
+            REQUIRE(Draws() == 0);
+            Gfx_SetTransform(GFX_TRANSFORM_VIEW, &m);
+            Billboard(0.2f, 0.1f, 0.5f);
+            Gfx_SetTransform(GFX_TRANSFORM_WORLD, &m);
+            mesh(-0.2f, 0.2f, 0.5f);
+            Gfx_Present(FALSE);
+            REQUIRE(Draws() == 1 && Draw(0).vertexCount == 4 + 18);
+        }
+        // A range of a buffer, with the box of its range. A lock that keeps
+        // the positions keeps the boxes. A lock that moves them gives new
+        // boxes.
+        Gfx_SetTransform(GFX_TRANSFORM_WORLD, &m);
+        GfxVertexBuffer *ground = Gfx_CreateVertexBuffer(16);
+        GfxVertex *v = Gfx_LockVertexBuffer(ground);
+        for (int i = 0; i < 16; i++) {
+            v[i].x = (float)i * 0.25f;
+            v[i].z = 0.5f;
+        }
+        Gfx_UnlockVertexBuffer(ground);
+        Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, ground, 0, 4, triangle, 3);
+        Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, ground, 8, 4, triangle, 3);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && Draw(0).firstVertexByte == 0 && Draw(0).boxHigh[0] == 0.75f);
+        const uint64_t far = (uint64_t)8 << 32 | 4;
+        REQUIRE(ground->boxes != NULL && ground->boxes->Find(far) != NULL);
+        v = Gfx_LockVertexBuffer(ground);
+        for (int i = 0; i < 16; i++)
+            v[i].diffuse = 0xff808080;
+        Gfx_UnlockVertexBuffer(ground);
+        Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, ground, 0, 4, triangle, 3);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && ground->boxes->Find(far) != NULL);
+        v = Gfx_LockVertexBuffer(ground);
+        for (int i = 8; i < 12; i++)
+            v[i].x = 0.1f;
+        Gfx_UnlockVertexBuffer(ground);
+        Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, ground, 8, 4, triangle, 3);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && Draw(0).firstVertexByte == 8 * sizeof(GfxVertex) && Draw(0).boxHigh[0] == 0.1f);
+        Gfx_DestroyVertexBuffer(ground);
+        // Transformed draws are not tested: they are in pixels.
+        Sprite(5000.0f);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1);
+        s_cullDraws = 0;
+        Gfx_Present(FALSE);
+    }
 
     printf("gfx_record: ok\n");
     return 0;

@@ -5,9 +5,11 @@
 #define OPENCMR2_GFX_INTERNAL_H
 
 #include "port/gfx.h"
+#include "render/gxm_key_cache.h"
 
 #include <stdint.h>
 
+#include <memory>
 #include <vector>
 
 // ---- textures and buffers --------------------------------------------------------
@@ -42,12 +44,34 @@ inline GfxTexture *Gfx_DrawnTexture(GfxTexture *t)
 // has not been locked for a while refer to its GPU copy (stage geometry);
 // draws from one locked recently copy their vertices (cars, sprites), as the
 // game rewrites those during the frame.
+// The box of a set of positions.
+struct GfxBox {
+    float low[3], high[3];
+};
+
 struct GfxVertexBuffer {
     std::vector<GfxVertex> vertices;
     uint32_t version = 1;           // bumped by every lock
     uint32_t lastLockFrame = 0;     // presented frame of the last lock
     uint32_t referencedRecord = 0;  // recording that last drew from it
     void *gpu = nullptr;            // executor's copy
+    // The recorder's boxes of vertex ranges (first vertex << 32 | count),
+    // for the test of a draw against the view. They stay while the
+    // positions stay: with the stage lighting the game writes the colours
+    // of the ground meshes again in each frame, and not their positions. A
+    // lock makes the positions unknown. The first box after it compares a
+    // hash of all positions with positionHash.
+    std::unique_ptr<GxmKeyCache<GfxBox, 6>> boxes;
+    uint64_t positionHash = 0;
+    bool positionsUnknown = true;
+    // For an executor that takes joined draws: the frame has one copy of
+    // the part of a buffer locked recently that its draws use, made by the
+    // executor (GfxFrame::snapshots). A buffer that the game locks again
+    // after a draw from it in one recording is streaming: each of its draws
+    // copies its own vertices into the frame's data.
+    bool streaming = false;
+    uint32_t snapshotRecord = 0;    // the recording whose frame has a snapshot of it
+    uint32_t snapshotIndex = 0;     // that snapshot in GfxFrame::snapshots
 };
 
 // Bytes of one level, given its size, for a format.
@@ -135,11 +159,14 @@ struct GfxCommand {
     // is 1.3 KB. There the textures of a draw are these, not those of its
     // state.
     GfxTexture *textures[2];
-    // How far the vertices of a 3D draw of the frame's own data (no buffer)
-    // are, for an executor that takes joined draws: the box of the vertices
-    // in their own space (hasBox), and for a run of small draws in world
-    // space also the eye distance of its farthest vertex (reach, else below
-    // zero). The recorder finds them while it copies the vertices. The GXM
+    // The vertices are in the frame's snapshot of buffer
+    // (GfxFrame::snapshots); firstVertexByte is into the buffer.
+    bool snapshot;
+    // How far the vertices of a 3D draw are, for an executor that takes
+    // joined draws: the box of the vertices in their own space (hasBox), and
+    // for a run of small draws in world space also the eye distance of its
+    // farthest vertex (reach, else below zero). The recorder finds them
+    // while it copies the vertices or tests them against the view. The GXM
     // executor then does not walk the vertices for the distance fade: in a
     // frame with the stage lighting, the game writes the colours of the
     // ground meshes again in each frame, and their copies were 80,000
@@ -157,12 +184,20 @@ struct GfxCommand {
     GfxTexture *target;         // NULL: the back buffer
 };
 
+// The vertices first..end-1 of a vertex buffer, which the executor copies
+// once for the frame's draws from it (GfxVertexBuffer::snapshotRecord).
+struct GfxSnapshot {
+    GfxVertexBuffer *buffer;
+    uint32_t first, end;
+};
+
 struct GfxFrame {
     std::vector<uint8_t> vertices;
     std::vector<uint16_t> indices;
     std::vector<GfxDrawState> states;
     std::vector<GfxCommand> commands;
     std::vector<GfxVertexBuffer *> buffers;     // drawn from, each once
+    std::vector<GfxSnapshot> snapshots;         // each buffer once
     void Reset()
     {
         vertices.clear();
@@ -170,6 +205,7 @@ struct GfxFrame {
         states.clear();
         commands.clear();
         buffers.clear();
+        snapshots.clear();
     }
 };
 
