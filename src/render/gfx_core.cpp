@@ -110,6 +110,7 @@ struct CopiedRange {
     uint32_t version = 0, record = 0;
     DWORD first = 0, count = 0;
     uint32_t offset = 0;            // into the frame's vertex data
+    float low[3] = {}, high[3] = {};    // the box of its positions
 };
 CopiedRange s_copied;
 
@@ -154,7 +155,6 @@ const DWORD kJoinedStrip = 6;
 // Why a small draw in world space did not join the draw before.
 enum {
     NO_JOIN_STATE,          // the state changed
-    NO_JOIN_FADE,           // the other side of the distance fade
     NO_JOIN_PRIMITIVE,      // not a list
     NO_JOIN_COMMAND,        // the draw before is of another kind
     NO_JOIN_TEXTURE,        // another texture
@@ -162,7 +162,7 @@ enum {
     NO_JOIN_DATA,           // the draw before does not end the frame's data
     NO_JOIN_COUNT
 };
-const char *const kNoJoinNames[NO_JOIN_COUNT] = { "state", "fade", "primitive", "command", "texture", "size", "data" };
+const char *const kNoJoinNames[NO_JOIN_COUNT] = { "state", "primitive", "command", "texture", "size", "data" };
 
 // Why a small draw in world space did not draw from the atlas.
 enum {
@@ -340,29 +340,17 @@ void AtlasGrow()
         Gfx_DestroyTexture(s_atlas);
 }
 
-// Where a small draw in world space is against the start of the distance
-// fade. The executor draws a draw with the fade only where a vertex reaches
-// it, and the fade is the largest part of its fragment program: a run of
-// near quads does not take a quad of the fade, and a run with the fade does
-// not take a near quad.
-enum {
-    FADE_NEAR,      // each vertex is well before the start
-    FADE_EDGE,      // each vertex is before the start, one not far from it
-    FADE_FAR        // a vertex is at the start or beyond it
-};
-// A quad at the edge joins a run of each kind: the fade changes none of its
-// pixels, and it has few pixels at that distance. The game sorts the
-// trackside objects by their distance on the ground from the car, not by
-// that from the eye: at the start of the fade, quads of the two sides come
-// in turns, and each turn was a draw.
-const float kFadeEdge = 0.7f;   // of the distance to the start
-
-int SmallDrawFadeClass(const GfxVertex *vertices, DWORD count)
+// The eye distance of the farthest vertex of a small draw in world space
+// (its world matrix is the identity: the view matrix gives the eye space).
+// The executor draws a run of small draws with the distance fade only where
+// a vertex of the run reaches the start of the fade. A run joins quads on
+// both sides of the start: the game sorts the trackside objects by their
+// distance on the ground from the car, not by that from the eye, and at the
+// start of the fade the quads of the two sides came in turns, each turn a
+// draw (some 280 draws in a frame of a wood).
+float SmallDrawReach(const GfxVertex *vertices, DWORD count)
 {
-    if (!(s_state.fadeEnd > s_state.fadeStart))
-        return FADE_NEAR;
     const GfxMatrix &v = s_state.view;
-    const float limit = s_state.fadeStart * s_state.fadeStart;
     float farthest = 0.0f;
     for (DWORD i = 0; i < count; i++) {
         const GfxVertex &p = vertices[i];
@@ -370,17 +358,27 @@ int SmallDrawFadeClass(const GfxVertex *vertices, DWORD count)
         const float y = p.x * v._12 + p.y * v._22 + p.z * v._32 + v._42;
         const float z = p.x * v._13 + p.y * v._23 + p.z * v._33 + v._43;
         const float squared = x * x + y * y + z * z;
-        if (squared >= limit)
-            return FADE_FAR;
         farthest = squared > farthest ? squared : farthest;
     }
-    return farthest >= limit * (kFadeEdge * kFadeEdge) ? FADE_EDGE : FADE_NEAR;
+    return sqrtf(farthest);
 }
 
-// The kind of the draw recorded last: FADE_FAR a run of small draws in world
-// space with a vertex in the fade, FADE_NEAR a run with none, -1 another
-// draw. A run that starts with a quad at the edge is a near run.
-int s_lastSmallFade = -1;
+// The box of the positions of count vertices (count is at least 1).
+void VertexBox(const GfxVertex *vertices, DWORD count, float low[3], float high[3])
+{
+    low[0] = high[0] = vertices[0].x;
+    low[1] = high[1] = vertices[0].y;
+    low[2] = high[2] = vertices[0].z;
+    for (DWORD i = 1; i < count; i++) {
+        const GfxVertex &p = vertices[i];
+        low[0] = p.x < low[0] ? p.x : low[0];
+        high[0] = p.x > high[0] ? p.x : high[0];
+        low[1] = p.y < low[1] ? p.y : low[1];
+        high[1] = p.y > high[1] ? p.y : high[1];
+        low[2] = p.z < low[2] ? p.z : low[2];
+        high[2] = p.z > high[2] ? p.z : high[2];
+    }
+}
 
 // Adds a draw of vertices in the frame's data to the draw before, where the
 // executor takes joined draws (GfxExecutor::JoinsDraws) and both are lists of
@@ -388,12 +386,10 @@ int s_lastSmallFade = -1;
 // game draws each sprite and each line with a call of its own: a run of them
 // becomes one draw. The triangles keep their order.
 bool JoinDraw(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
-              DWORD indexCount, bool worldSpace, GfxTexture *const textures[2], int fadeClass)
+              DWORD indexCount, bool worldSpace, GfxTexture *const textures[2], float reach)
 {
     if (!StateIsRecorded(worldSpace) || s_frame.commands.empty())
         return NoJoin(NO_JOIN_STATE);
-    if (worldSpace && (s_lastSmallFade < 0 || (fadeClass != FADE_EDGE && fadeClass != s_lastSmallFade)))
-        return NoJoin(NO_JOIN_FADE);
     if (primitive != GFX_TRIANGLELIST && primitive != GFX_LINELIST)
         return NoJoin(NO_JOIN_PRIMITIVE);
     GfxCommand &last = s_frame.commands.back();
@@ -428,6 +424,17 @@ bool JoinDraw(int primitive, bool transformed, const void *vertices, DWORD verte
         last.indexCount += indexCount;
     }
     last.vertexCount += vertexCount;
+    // The box and the reach of the run. A draw that is not a small draw in
+    // world space has no reach: the run then has its box only.
+    if (!transformed && last.hasBox) {
+        float low[3], high[3];
+        VertexBox((const GfxVertex *)vertices, vertexCount, low, high);
+        for (int k = 0; k < 3; k++) {
+            last.boxLow[k] = low[k] < last.boxLow[k] ? low[k] : last.boxLow[k];
+            last.boxHigh[k] = high[k] > last.boxHigh[k] ? high[k] : last.boxHigh[k];
+        }
+        last.reach = worldSpace && last.reach >= 0.0f ? (reach > last.reach ? reach : last.reach) : -1.0f;
+    }
     return true;
 }
 
@@ -597,7 +604,7 @@ static uint32_t TraceHash(uint32_t h, const void *data, size_t size)
 
 void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
                    DWORD indexCount, GfxVertexBuffer *buffer, DWORD firstVertex, bool worldSpace,
-                   GfxTexture *const textures[2], int fadeClass);
+                   GfxTexture *const textures[2], float reach);
 
 void RecordDrawNow(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
                    DWORD indexCount, GfxVertexBuffer *buffer, DWORD firstVertex);
@@ -669,14 +676,14 @@ void RecordDrawNow(int primitive, bool transformed, const void *vertices, DWORD 
     GfxVertex small[kSmallDrawVertices];
     GfxTexture *textures[2] = { s_state.stages[0].texture, s_state.stages[1].texture };
     bool worldSpace = false;
-    int fadeClass = FADE_NEAR;
+    float reach = -1.0f;
     if (joins && !transformed && vertexCount <= kSmallDrawVertices &&
         SmallDrawToWorld((const GfxVertex *)vertices, vertexCount, small)) {
         vertices = small;
         buffer = NULL;
         firstVertex = 0;
         worldSpace = true;
-        fadeClass = SmallDrawFadeClass(small, vertexCount);
+        reach = SmallDrawReach(small, vertexCount);
         GfxTexture *atlas = AtlasSmallDraw(small, vertexCount);
         if (atlas != NULL)
             textures[0] = atlas;
@@ -703,7 +710,7 @@ void RecordDrawNow(int primitive, bool transformed, const void *vertices, DWORD 
             indices = strip;
         }
         if (JoinDraw(primitive, transformed, vertices, vertexCount, indices, indexCount, worldSpace, textures,
-                     fadeClass)) {
+                     reach)) {
             if (worldSpace)
                 s_counts.joined++;
             return;
@@ -715,17 +722,20 @@ void RecordDrawNow(int primitive, bool transformed, const void *vertices, DWORD 
         }
     }
     RecordNewDraw(primitive, transformed, vertices, vertexCount, indices, indexCount, buffer, firstVertex, worldSpace,
-                  textures, fadeClass);
+                  textures, reach);
 }
 
 // Records a draw as a command of its own. worldSpace: its vertices are in
 // world space (SmallDrawToWorld). textures: those of its two stages.
 void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD vertexCount, const WORD *indices,
                    DWORD indexCount, GfxVertexBuffer *buffer, DWORD firstVertex, bool worldSpace,
-                   GfxTexture *const textures[2], int fadeClass)
+                   GfxTexture *const textures[2], float reach)
 {
-    s_lastSmallFade = worldSpace ? (fadeClass == FADE_FAR ? FADE_FAR : FADE_NEAR) : -1;
     GfxCommand cmd = {};
+    cmd.reach = -1.0f;
+    // The box of the vertices of a 3D draw that the executor gets in the
+    // frame's data (GfxCommand::hasBox).
+    const bool box = !transformed && s_executor->JoinsDraws();
     cmd.type = GFX_CMD_DRAW;
     cmd.primitive = primitive;
     cmd.transformed = transformed;
@@ -741,11 +751,21 @@ void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD 
                s_copied.record == s_record && firstVertex >= s_copied.first &&
                firstVertex + vertexCount <= s_copied.first + s_copied.count) {
         // The game draws a mesh in parts, each with the vertex range of the
-        // mesh: one copy serves them.
+        // mesh: one copy serves them, and its box.
         cmd.firstVertexByte = s_copied.offset + (firstVertex - s_copied.first) * (uint32_t)sizeof(GfxVertex);
+        if (box) {
+            cmd.hasBox = true;
+            memcpy(cmd.boxLow, s_copied.low, sizeof(cmd.boxLow));
+            memcpy(cmd.boxHigh, s_copied.high, sizeof(cmd.boxHigh));
+        }
     } else {
         size_t stride = transformed ? sizeof(GfxTLVertex) : sizeof(GfxVertex);
         cmd.firstVertexByte = AppendVertices(vertices, vertexCount * stride, stride);
+        if (box) {
+            cmd.hasBox = true;
+            VertexBox((const GfxVertex *)vertices, vertexCount, cmd.boxLow, cmd.boxHigh);
+            cmd.reach = worldSpace ? reach : -1.0f;
+        }
         if (buffer != NULL) {
             s_copied.buffer = buffer;
             s_copied.version = buffer->version;
@@ -753,6 +773,8 @@ void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD 
             s_copied.first = firstVertex;
             s_copied.count = vertexCount;
             s_copied.offset = cmd.firstVertexByte;
+            memcpy(s_copied.low, cmd.boxLow, sizeof(s_copied.low));
+            memcpy(s_copied.high, cmd.boxHigh, sizeof(s_copied.high));
         }
     }
     if (indices != NULL) {
