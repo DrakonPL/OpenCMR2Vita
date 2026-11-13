@@ -4,6 +4,9 @@
 
 #include "port/sys.h"
 #include "render/gxm_alpha.h"
+#include "render/texture_mips.h"
+
+#include <psp2/kernel/processmgr.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -105,8 +108,19 @@ GxmTexture *GxmTextures::Ensure(GfxTexture *t)
     if (t->format < 0 || t->format >= kFormats)
         return nullptr;
     GxmTextureLayout layout;
+    // A BC3 texture of one level gets mip levels made here: not a render
+    // target, a cube or a texture that changes each frame, at least 8 texels
+    // on each side, and a power of two on each side (the levels of a
+    // swizzled texture of another size are not known to sit as
+    // Gxm_TextureLayout puts them).
+    const bool mips = makeMips && t->format == GFX_FORMAT_BC3 && t->mipLevels == 1 &&
+                      !(t->flags & (GFX_TEXTURE_RENDER_TARGET | GFX_TEXTURE_CUBE | GFX_TEXTURE_DYNAMIC |
+                                    GFX_TEXTURE_STAGING)) &&
+                      t->width >= 8 && t->height >= 8 && Gxm_PowerOfTwo(t->width) == (unsigned)t->width &&
+                      Gxm_PowerOfTwo(t->height) == (unsigned)t->height;
+    const int levels = mips ? Gfx_MipLevelCount(t->width, t->height, t->mipLimit) : t->mipLevels;
     if (!(t->flags & GFX_TEXTURE_CUBE)) {
-        layout = Gxm_TextureLayout(t->format, t->width, t->height, t->mipLevels);
+        layout = Gxm_TextureLayout(t->format, t->width, t->height, levels);
     } else if (t->width != t->height || Gfx_BytesPerPixel(t->format) != 4 || !(t->flags & GFX_TEXTURE_RENDER_TARGET) ||
                !Gxm_CubeLayout(t->width, t->mipLevels, &layout)) {
         // The game's cube maps are the car reflections: square 32-bit render
@@ -119,6 +133,9 @@ GxmTexture *GxmTextures::Ensure(GfxTexture *t)
     }
     GxmTexture *g = new GxmTexture;
     g->layout = layout;
+    g->madeMips = layout.levels > t->mipLevels;
+    if (g->madeMips && t->mipLimit > 0)
+        g->keptMips.reset(new std::vector<uint8_t>[16]);
     g->memory = memory.Textures().Alloc(g->layout.bytes);
     if (g->memory == nullptr) {
         // Kept as failed: each new try would ask the system for a memory
@@ -232,6 +249,19 @@ void GxmTextures::Upload(std::vector<GfxTexture *> &textures, unsigned frame)
                 g->generation++;
             }
         }
+        // The mip levels made here (Ensure), from level 0: those of the
+        // changed part of a texture that keeps them, else all.
+        std::vector<uint8_t> made[16];
+        std::vector<uint8_t> *mips = nullptr;
+        if (g->madeMips && !t->levels[0][0].empty()) {
+            const uint64_t start = sceKernelGetProcessTimeWide();
+            mips = g->keptMips ? g->keptMips.get() : made;
+            Gfx_MakeBC3Mips(t->levels[0][0].data(), t->width, t->height, g->layout.levels,
+                            g->keptMips ? t->changedRect : GfxMipRect(), mips);
+            mipMicros += sceKernelGetProcessTimeWide() - start;
+            mipTextures++;
+        }
+        t->changedRect = GfxMipRect();
         // The least alpha of the levels goes with the upload: the executor
         // leaves out work where no texel can fail the alpha test. A render
         // target's is not known.
@@ -241,14 +271,16 @@ void GxmTextures::Upload(std::vector<GfxTexture *> &textures, unsigned frame)
             for (int m = 0; m < g->layout.levels; m++) {
                 const GxmLevelLayout &l = g->layout.level[m];
                 const size_t bytes = (size_t)l.sourceRowBytes * l.sourceRows;
-                if (t->levels[face][m].size() < bytes) {
+                const std::vector<uint8_t> &source =
+                    m < t->mipLevels || mips == nullptr ? t->levels[face][m] : mips[m];
+                if (source.size() < bytes) {
                     minAlpha = 0;
                     continue;
                 }
-                CopyLevel(t->format, t->levels[face][m].data(), g->layout, l,
+                CopyLevel(t->format, source.data(), g->layout, l,
                           (uint8_t *)g->memory + (size_t)face * g->layout.faceBytes + l.offset);
                 if (minAlpha > 0) {
-                    const int a = Gxm_MinAlpha(t->format, t->levels[face][m].data(), bytes);
+                    const int a = Gxm_MinAlpha(t->format, source.data(), bytes);
                     minAlpha = a < minAlpha ? a : minAlpha;
                 }
             }
@@ -338,7 +370,7 @@ bool GxmTextures::TakeChanged()
     return was;
 }
 
-void GxmTextures::Log() const
+void GxmTextures::Log()
 {
     char line[256];
     int n = 0;
@@ -346,4 +378,8 @@ void GxmTextures::Log() const
         n += snprintf(line + n, sizeof(line) - n, "%s%s %u %u KB", f ? ", " : "", kFormatNames[f], count[f],
                       bytes[f] / 1024);
     Sys_Log("gxm tex: %s", line);
+    if (mipTextures > 0)
+        Sys_Log("gxm tex: mip levels made for %u textures in %.1f ms", mipTextures, mipMicros / 1000.0);
+    mipTextures = 0;
+    mipMicros = 0;
 }

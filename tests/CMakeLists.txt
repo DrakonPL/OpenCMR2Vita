@@ -193,8 +193,9 @@ target_include_directories(gxm_fragment_uniforms_test PRIVATE ${PROJECT_SOURCE_D
 add_test(NAME gxm_fragment_uniforms COMMAND gxm_fragment_uniforms_test)
 # The recorder: the states, the joined draws and the vertex copies of a frame.
 add_executable(gfx_record_test gfx_record.cpp
-    ${PROJECT_SOURCE_DIR}/src/diagnostics/observer.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_core.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_small_batch.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_threaded.cpp)
-target_include_directories(gfx_record_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+    ${PROJECT_SOURCE_DIR}/src/diagnostics/observer.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_core.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_small_batch.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_threaded.cpp
+    ${PROJECT_SOURCE_DIR}/src/render/texture_mips.cpp)
+target_include_directories(gfx_record_test PRIVATE ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/third_party/stb)
 find_package(Threads REQUIRED)
 target_link_libraries(gfx_record_test PRIVATE SDL3::SDL3 Threads::Threads)
 add_test(NAME gfx_record COMMAND gfx_record_test)

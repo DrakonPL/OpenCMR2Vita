@@ -242,6 +242,7 @@ const AtlasEntry *AtlasEntryOf(GfxTexture *t)
         s_atlas = Gfx_CreateTexture(s_atlasSize, s_atlasSize, GFX_FORMAT_BC3, 1, 0);
         if (s_atlas == NULL)
             return NULL;
+        s_atlas->mipLimit = 3;
         s_atlasPacker.Reset(s_atlasSize / 4, s_atlasSize / 4);
     }
     const int w = t->width / 4, h = t->height / 4;
@@ -251,6 +252,23 @@ const AtlasEntry *AtlasEntryOf(GfxTexture *t)
         return NULL;
     }
     Atlas_CopyBC3Tile(t->levels[0][0].data(), w, h, s_atlas->levels[0][0].data(), s_atlasSize / 4, x, y);
+    // The part of the atlas that changed: an executor makes the mip levels
+    // of that part again (GfxTexture::changedRect). An executor without the
+    // levels of the atlas yet makes all of them.
+    GfxMipRect &c = s_atlas->changedRect;
+    GfxMipRect tile;
+    tile.x0 = x * 4;
+    tile.y0 = y * 4;
+    tile.x1 = (x + w + 2) * 4;
+    tile.y1 = (y + h + 2) * 4;
+    if (c.Empty()) {
+        c = tile;
+    } else {
+        c.x0 = tile.x0 < c.x0 ? tile.x0 : c.x0;
+        c.y0 = tile.y0 < c.y0 ? tile.y0 : c.y0;
+        c.x1 = tile.x1 > c.x1 ? tile.x1 : c.x1;
+        c.y1 = tile.y1 > c.y1 ? tile.y1 : c.y1;
+    }
     s_atlas->dirty = true;
     s_atlasEntries.push_back({ t, (x + 1) * 4, (y + 1) * 4 });
     return &s_atlasEntries.back();

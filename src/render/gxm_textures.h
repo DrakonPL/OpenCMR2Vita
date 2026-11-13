@@ -31,6 +31,12 @@ struct GxmTexture {
     std::unique_ptr<SceGxmColorSurface[]> faces;
     void *depthMemory = nullptr;    // from the texture pool: the GPU writes it
     SceGxmDepthStencilSurface depth;
+    // The mip levels made here (GxmTextures::SetMipmaps): the levels of the
+    // layout past those of the CPU copy. A texture with a mip limit (the
+    // atlas) keeps them, so that an upload makes those of its changed part
+    // only (GfxTexture::changedRect).
+    bool madeMips = false;
+    std::unique_ptr<std::vector<uint8_t>[]> keptMips;
 };
 
 class GxmTextures {
@@ -59,10 +65,16 @@ public:
     // they differ from the last set.
     void SetSampler(GxmTexture &g, int minFilter, int magFilter, int mipFilter, int address);
 
+    // Whether the BC3 textures of one level get mip levels on the GPU
+    // (texture_mips.h): the scenery drawn small reads a small level. Before
+    // the first texture.
+    void SetMipmaps(bool on) { makeMips = on; }
+
     // Whether a texture was made or destroyed since the last call.
     bool TakeChanged();
-    // "gxm tex: <format> <count> <KB>, ...": the live textures by format.
-    void Log() const;
+    // "gxm tex: <format> <count> <KB>, ...": the live textures by format,
+    // and the time the mip levels took since the line before.
+    void Log();
 
 private:
     bool CreateTarget(const GfxTexture *t, GxmTexture &g);
@@ -74,6 +86,9 @@ private:
     GxmDeferredFree deferredMemory;     // texture pool blocks replaced by an upload
     unsigned count[5] = {}, bytes[5] = {};   // live, by GFX_FORMAT_*
     bool changed = false;
+    bool makeMips = false;
+    uint64_t mipMicros = 0;         // making mip levels, since the last Log
+    unsigned mipTextures = 0;
     bool loggedCube = false, loggedFull = false;
 };
 
