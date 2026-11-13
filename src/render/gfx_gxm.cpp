@@ -11,6 +11,7 @@
 #include "render/gxm_alpha.h"
 #include "render/gxm_bounds.h"
 #include "render/gxm_dialog.h"
+#include "render/gxm_digits.h"
 #include "render/gxm_fragment_uniforms.h"
 #include "render/gxm_readback.h"
 #include "render/gxm_textures.h"
@@ -51,6 +52,7 @@ constexpr uint64_t kFadeKeyBit = 1ull << 32;    // the distance fade of a fragme
 // the GPU before and after it).
 constexpr unsigned kBackdropTimingFrames = 600;
 constexpr uint64_t kStatsMicros = 1000000;
+constexpr uint64_t kFpsMicros = 500000;     // the frame rate on the screen is that of this long
 
 SceGxmBlendFactor BlendFactor(int d3d)
 {
@@ -379,6 +381,13 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     Resolved resolvedKeys[4];
     unsigned resolvedNext = 0;
 
+    // The frame rate over the picture (video.show_fps): the presented frames
+    // of the last kFpsMicros, as a number at the top left.
+    bool showFps = false;
+    unsigned fpsFrames = 0;
+    uint64_t fpsStart = 0;
+    int fpsShown = -1;
+
     // Whether a blended draw with the alpha test and depth writes draws in
     // one pass, with the discard form and its blending. It starts off: a
     // program that can discard drew nothing in a blended pass without depth
@@ -614,6 +623,12 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             keepUniformsTested = true;
             TestKeptUniforms();
         }
+        // Dev builds show the frame rate unless the settings say no.
+#ifdef OPENCMR2_DEV
+        showFps = Platform_GetSettingInt("video.show_fps", 1) != 0;
+#else
+        showFps = Platform_GetSettingInt("video.show_fps", 0) != 0;
+#endif
         // Without it the scenery does not fade, and the game still runs.
         CreateBackdrop();
         return true;
@@ -1121,6 +1136,46 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         bound.vertexUniforms = bound.fragmentUniforms = false;
         Check("sceGxmDraw(clear)", sceGxmDraw(context, SCE_GXM_PRIMITIVE_TRIANGLE_STRIP, SCE_GXM_INDEX_FORMAT_U16,
                                               identityIndices, 4));
+    }
+
+    // The frame rate, in the back buffer's scene of a present: yellow
+    // seven-segment digits on black, each segment a clear of its rectangle
+    // (the executor has no font). The check of the probe compares frames:
+    // none is drawn then.
+    void DrawFps()
+    {
+        const uint64_t now = sceKernelGetProcessTimeWide();
+        if (fpsStart == 0)
+            fpsStart = now;
+        fpsFrames++;
+        if (now - fpsStart >= kFpsMicros) {
+            const uint64_t span = now - fpsStart;
+            fpsShown = (int)((fpsFrames * 1000000ull + span / 2) / span);
+            fpsFrames = 0;
+            fpsStart = now;
+        }
+        if (!showFps || fpsShown < 0 || probe.check != 0)
+            return;
+        const int x = 12, y = 12, pad = 6;
+        GfxCommand c = {};
+        c.type = GFX_CMD_CLEAR;
+        c.clearFlags = GFX_CLEAR_TARGET;
+        auto fill = [&](const GxmDigitRect &r, DWORD color) {
+            c.clearColor = color;
+            c.clearViewport.x = (DWORD)r.x;
+            c.clearViewport.y = (DWORD)r.y;
+            c.clearViewport.width = (DWORD)r.width;
+            c.clearViewport.height = (DWORD)r.height;
+            c.clearViewport.minZ = 0.0f;
+            c.clearViewport.maxZ = 1.0f;
+            Clear(c, true, device.Width(), device.Height());
+        };
+        const int digits = fpsShown >= 100 ? 3 : fpsShown >= 10 ? 2 : 1;
+        fill({ x - pad, y - pad, Gxm_NumberWidth(digits) + 2 * pad, kGxmDigitHeight + 2 * pad }, 0xff000000);
+        GxmDigitRect rects[kGxmNumberDigits * kGxmDigitSegments];
+        const int count = Gxm_NumberRects(fpsShown, x, y, rects);
+        for (int i = 0; i < count; i++)
+            fill(rects[i], 0xffffe000);
     }
 
     // The vertices of a 3D draw, measured from their CPU copy, or nullptr
@@ -1633,6 +1688,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         }
         if (!BeginScene(nullptr))
             return;
+        DrawFps();
         SceGxmNotification notification;
         const SceGxmNotification *fragment = nullptr;
         if (read.width > 0 && read.height > 0) {
