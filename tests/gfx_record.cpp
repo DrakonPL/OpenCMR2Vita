@@ -1041,6 +1041,84 @@ int main()
         Gfx_Present(FALSE);
     }
 
+    // A draw whose vertices come in parts (Gfx_BeginPrimitive) is the draw
+    // of the same vertices from a vertex buffer that the game locks between
+    // its draws: the same commands, states and vertices, with and without
+    // joined draws and the view test. A draw outside the view leaves no
+    // vertex in the frame, and no vertex makes no draw.
+    {
+        s_joins = true;
+        GfxVertexBuffer *stream = Gfx_CreateVertexBuffer(12);
+        Gfx_LockVertexBuffer(stream);
+        Gfx_UnlockVertexBuffer(stream);
+        Gfx_DrawPrimitiveVB(GFX_TRIANGLELIST, stream, 0, 3);
+        Gfx_LockVertexBuffer(stream);
+        Gfx_UnlockVertexBuffer(stream);
+        REQUIRE(stream->streaming);
+        Gfx_Present(FALSE);
+        GfxMatrix view, projection;
+        Gfx_GetTransform(GFX_TRANSFORM_VIEW, &view);
+        Gfx_GetTransform(GFX_TRANSFORM_PROJECTION, &projection);
+        const GfxMatrix identity = Identity();
+        Gfx_SetTransform(GFX_TRANSFORM_VIEW, &identity);
+        Gfx_SetTransform(GFX_TRANSFORM_PROJECTION, &identity);
+        GfxVertex quads[18] = {};
+        for (int i = 0; i < 18; i++) {
+            quads[i].x = (i >= 12 ? 100.0f : 0.0f) + 0.01f * (float)i;
+            quads[i].y = (float)(i & 1) * 0.25f;
+            quads[i].z = 0.5f;
+            quads[i].diffuse = 0xff000000u + (DWORD)i;
+        }
+        const auto fromBuffer = [&](int first, int count) {
+            GfxVertex *v = Gfx_LockVertexBuffer(stream);
+            memcpy(v, quads + first, (size_t)count * sizeof(GfxVertex));
+            Gfx_UnlockVertexBuffer(stream);
+            Gfx_DrawPrimitiveVB(GFX_TRIANGLELIST, stream, 0, (DWORD)count);
+        };
+        for (int mode = 0; mode < 4; mode++) {
+            s_joins = (mode & 1) != 0;
+            s_cullDraws = mode >> 1;
+            Gfx_Present(FALSE);
+            // A sprite first: its 2D vertices end at no multiple of the size
+            // of a 3D vertex.
+            Sprite(1.0f);
+            fromBuffer(0, 6);
+            Gfx_SetAlphaRef(4);
+            fromBuffer(6, 6);
+            fromBuffer(12, 6);      // outside the view
+            Gfx_SetAlphaRef(0);
+            Gfx_Present(FALSE);
+            const std::string made = FrameText();
+            const size_t madeBytes = s_frame.vertices.size();
+            Sprite(1.0f);
+            Gfx_BeginPrimitive(GFX_TRIANGLELIST);
+            Gfx_AddPrimitiveVertices(quads, 3);
+            Gfx_AddPrimitiveVertices(quads + 3, 3);
+            Gfx_EndPrimitive();
+            Gfx_SetAlphaRef(4);
+            Gfx_BeginPrimitive(GFX_TRIANGLELIST);
+            Gfx_AddPrimitiveVertices(quads + 6, 6);
+            Gfx_EndPrimitive();
+            Gfx_BeginPrimitive(GFX_TRIANGLELIST);
+            Gfx_AddPrimitiveVertices(quads + 12, 6);
+            Gfx_EndPrimitive();
+            Gfx_BeginPrimitive(GFX_TRIANGLELIST);
+            Gfx_EndPrimitive();
+            Gfx_SetAlphaRef(0);
+            Gfx_Present(FALSE);
+            REQUIRE(FrameText() == made && s_frame.vertices.size() == madeBytes);
+            REQUIRE(Draws() == (s_cullDraws ? 3u : 4u) && Draw(2).vertexCount == 6);
+            REQUIRE(Vertex3D(Draw(1), 5).diffuse == 0xff000005u && Vertex3D(Draw(2), 0).diffuse == 0xff000006u);
+            REQUIRE(Draw(1).firstVertexByte % sizeof(GfxVertex) == 0 && Draw(1).firstVertexByte != 0);
+        }
+        s_joins = true;
+        s_cullDraws = 0;
+        Gfx_SetTransform(GFX_TRANSFORM_VIEW, &view);
+        Gfx_SetTransform(GFX_TRANSFORM_PROJECTION, &projection);
+        Gfx_Present(FALSE);
+        Gfx_DestroyVertexBuffer(stream);
+    }
+
     // A streaming vertex buffer (the game locks it between its draws): its
     // vertices are copied into the frame. The parts of a mesh, each drawn
     // with a range inside the range of the part before, share one copy.

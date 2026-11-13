@@ -762,7 +762,6 @@ void Graphics_InvalidateTextureStageCache(void);
 // FUNCTION: CMR2 0x004bbd80
 void Quad2D_DrawLayer(unsigned int layer)
 {
-    GfxVertexBuffer *pVB;
     Quad2D *pQuad;
     Quad2D *pLast;
     Texture *pLastTexture;
@@ -770,13 +769,16 @@ void Quad2D_DrawLayer(unsigned int layer)
     unsigned int count;
     unsigned int i;
     unsigned int n;
-    BYTE *pData;
 
     count = 0;
     n = 0;
     pLastTexture = (Texture *)1;
     lastFlags = 0xffffffff;
-    pData = (BYTE *)Gfx_LockVertexBuffer(CGraphics::m_pTextureManager->pVertexBuffer1);
+    // PORT: the triangles go to the renderer as they come
+    // (Gfx_BeginPrimitive): the original copied them into a vertex buffer
+    // and drew that, and the renderer copied them again (the tyre marks are
+    // 200 KB in a frame).
+    Gfx_BeginPrimitive(GFX_TRIANGLELIST);
     if (layer & 8) {
         count = g_quad2DCountA;
         pQuad = g_quad2DLayerA;
@@ -796,13 +798,9 @@ void Quad2D_DrawLayer(unsigned int layer)
     }
     for (i = count; i > 0; i--) {
         if (pLastTexture != pQuad->pTexture || lastFlags != pQuad->flags) {
-            pVB = CGraphics::m_pTextureManager->pVertexBuffer1;
-            Gfx_UnlockVertexBuffer(pVB);
-            if (n > 0) {
-                Gfx_DrawPrimitiveVB(GFX_TRIANGLELIST, CGraphics::m_pTextureManager->pVertexBuffer1, 0, n);
-                n = 0;
-            }
-            pData = (BYTE *)Gfx_LockVertexBuffer(CGraphics::m_pTextureManager->pVertexBuffer1);
+            Gfx_EndPrimitive();
+            n = 0;
+            Gfx_BeginPrimitive(GFX_TRIANGLELIST);
             if (pLastTexture != pQuad->pTexture) {
                 QUAD2D_SET_STATE(pQuad);
             }
@@ -812,12 +810,11 @@ void Quad2D_DrawLayer(unsigned int layer)
             pLastTexture = pQuad->pTexture;
             lastFlags = pQuad->flags;
         }
-        *(Quad2DVertices *)(pData + n * 0x30) = pQuad->verts;
+        Gfx_AddPrimitiveVertices((const GfxVertex *)&pQuad->verts, 3);
         n += 3;
         CGame::m_unk0x0059ce20++;
         pQuad++;
     }
-    Gfx_UnlockVertexBuffer(CGraphics::m_pTextureManager->pVertexBuffer1);
     if (n > 0) {
         if (layer & 8)
             pLast = &g_quad2DLayerA[count - 1];
@@ -829,8 +826,8 @@ void Quad2D_DrawLayer(unsigned int layer)
             pLast = &g_quad2DLayerD[count - 1];
         QUAD2D_SET_STATE(pLast);
         QUAD2D_SET_FLAGS(pLast);
-        Gfx_DrawPrimitiveVB(GFX_TRIANGLELIST, CGraphics::m_pTextureManager->pVertexBuffer1, 0, n);
     }
+    Gfx_EndPrimitive();
     CGraphics::ApplyTextureStageChange(0, 0);
     CGraphics::SetZEnable(1);
     CGraphics::SetZWriteEnable(1);
