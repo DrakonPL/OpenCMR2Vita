@@ -2,7 +2,8 @@
 // only (the scenery, the ground, the trees). The PS Vita reads a texture
 // drawn small from such a level, and its texture cache misses less
 // (gxm_textures.cpp). Each level is a 2x2 box of the level before it, encoded
-// again (stb_dxt). No GXM here: tests/gfx_record.cpp checks it on the PC.
+// again by a range fit (fast at the load of a stage). No GXM here:
+// tests/gfx_record.cpp checks it on the PC.
 #ifndef OPENCMR2_TEXTURE_MIPS_H
 #define OPENCMR2_TEXTURE_MIPS_H
 

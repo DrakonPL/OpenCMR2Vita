@@ -1282,6 +1282,20 @@ int main()
         Gfx_MakeBC3Mips(atlas.data(), size, size, 3, tile, kept);
         Gfx_MakeBC3Mips(atlas.data(), size, size, 3, GfxMipRect(), whole);
         REQUIRE(kept[1] == whole[1] && kept[2] == whole[2] && kept[1] != before);
+        // New levels for a part: of a texture that is not zero outside the
+        // part, all of it is made; of an atlas that is new (zero but for a
+        // tile), the tile is enough. Both are the levels of the whole.
+        std::vector<uint8_t> fresh[16];
+        Gfx_MakeBC3Mips(atlas.data(), size, size, 3, tile, fresh);
+        REQUIRE(fresh[1] == whole[1] && fresh[2] == whole[2]);
+        std::vector<uint8_t> blank(atlas.size(), 0);
+        for (int by = tile.y0 / 4; by < tile.y1 / 4; by++)
+            memcpy(&blank[((size_t)by * (size / 4) + tile.x0 / 4) * 16],
+                   &atlas[((size_t)by * (size / 4) + tile.x0 / 4) * 16], (size_t)(tile.x1 - tile.x0) / 4 * 16);
+        std::vector<uint8_t> part[16], all[16];
+        Gfx_MakeBC3Mips(blank.data(), size, size, 3, tile, part);
+        Gfx_MakeBC3Mips(blank.data(), size, size, 3, GfxMipRect(), all);
+        REQUIRE(part[1] == all[1] && part[2] == all[2] && part[1] != std::vector<uint8_t>(part[1].size(), 0));
     }
 
     // The performance stats (video.perf_stats = 0): the recorder counts no
