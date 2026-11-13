@@ -202,6 +202,10 @@ add_test(NAME gfx_record COMMAND gfx_record_test)
 add_executable(audio_mixer_test audio_mixer.cpp ${PROJECT_SOURCE_DIR}/src/audio/audio_mixer.cpp)
 target_include_directories(audio_mixer_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME audio_mixer COMMAND audio_mixer_test)
+# The read-ahead of the streamed music (asynchronous reads on the PS Vita).
+add_executable(read_ahead_test read_ahead.cpp)
+target_include_directories(read_ahead_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME read_ahead COMMAND read_ahead_test)
 # The threaded executor: the frames on a worker, one at a time, in their order.
 add_executable(gfx_threaded_test gfx_threaded.cpp
     ${PROJECT_SOURCE_DIR}/src/render/gfx_threaded.cpp ${PROJECT_SOURCE_DIR}/src/render/gfx_small_batch.cpp)

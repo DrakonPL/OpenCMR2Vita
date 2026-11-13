@@ -66,6 +66,19 @@ BOOL Audio_QueueStream(AudioStream *stream, const float *samples, DWORD sampleCo
 void Audio_StartStream(AudioStream *stream);
 void Audio_ReleaseStream(AudioStream *stream);
 
+/* ---- the streamed music --------------------------------------------------- */
+
+/* Runs refill on a thread of its own about every periodMs milliseconds, with
+   the music lock held, until Audio_StopMusicThread (the PS Vita: the game's
+   music refills its buffer there, file reads and decoding with it). FALSE
+   where there is no such thread: the game refills from its own thread. */
+BOOL Audio_StartMusicThread(void (*refill)(void), DWORD periodMs);
+void Audio_StopMusicThread(void);
+/* The music lock (recursive): the game holds it while it changes what the
+   refill reads. No lock where there is no music thread. */
+void Audio_LockMusic(void);
+void Audio_UnlockMusic(void);
+
 /* ---- wave files ---------------------------------------------------------- */
 
 #define AUDIO_WAVE_FORMAT_PCM 1

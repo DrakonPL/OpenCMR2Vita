@@ -2,6 +2,7 @@
 // ux0:data/OpenCMR2/, saves, settings and the log in its user/ folder.
 
 #include "platform/platform_vita.h"
+#include "platform/read_ahead.h"
 #include "platform/sys_common.h"
 #include "platform/sys_event_ring.h"
 #include "platform/sys_paths.h"
@@ -716,8 +717,116 @@ extern "C" const char *Sys_GetCommandLine(void) { return ""; }
 
 // ---- files ----------------------------------------------------------------------
 
+// A read of a block at an offset of a file, the whole block or to the end
+// of the file: the byte count, or a negative sceIo error.
+int ReadBlock(SceUID fd, uint64_t offset, void *buffer, uint32_t size)
+{
+    if (sceIoLseek(fd, (SceOff)offset, SCE_SEEK_SET) != (SceOff)offset)
+        return -1;
+    uint32_t done = 0;
+    while (done < size) {
+        const int n = sceIoRead(fd, (uint8_t *)buffer + done, size - done);
+        if (n < 0)
+            return n;
+        if (n == 0)
+            break;
+        done += (uint32_t)n;
+    }
+    return (int)done;
+}
+
+// The thread of the read-aheads: it reads the block a read-ahead asked for
+// while that one's reader goes on. The SDK has no declared asynchronous
+// read with a documented end (sceIoReadAsync, sceIoComplete): this thread
+// makes the read asynchronous with sceIoRead. One read at a time: a second
+// read-ahead's Start waits until the first one's Wait.
+struct FileReader {
+    SceUID lock = -1, start = -1, done = -1, thread = -1;
+    bool tried = false;
+    // The read the thread does now.
+    SceUID fd = -1;
+    uint64_t offset = 0;
+    void *buffer = nullptr;
+    uint32_t size = 0;
+    int result = 0;
+
+    static int Entry(SceSize, void *data)
+    {
+        FileReader *self = *(FileReader **)data;
+        for (;;) {
+            sceKernelWaitSema(self->start, 1, NULL);
+            self->result = ReadBlock(self->fd, self->offset, self->buffer, self->size);
+            sceKernelSignalSema(self->done, 1);
+        }
+        return 0;
+    }
+
+    // Made at the first read-ahead. False: the read-aheads read in Start.
+    bool Ready()
+    {
+        if (tried)
+            return thread >= 0;
+        tried = true;
+        lock = sceKernelCreateMutex("file_reader", 0, 0, NULL);
+        start = sceKernelCreateSema("file_reader_start", 0, 0, 1, NULL);
+        done = sceKernelCreateSema("file_reader_done", 0, 0, 1, NULL);
+        if (lock >= 0 && start >= 0 && done >= 0)
+            thread = sceKernelCreateThread("file_reader", Entry, 128, 16 * 1024, 0, SCE_KERNEL_CPU_MASK_USER_1, NULL);
+        FileReader *self = this;
+        const int started = thread < 0 ? thread : sceKernelStartThread(thread, sizeof(self), &self);
+        if (started < 0) {
+            Sys_Log("file: no reader thread (0x%08x): a read-ahead reads in its reader's thread", (unsigned)started);
+            if (thread >= 0)
+                sceKernelDeleteThread(thread);
+            thread = -1;
+        }
+        return thread >= 0;
+    }
+};
+FileReader s_fileReader;
+
+// The file of a read-ahead (platform/read_ahead.h): Start hands the read to
+// the reader thread and returns, Wait waits for its end.
+struct VitaReadIo : ReadAheadIo {
+    SceUID fd = -1;
+    int syncResult = 0;     // the read of Start without the thread
+    bool onThread = false;
+
+    bool Start(uint64_t offset, void *buffer, uint32_t size) override
+    {
+        FileReader &r = s_fileReader;
+        onThread = r.Ready();
+        if (!onThread) {
+            syncResult = ReadBlock(fd, offset, buffer, size);
+            return true;
+        }
+        // Held until Wait: the thread has one read.
+        sceKernelLockMutex(r.lock, 1, NULL);
+        r.fd = fd;
+        r.offset = offset;
+        r.buffer = buffer;
+        r.size = size;
+        sceKernelSignalSema(r.start, 1);
+        return true;
+    }
+
+    int Wait() override
+    {
+        if (!onThread)
+            return syncResult;
+        FileReader &r = s_fileReader;
+        sceKernelWaitSema(r.done, 1, NULL);
+        const int result = r.result;
+        sceKernelUnlockMutex(r.lock, 1);
+        return result;
+    }
+};
+
 struct SysFile {
     SceUID fd;
+    // Sys_SetFileReadAhead: the reads and seeks go through it.
+    ReadAhead *ahead = nullptr;
+    VitaReadIo io;
 };
 
 extern "C" BOOL Sys_ResolvePath(const char *path, BOOL forWriting, char *out, size_t outSize)
@@ -768,14 +877,32 @@ extern "C" SysFile *Sys_OpenFile(const char *path, int mode)
 extern "C" void Sys_CloseFile(SysFile *file)
 {
     if (file != NULL) {
+        if (file->ahead != nullptr) {
+            file->ahead->Close(file->io);
+            delete file->ahead;
+        }
         sceIoClose(file->fd);
         delete file;
         s_openFiles--;
     }
 }
 
+extern "C" void Sys_SetFileReadAhead(SysFile *file, DWORD blockBytes)
+{
+    if (file == NULL || file->ahead != nullptr || blockBytes == 0)
+        return;
+    const SceOff position = sceIoLseek(file->fd, 0, SCE_SEEK_CUR);
+    if (position < 0)
+        return;
+    file->io.fd = file->fd;
+    file->ahead = new ReadAhead(blockBytes);
+    file->ahead->Seek(file->io, (uint64_t)position);
+}
+
 extern "C" DWORD Sys_ReadFile(SysFile *file, void *buffer, DWORD size)
 {
+    if (file->ahead != nullptr)
+        return file->ahead->Read(file->io, buffer, size);
     DWORD done = 0;
     while (done < size) {
         int n = sceIoRead(file->fd, (BYTE *)buffer + done, size - done);
@@ -800,6 +927,20 @@ extern "C" DWORD Sys_WriteFile(SysFile *file, const void *buffer, DWORD size)
 
 extern "C" DWORD Sys_SeekFile(SysFile *file, LONG offset, int origin)
 {
+    if (file->ahead != nullptr) {
+        // The position is the read-ahead's: the file's own moves with its reads.
+        file->ahead->Finish(file->io);
+        SceOff base = 0;
+        if (origin == SYS_SEEK_CUR)
+            base = (SceOff)file->ahead->Position();
+        else if (origin == SYS_SEEK_END)
+            base = sceIoLseek(file->fd, 0, SCE_SEEK_END);
+        const SceOff position = base < 0 ? -1 : base + offset;
+        if (position < 0 || position > 0xfffffffe)
+            return 0xffffffff;
+        file->ahead->Seek(file->io, (uint64_t)position);
+        return (DWORD)position;
+    }
     int whence = origin == SYS_SEEK_CUR ? SCE_SEEK_CUR : origin == SYS_SEEK_END ? SCE_SEEK_END : SCE_SEEK_SET;
     SceOff position = sceIoLseek(file->fd, offset, whence);
     return position < 0 || position > 0xfffffffe ? 0xffffffff : (DWORD)position;
@@ -807,6 +948,11 @@ extern "C" DWORD Sys_SeekFile(SysFile *file, LONG offset, int origin)
 
 extern "C" DWORD Sys_GetFileSize(SysFile *file)
 {
+    if (file->ahead != nullptr) {
+        file->ahead->Finish(file->io);
+        const SceOff size = sceIoLseek(file->fd, 0, SCE_SEEK_END);
+        return size < 0 || size > 0xfffffffe ? 0xffffffff : (DWORD)size;
+    }
     SceOff position = sceIoLseek(file->fd, 0, SCE_SEEK_CUR);
     SceOff size = position < 0 ? -1 : sceIoLseek(file->fd, 0, SCE_SEEK_END);
     if (position >= 0)

@@ -40,6 +40,18 @@ BOOL Sound_OpenADPCMDecoder(void);
 void Sound_NoOpMusicCallback(INT_PTR unused);
 HRESULT Sound_StartLoopingMusicStream(int param1);
 
+// PORT: the PS Vita refills the streamed music on a thread of its own
+// (Audio_StartMusicThread, Sound_RefillMusicOnThread): the file read and the
+// decoding of a block were hitches on the game's thread. The functions that
+// open, start, pause, change or close the music hold the music lock, which
+// the refill holds too. Without the thread the lock does nothing and the
+// game refills each frame, as the original.
+struct MusicLock {
+    MusicLock() { Audio_LockMusic(); }
+    ~MusicLock() { Audio_UnlockMusic(); }
+};
+static BOOL g_musicThreaded;
+
 // Opens a music file (.wav with Microsoft ADPCM data) and prepares it for
 // streaming: creates the streaming buffer and the ACM decoder; on failure the
 // music is stopped again. The name is remembered in m_unk0x005a2738.
@@ -48,6 +60,7 @@ HRESULT Sound_StartLoopingMusicStream(int param1);
 void CSound::OpenStreamingMusicFile(char *path) {
     if (m_unk0x006e0eec == 0)
         return;
+    MusicLock lock;
 
     m_unk0x005a2728 = FALSE;
     m_unk0x005a272c = FALSE;
@@ -66,6 +79,9 @@ void CSound::OpenStreamingMusicFile(char *path) {
     if (m_pMMIO->Open(path) != 0) {
         Sound_NoOpMusicCallback((INT_PTR)g_strCouldNotOpenMusicFile);
     } else {
+        // PORT: the file is read in blocks from its start to its end: the
+        // platform reads the next 32 KB while the refill decodes.
+        Sys_SetFileReadAhead(m_pMMIO->hmmio, 0x8000);
         m_unk0x005a2728 = TRUE;
         if (IsSoundCallSuccessful(Sound_CreateMusicStreamingBuffer()) != 0) {
             m_unk0x005a272c = TRUE;
@@ -87,6 +103,7 @@ void CSound::OpenStreamingMusicFile(char *path) {
 }
 // FUNCTION: CMR2 0x004a2b50
 void CSound::CloseMusicStreamAndClearPath(BOOL param1) {
+    MusicLock lock;
     CloseMusicStreamResources();
     if (param1 == 0) {
         m_unk0x005a2734 = FALSE;
@@ -97,6 +114,7 @@ void CSound::CloseMusicStreamAndClearPath(BOOL param1) {
 // FUNCTION: CMR2 0x004a2ac0
 BOOL __fastcall CSound::CloseMusicStreamResources(void) {
     MMIOData* pvVar1;
+    MusicLock lock;
 
     if (m_unk0x005a2728 != 0) {
         if (m_unk0x005a2730 != 0) {
@@ -148,6 +166,7 @@ bool CSound::CloseADPCMDecoder(void) {
 
 // FUNCTION: CMR2 0x004a2f00
 HRESULT CSound::StopDirectSoundBuffer(void) {
+    MusicLock lock;
     if (m_unk0x005a2730 != 0) {
         if (m_pDirectSoundBuffer != NULL) {
             if (Audio_IsPlaying(m_pDirectSoundBuffer))
@@ -187,6 +206,7 @@ void __fastcall CSound::CloseAndCleanupMMIO(MMIOData* pMMIOData) {
 void CSound::SetMusicStreamVolume(int volume)
 {
     LONG vol;
+    MusicLock lock;
 
     if (m_unk0x005a2730 != 0) {
         if (volume == 0)
@@ -436,6 +456,7 @@ void CSound::RunSoundDeviceCallback(void)
 // FUNCTION: CMR2 0x004a31a0
 void CSound::StopSharedMusicBuffer(void)
 {
+    MusicLock lock;
     if (m_unk0x005a2728 != 0 && m_pDirectSoundBuffer != NULL) {
         if (Audio_IsPlaying(m_pDirectSoundBuffer)) {
             Audio_Stop(m_pDirectSoundBuffer);
@@ -473,6 +494,7 @@ BOOL Sound_OpenADPCMDecoder(void)
 // FUNCTION: CMR2 0x004a3160
 void CSound::PauseMusicStreaming(void)
 {
+    MusicLock lock;
     if (m_unk0x005a2730 != 0) {
         m_unk0x005a2724 = 1;
         StopSharedMusicBuffer();
@@ -570,6 +592,7 @@ HRESULT Sound_RewindAndFillMusicBuffer(int unused)
 // FUNCTION: CMR2 0x004a2f50
 int Sound_RestartOpenedMusicStream(void)
 {
+    MusicLock lock;
     if (CSound::m_unk0x005a2730 != 0) {
         CSound::StopDirectSoundBuffer();
         Sound_StartLoopingMusicStream(1);
@@ -598,6 +621,7 @@ void Sound_NoOpMusicCallback(INT_PTR unused);
 // FUNCTION: CMR2 0x004a2bd0
 HRESULT Sound_StartLoopingMusicStream(int param1)
 {
+    MusicLock lock;
     if (CSound::m_unk0x005a2730 != 0) {
         g_unk0x005a2710 = 0;
         g_unk0x005a2714 = 0;
@@ -651,10 +675,13 @@ HRESULT Sound_RefillMusicBufferRegions(int unused)
 // FUNCTION: CMR2 0x004a2fe0
 void Sound_UpdateMusicStreaming(void)
 {
+    MusicLock lock;
     if (CSound::m_unk0x005a2724 == 0 && CSound::m_unk0x005a2730 != 0) {
         if (CSound::m_unk0x005a2720 == 0) {
             if (Audio_IsPlaying(CSound::m_pDirectSoundBuffer)) {
-                Sound_RefillMusicBufferRegions(1);
+                // PORT: the music thread refills (Sound_RefillMusicOnThread).
+                if (!g_musicThreaded)
+                    Sound_RefillMusicBufferRegions(1);
                 CSound::m_unk0x005a2720 = FALSE;
                 return;
             }
@@ -663,6 +690,16 @@ void Sound_UpdateMusicStreaming(void)
         }
         CSound::m_unk0x005a2720 = FALSE;
     }
+}
+
+// PORT: the refill of Sound_UpdateMusicStreaming, on the music thread with
+// the music lock held (Audio_StartMusicThread): while the music plays and is
+// not paused or stopped. The game's frame restarts the music after a pause.
+static void Sound_RefillMusicOnThread(void)
+{
+    if (CSound::m_unk0x005a2724 == 0 && CSound::m_unk0x005a2730 != 0 && CSound::m_unk0x005a2720 == 0 &&
+        CSound::m_pDirectSoundBuffer != NULL && Audio_IsPlaying(CSound::m_pDirectSoundBuffer))
+        Sound_RefillMusicBufferRegions(1);
 }
 
 // FUNCTION: CMR2 0x004a2430
@@ -719,6 +756,9 @@ BOOL Sound_InitDevice(int sampleRate, int channels, int bits, int unused)
         g_sound3DEnabled = FALSE;
     if (!Audio_Init(sampleRate, channels))
         return FALSE;
+    // PORT: the music refills on a thread of its own where the platform has
+    // one (a refill each 20 ms; the buffer holds 3 s of music).
+    g_musicThreaded = Audio_StartMusicThread(Sound_RefillMusicOnThread, 20);
     g_unk0x005a2844 = 1;
     if (g_sound3DEnabled)
         g_unk0x005a284c = 1;
@@ -1190,6 +1230,7 @@ int Sound_GetSampleTableState(void)
 // FUNCTION: CMR2 0x004a3180
 void Sound_ClearMusicPauseFlag(void)
 {
+    MusicLock lock;
     if (CSound::m_unk0x005a2730 != 0)
         CSound::m_unk0x005a2724 = 0;
 }
@@ -1243,6 +1284,10 @@ void Sound_ReleaseDirectSoundResources(void)
 
     for (i = 0; i < Sound_GetLoadedSampleCount(); i++)
         Sound_ReleaseSampleBuffers(i);
+    // PORT: the music thread ends before the output (the music lock is not
+    // held here).
+    Audio_StopMusicThread();
+    g_musicThreaded = FALSE;
     if (g_unk0x005a2844)
         Audio_Shutdown();
     g_unk0x005a2844 = 0;
