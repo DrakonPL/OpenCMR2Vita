@@ -2296,6 +2296,30 @@ static void Game_OrderDeferredDraws(const DeferredDraw *items, unsigned int coun
     memcpy(order, scratch, count * sizeof(order[0]));
 }
 
+extern int g_depthSortDrawLists;
+
+// PORT: whether the draw of a stage object can be left out: each vertex of
+// its mesh is outside one plane of the view, with the world matrix that is
+// set (Gfx_IsRangeVisible). Half of the trees of a frame are outside the
+// view. The renderer left their draws out already, and the game still
+// spent some 12 us in Graphics_DrawMeshLOD for each of them on the PS Vita.
+// Only a mesh that draws its parts and nothing more is left out. The state
+// it would set (the cull mode, the blending, the texture) is set again by
+// the next mesh that is drawn. A mesh of texture runs sets the texture
+// address for the mesh after it, and the reflection passes set more: such
+// meshes are always drawn.
+bool Game_StageMeshOutsideView(Mesh *pMesh)
+{
+    Mesh *pLod = (Mesh *)((BYTE *)pMesh + pMesh->lodIndex * offsetof(Mesh, field_0x108));
+
+    if (pLod->pTriangles == NULL || pLod->field_0x10 <= 0 || (pLod->flags & 0x1000) != 0)
+        return false;
+    if ((pLod->flags & 0x200) != 0 && (pLod->flags & 0x40000) == 0 && (g_pGraphics->field913_0x3bc & 8) != 0)
+        return false;
+    return Gfx_IsRangeVisible(CGraphics::m_pTextureManager->pVertexBuffers[pLod->vertexBufferIndex],
+                              (DWORD)pLod->vertexOffset, (DWORD)pLod->field_0x10) == FALSE;
+}
+
 // Draws the objects the deferred pass of the static stage objects queued:
 // sorts them by view depth (farthest first) and, for each one, binds its
 // texture, sets its world matrix and marks the mesh for the culling test of
@@ -2326,6 +2350,11 @@ void Game_DrawDeferredObjects(void)
             Frontend_SetObjectField118(CGraphics::m_pTextureManager->textureBuffer[pObject->pMesh->pTriangles->textures[0]], 0);
             Gfx_SetTransform(GFX_TRANSFORM_WORLD, (GfxMatrix *)pObject->matrix);
             pObject->pMesh->flags |= 8;
+            // PORT: an object outside the view is left out
+            // (Game_StageMeshOutsideView). The last one is drawn: the state
+            // after the loop is then the original's.
+            if (i + 1 < (unsigned int)CGame::m_deferredDrawCount && Game_StageMeshOutsideView(pObject->pMesh))
+                continue;
             Graphics_DrawMeshLOD(pObject->pMesh, 1, 0, 0);
         }
         CGame::m_deferredDrawCount = 0;
@@ -2375,6 +2404,10 @@ void Game_DrawStaticStageObjects(void)
     StageObjectDraw *pObject;
     unsigned int i;
     FixVector delta;
+    // PORT: the last object left out since the last one drawn
+    // (Game_StageMeshOutsideView): drawn after the walk, so that the state
+    // after it is the original's.
+    StageObjectDraw *pTrailing = NULL;
 
     for (i = 0; i < (unsigned int)g_sectorCullEnabled; i++) {
         pObject = (StageObjectDraw *)g_sectors[g_visibleSectorIndices[i]]->pObjects;
@@ -2408,13 +2441,18 @@ void Game_DrawStaticStageObjects(void)
                     delta.z = g_unk0x0059be6c->world.position.z - pObject->position.z;
                     pObject->pMesh->field_0x114 = FixVecLength(&delta);
                     CGame::QueuePrimaryDrawObject(pObject);
+                } else if (Game_StageMeshOutsideView(pObject->pMesh)) {
+                    pTrailing = pObject;
                 } else {
                     Graphics_DrawMeshLOD(pObject->pMesh, 1, 0, 0);
+                    pTrailing = NULL;
                 }
             }
             pObject = pObject->pNext;
         }
     }
+    if (pTrailing != NULL)
+        Graphics_DrawMeshLOD(pTrailing->pMesh, 1, 0, 0);
 }
 
 // Identity world transform: the deferred draw paths set it before drawing
