@@ -1356,23 +1356,39 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         const bool single = probe.mode != PROBE_TWO_PASSES && (singlePass || probe.mode == PROBE_SINGLE_PASS);
         const bool needAlpha = depthCandidate && !single && probe.mode != PROBE_DEPTH_PASS_ALWAYS;
         DrawRange scratch;
-        // The frame's own vertices have no box that is kept: their farthest
-        // vertex is measured.
+        // The frame's own vertices come with their box, or with the reach of
+        // a run of small draws (GfxCommand::hasBox). Without them, their
+        // farthest vertex is measured.
         const bool ownVertices = c.buffer == nullptr;
-        const DrawRange *range =
-            fadeKey || needAlpha ? RangeOf(c, frame, fadeKey && !ownVertices, needAlpha, scratch) : nullptr;
+        const bool ownKnown = ownVertices && c.hasBox;
+        const DrawRange *range = (fadeKey && !ownKnown) || needAlpha
+                                     ? RangeOf(c, frame, fadeKey && !ownVertices, needAlpha, scratch)
+                                     : nullptr;
         if ((key & kFadeKeyBit) != 0) {
             float reach = 0.0f;
-            if (fadeKey && range != nullptr && ownVertices) {
-                stats.ownDraws++;
-                stats.ownVertices += c.vertexCount;
-            }
-            if (fadeKey && range != nullptr)
+            bool known = false;
+            if (fadeKey && ownKnown) {
+                if (c.reach >= 0.0f) {
+                    reach = c.reach;
+                } else {
+                    GxmBounds box;
+                    memcpy(box.low, c.boxLow, sizeof(box.low));
+                    memcpy(box.high, c.boxHigh, sizeof(box.high));
+                    reach = Gxm_EyeDistanceBound(box, &vertexUniforms[VU_WORLD_VIEW]);
+                }
+                known = true;
+            } else if (fadeKey && range != nullptr) {
+                if (ownVertices) {
+                    stats.ownDraws++;
+                    stats.ownVertices += c.vertexCount;
+                }
                 reach = ownVertices ? Gxm_FarthestEyeDistance(frame.vertices.data() + c.firstVertexByte,
                                                               sizeof(GfxVertex), c.vertexCount,
                                                               &vertexUniforms[VU_WORLD_VIEW])
                                     : Gxm_EyeDistanceBound(range->box, &vertexUniforms[VU_WORLD_VIEW]);
-            const bool tooNear = fadeKey && range != nullptr && reach < s.fadeStart;
+                known = true;
+            }
+            const bool tooNear = known && reach < s.fadeStart;
             step(PROFILE_RANGE);
             if (tooNear)
                 resolved = Resolve(key & ~kFadeKeyBit, args, s, c.transformed);

@@ -285,6 +285,7 @@ int main()
     Gfx_Present(FALSE);
     REQUIRE(Draws() == 2 && s_frame.states.size() == 2);
     REQUIRE(s_frame.states[Draw(1).state].world._41 == 20.0f && Vertex3D(Draw(1), 1).x == 1.0f);
+    REQUIRE(!Draw(0).hasBox && Draw(0).reach < 0.0f);
     // Joined: they are in world space, with one state and one draw. The
     // positions go through the whole matrix, the normals through its 3x3 part.
     s_joins = true;
@@ -301,6 +302,11 @@ int main()
         REQUIRE(a.x == 12.0f && a.y == 2.0f && a.z == 5.0f && a.nz == -2.0f && a.nx == 0.0f);
         REQUIRE(b.x == 23.0f && b.y == 0.0f && b.z == 6.0f && b.nz == -3.0f);
         REQUIRE(a.diffuse == 0xff102033 && a.u0 == 1.0f);
+        // The box of the run, and the eye distance of its farthest vertex
+        // (the view is the identity here).
+        REQUIRE(c.hasBox && c.boxLow[0] == 10.0f && c.boxHigh[0] == 23.0f && c.boxLow[1] == 0.0f);
+        REQUIRE(c.boxHigh[1] == 3.0f && c.boxLow[2] == 5.0f && c.boxHigh[2] == 6.0f);
+        REQUIRE(c.reach == sqrtf(23.0f * 23.0f + 3.0f * 3.0f + 6.0f * 6.0f));
     }
     // Another texture starts a new draw, in the same state: the draw has its
     // textures. A draw that is not small keeps its world matrix, and so does
@@ -322,6 +328,9 @@ int main()
         REQUIRE(Draw(2).textures[0] == leaves && Draw(3).textures[0] == leaves);
         REQUIRE(s_frame.states[Draw(2).state].world._41 == 20.0f && Draw(2).vertexCount == 18);
         REQUIRE(Vertex3D(Draw(2), 1).x == 1.0f);
+        // A draw that is not small has the box of its own space, and no reach.
+        REQUIRE(Draw(2).hasBox && Draw(2).reach < 0.0f && Draw(2).boxLow[0] == 0.0f && Draw(2).boxHigh[0] == 1.0f);
+        REQUIRE(Draw(2).boxHigh[1] == 0.0f && Draw(3).reach > 0.0f);
         REQUIRE(IsIdentity(s_frame.states[Draw(3).state].world) && Draw(3).vertexCount == 8);
         REQUIRE(Vertex3D(Draw(3), 5).x == 34.0f);
         Gfx_SetTexture(0, NULL);
@@ -472,38 +481,45 @@ int main()
         REQUIRE(Draw(0).textures[0] == oak && Draw(1).textures[0] == oak && Draw(1).textures[1] == pine);
         REQUIRE(Draw(2).textures[0] == plain && Draw(3).textures[0] == oak && Vertex3D(Draw(3), 1).u0 == 2.0f);
 
-        // The distance fade: a run of quads joins among the quads without a
-        // vertex in the fade, and among those with one. The executor draws
-        // the fade only for a draw that reaches it.
+        // The distance fade: a run of quads joins on both sides of its
+        // start, and has the eye distance of its farthest vertex. The
+        // executor draws a run with the fade only where that reaches the
+        // start.
         Gfx_SetDistanceFade(100.0f, 200.0f);
         Billboard(2.0f, 10.0f, 150.0f);
-        Billboard(2.0f, 10.0f, 120.0f);
         Billboard(2.0f, 10.0f, 30.0f);
+        Billboard(2.0f, 10.0f, 120.0f);
         Billboard(2.0f, 10.0f, 20.0f);
         Gfx_Present(FALSE);
-        REQUIRE(Draws() == 2 && Draw(0).vertexCount == 8 && Draw(1).vertexCount == 8);
-        REQUIRE(Draw(0).textures[0] == atlas && Vertex3D(Draw(1), 0).z == 30.0f);
-        // A quad not far before the start of the fade joins a run of each
-        // kind: the game's order has quads of the two sides in turns there.
-        // A quad well before the start does not join a run with the fade,
-        // and a quad with the fade does not join a run without it.
-        Billboard(2.0f, 10.0f, 150.0f);
-        Billboard(2.0f, 10.0f, 90.0f);
-        Billboard(2.0f, 10.0f, 110.0f);
-        Billboard(2.0f, 10.0f, 80.0f);
+        REQUIRE(Draws() == 1 && Draw(0).vertexCount == 16 && Draw(0).textures[0] == atlas);
+        REQUIRE(Draw(0).reach == sqrtf(12.0f * 12.0f + 2.0f * 2.0f + 150.0f * 150.0f));
+        REQUIRE(Draw(0).hasBox && Draw(0).boxLow[2] == 20.0f && Draw(0).boxHigh[2] == 150.0f);
+        // A run of quads before the start reaches less far than the start.
         Billboard(2.0f, 10.0f, 60.0f);
-        Billboard(2.0f, 10.0f, 85.0f);
+        Billboard(2.0f, 10.0f, 80.0f);
         Billboard(2.0f, 10.0f, 30.0f);
-        Billboard(2.0f, 10.0f, 120.0f);
         Gfx_Present(FALSE);
-        REQUIRE(Draws() == 3 && Draw(0).vertexCount == 16 && Draw(1).vertexCount == 12 && Draw(2).vertexCount == 4);
-        REQUIRE(Vertex3D(Draw(1), 0).z == 60.0f && Vertex3D(Draw(2), 0).z == 120.0f);
-        // A run that starts not far before the fade is a run without it.
-        Billboard(2.0f, 10.0f, 90.0f);
-        Billboard(2.0f, 10.0f, 150.0f);
-        Billboard(2.0f, 10.0f, 95.0f);
-        Gfx_Present(FALSE);
-        REQUIRE(Draws() == 2 && Draw(0).vertexCount == 4 && Draw(1).vertexCount == 8);
+        REQUIRE(Draws() == 1 && Draw(0).vertexCount == 12);
+        REQUIRE(Draw(0).reach == sqrtf(12.0f * 12.0f + 2.0f * 2.0f + 80.0f * 80.0f) && Draw(0).reach < 100.0f);
+        // A draw that is not small, in world space, joins the run: the run
+        // then has its box and no reach.
+        {
+            Gfx_SetTexture(0, NULL);
+            Billboard(2.0f, 10.0f, 60.0f);
+            GfxMatrix world = Identity();
+            Gfx_SetTransform(GFX_TRANSFORM_WORLD, &world);
+            GfxVertex mesh[18] = {};
+            WORD list[18];
+            for (int i = 0; i < 18; i++) {
+                mesh[i].z = 300.0f;
+                list[i] = (WORD)i;
+            }
+            Gfx_DrawIndexedPrimitive(GFX_TRIANGLELIST, mesh, 18, list, 18);
+            Gfx_Present(FALSE);
+            REQUIRE(Draws() == 1 && Draw(0).vertexCount == 22 && Draw(0).reach < 0.0f);
+            REQUIRE(Draw(0).hasBox && Draw(0).boxLow[2] == 60.0f && Draw(0).boxHigh[2] == 300.0f);
+            Gfx_SetTexture(0, oak);
+        }
         Gfx_SetDistanceFade(0.0f, 0.0f);
 
         // A second stage that is off reads no texture: its texture does not
@@ -739,6 +755,7 @@ int main()
     // A vertex buffer the game has just locked is not drawn by reference:
     // its vertices are copied into the frame. The parts of a mesh, each drawn
     // with a range inside the range of the part before, share one copy.
+    s_joins = true;
     GfxVertexBuffer *buffer = Gfx_CreateVertexBuffer(16);
     GfxVertex *locked = Gfx_LockVertexBuffer(buffer);
     for (int i = 0; i < 16; i++)
@@ -760,6 +777,12 @@ int main()
     REQUIRE(Draw(1).firstVertexByte == 4 * sizeof(GfxVertex) && Draw(1).vertexCount == 8);
     REQUIRE(Draw(2).firstVertexByte == 0);
     REQUIRE(Draw(3).firstVertexByte == 12 * sizeof(GfxVertex));
+    // Each draw has the box of its copy: the box of the parts that share a
+    // copy is that of the whole copy.
+    REQUIRE(Draw(0).hasBox && Draw(0).boxLow[0] == 2.0f && Draw(0).boxHigh[0] == 13.0f && Draw(0).reach < 0.0f);
+    REQUIRE(Draw(1).hasBox && Draw(1).boxLow[0] == 2.0f && Draw(1).boxHigh[0] == 13.0f);
+    REQUIRE(Draw(2).hasBox && Draw(2).boxLow[0] == 2.0f && Draw(2).boxHigh[0] == 13.0f);
+    REQUIRE(Draw(3).hasBox && Draw(3).boxLow[0] == 0.0f && Draw(3).boxHigh[0] == 3.0f);
     {
         GfxVertex v;
         memcpy(&v, s_frame.vertices.data() + Draw(1).firstVertexByte, sizeof(v));

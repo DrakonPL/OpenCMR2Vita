@@ -135,6 +135,18 @@ struct GfxCommand {
     // is 1.3 KB. There the textures of a draw are these, not those of its
     // state.
     GfxTexture *textures[2];
+    // How far the vertices of a 3D draw of the frame's own data (no buffer)
+    // are, for an executor that takes joined draws: the box of the vertices
+    // in their own space (hasBox), and for a run of small draws in world
+    // space also the eye distance of its farthest vertex (reach, else below
+    // zero). The recorder finds them while it copies the vertices. The GXM
+    // executor then does not walk the vertices for the distance fade: in a
+    // frame with the stage lighting, the game writes the colours of the
+    // ground meshes again in each frame, and their copies were 80,000
+    // vertices.
+    bool hasBox;
+    float boxLow[3], boxHigh[3];
+    float reach;
     // clear
     DWORD clearFlags;
     DWORD clearColor;
