@@ -354,6 +354,15 @@ void Gfx_WriteVertexBufferRange(GfxVertexBuffer *buffer, DWORD firstVertex, cons
 void Gfx_UnlockVertexBuffer(GfxVertexBuffer *buffer);
 
 void Gfx_DrawPrimitiveVB(int primitive, GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount);
+/* A draw whose vertices the caller gives in parts: Gfx_BeginPrimitive, then
+   the vertices with Gfx_AddPrimitiveVertices, then Gfx_EndPrimitive, which
+   makes the draw of them with the state it finds (no draw for no vertex).
+   As a draw of the same vertices from a vertex buffer that the caller
+   filled, without that buffer: the renderer copies each vertex once. No
+   other draw between the begin and the end. */
+void Gfx_BeginPrimitive(int primitive);
+void Gfx_AddPrimitiveVertices(const GfxVertex *vertices, DWORD vertexCount);
+void Gfx_EndPrimitive(void);
 /* Whether a range of a vertex buffer can be in the view, with the current
    world, view and projection matrices: FALSE where each of its vertices is
    outside one plane of the view. TRUE where the renderer does not test

@@ -1981,6 +1981,112 @@ extern "C" void Gfx_DrawBatch(const GfxBatchDraw *draws, DWORD count)
     DrawBatchNow(draws, count, caller);
 }
 
+// ---- a draw whose vertices the game gives in parts (Gfx_BeginPrimitive) ----
+//
+// The game copied the triangles of a 3D layer into a vertex buffer and drew
+// that: the recorder then copied them into the frame (the tyre marks: 200 KB
+// in a frame, twice on the game's thread). For an executor that takes joined
+// draws the parts go into the frame's vertex data at once, and the end makes
+// a draw of them where they are. Otherwise the parts collect here, and the
+// end records the draw as any other.
+
+namespace {
+
+int s_openPrimitive = -1;               // of Gfx_BeginPrimitive; -1: none
+bool s_openInFrame;                     // its vertices are in the frame's data, from s_openOffset
+uint32_t s_openOffset;
+std::vector<GfxVertex> s_openVertices;  // its vertices, when they are not in the frame
+
+// The draw of the open primitive from its vertices in the frame's data: as
+// RecordDrawNow records a draw of a vertex buffer that the game locks
+// between its draws (a copy of its vertices, with their box), without the
+// copy.
+void RecordDrawInFrame(int primitive, uint32_t offset, DWORD vertexCount)
+{
+#if defined(VITA) && defined(OPENCMR2_DEV)
+    g_sysVitaDrawCounts.calls++;
+#endif
+    const GfxVertex *vertices = (const GfxVertex *)(s_frame.vertices.data() + offset);
+    s_drawOverride = DrawOverride(false);
+    GfxCommand cmd = {};
+    cmd.type = GFX_CMD_DRAW;
+    cmd.primitive = primitive;
+    cmd.transformed = false;
+    cmd.vertexCount = vertexCount;
+    cmd.firstVertexByte = offset;
+    cmd.hasBox = true;
+    cmd.reach = -1.0f;
+    VertexBox(vertices, vertexCount, cmd.boxLow, cmd.boxHigh);
+    // The test against the view: a draw outside it is left out, and its
+    // vertices with it.
+    if (CullWanted()) {
+        GfxBox box;
+        memcpy(box.low, cmd.boxLow, sizeof(box.low));
+        memcpy(box.high, cmd.boxHigh, sizeof(box.high));
+        if (BoxOutsideView(ClipMatrix(s_state.world, 0), box)) {
+            s_counts.culled++;
+            s_frame.vertices.resize(offset);
+            return;
+        }
+    }
+    cmd.firstIndex = ~0u;
+    cmd.indexCount = 0;
+    cmd.state = RecordState(false);
+    cmd.textures[0] = s_state.stages[0].texture;
+    cmd.textures[1] = s_state.stages[1].texture;
+    s_frame.commands.push_back(cmd);
+#if defined(VITA) && defined(OPENCMR2_DEV)
+    g_sysVitaDrawCounts.commands++;
+    g_sysVitaDrawCounts.vertexBytes += vertexCount * sizeof(GfxVertex);
+#endif
+}
+
+} // namespace
+
+extern "C" void Gfx_BeginPrimitive(int primitive)
+{
+    s_openPrimitive = primitive;
+    // In the frame: lists and strips, which are drawn as they are. A fan
+    // becomes a list, and the trace has a line for each draw: the other way.
+    s_openInFrame = s_executor != NULL && s_executor->JoinsDraws() && TraceFile() == NULL &&
+                    primitive != GFX_TRIANGLEFAN;
+    if (s_openInFrame)
+        s_openOffset = AppendVertices(NULL, 0, sizeof(GfxVertex));
+    else
+        s_openVertices.clear();
+}
+
+extern "C" void Gfx_AddPrimitiveVertices(const GfxVertex *vertices, DWORD vertexCount)
+{
+    if (s_openPrimitive < 0 || vertices == NULL || vertexCount == 0)
+        return;
+    if (s_openInFrame)
+        s_frame.vertices.insert(s_frame.vertices.end(), (const uint8_t *)vertices,
+                                (const uint8_t *)(vertices + vertexCount));
+    else
+        s_openVertices.insert(s_openVertices.end(), vertices, vertices + vertexCount);
+}
+
+extern "C" void Gfx_EndPrimitive(void)
+{
+    const int primitive = s_openPrimitive;
+    s_openPrimitive = -1;
+    if (primitive < 0)
+        return;
+    if (!s_openInFrame) {
+        s_traceCaller = __builtin_return_address(0);
+        if (!s_openVertices.empty())
+            RecordDraw(primitive, false, s_openVertices.data(), (DWORD)s_openVertices.size(), NULL, 0);
+        return;
+    }
+    const size_t bytes = s_frame.vertices.size() - s_openOffset;
+    if (s_executor == NULL || bytes < sizeof(GfxVertex)) {
+        s_frame.vertices.resize(s_openOffset);
+        return;
+    }
+    RecordDrawInFrame(primitive, s_openOffset, (DWORD)(bytes / sizeof(GfxVertex)));
+}
+
 extern "C" void Gfx_DrawPrimitive(int primitive, const GfxVertex *vertices, DWORD vertexCount)
 {
     s_traceCaller = __builtin_return_address(0);
