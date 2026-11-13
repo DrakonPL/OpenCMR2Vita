@@ -50,8 +50,19 @@ struct GxmPipelineTriple {
 
 #ifdef VITA
 extern "C" {
+extern const unsigned char fixed_f_000000001_t0_gxp_start[];
+extern const unsigned char fixed_f_000000001_t0_a00000000000_gxp_start[];
+extern const unsigned char fixed_f_000004424_t0_gxp_start[];
+extern const unsigned char fixed_f_000004424_t0_a00000000002_gxp_start[];
 extern const unsigned char fixed_f_000004442_t0_gxp_start[];
 extern const unsigned char fixed_f_000004442_t0_a00000000802_gxp_start[];
+extern const unsigned char fixed_f_000004484_t0_gxp_start[];
+extern const unsigned char fixed_f_000004484_t0_a00000000802_gxp_start[];
+extern const unsigned char fixed_f_000004484_t0_a00000000812_gxp_start[];
+extern const unsigned char fixed_f_00110c464_t0_gxp_start[];
+extern const unsigned char fixed_f_00110c464_t0_a00082000002_gxp_start[];
+extern const unsigned char fixed_f_00110c864_t0_gxp_start[];
+extern const unsigned char fixed_f_00110c864_t0_a00082000002_gxp_start[];
 extern const unsigned char fixed_f_010000001_t1_gxp_start[];
 extern const unsigned char fixed_f_010000001_t1_a10000000000_gxp_start[];
 extern const unsigned char fixed_f_010000001_t2_gxp_start[];
@@ -102,6 +113,17 @@ extern const unsigned char fixed_f_01110c864_t1_gxp_start[];
 extern const unsigned char fixed_f_01110c864_t1_a10082000002_gxp_start[];
 extern const unsigned char fixed_f_01110c864_t2_gxp_start[];
 extern const unsigned char fixed_f_01110c864_t2_a10082000002_gxp_start[];
+extern const unsigned char fixed_f_020000001_t0_gxp_start[];
+extern const unsigned char fixed_f_020000001_t0_a00000000000_gxp_start[];
+extern const unsigned char fixed_f_020004424_t0_gxp_start[];
+extern const unsigned char fixed_f_020004424_t0_a00000000002_gxp_start[];
+extern const unsigned char fixed_f_020004484_t0_gxp_start[];
+extern const unsigned char fixed_f_020004484_t0_a00000000802_gxp_start[];
+extern const unsigned char fixed_f_020004484_t0_a00000000812_gxp_start[];
+extern const unsigned char fixed_f_02110c464_t0_gxp_start[];
+extern const unsigned char fixed_f_02110c464_t0_a00082000002_gxp_start[];
+extern const unsigned char fixed_f_02110c864_t0_gxp_start[];
+extern const unsigned char fixed_f_02110c864_t0_a00082000002_gxp_start[];
 extern const unsigned char fixed_f_030000001_t1_gxp_start[];
 extern const unsigned char fixed_f_030000001_t1_a10000000000_gxp_start[];
 extern const unsigned char fixed_f_030000001_t2_gxp_start[];
@@ -124,6 +146,17 @@ extern const unsigned char fixed_f_03110c864_t1_gxp_start[];
 extern const unsigned char fixed_f_03110c864_t1_a10082000002_gxp_start[];
 extern const unsigned char fixed_f_03110c864_t2_gxp_start[];
 extern const unsigned char fixed_f_03110c864_t2_a10082000002_gxp_start[];
+extern const unsigned char fixed_f_100000001_t0_gxp_start[];
+extern const unsigned char fixed_f_100000001_t0_a00000000000_gxp_start[];
+extern const unsigned char fixed_f_100004424_t0_gxp_start[];
+extern const unsigned char fixed_f_100004424_t0_a00000000002_gxp_start[];
+extern const unsigned char fixed_f_100004484_t0_gxp_start[];
+extern const unsigned char fixed_f_100004484_t0_a00000000802_gxp_start[];
+extern const unsigned char fixed_f_100004484_t0_a00000000812_gxp_start[];
+extern const unsigned char fixed_f_10110c464_t0_gxp_start[];
+extern const unsigned char fixed_f_10110c464_t0_a00082000002_gxp_start[];
+extern const unsigned char fixed_f_10110c864_t0_gxp_start[];
+extern const unsigned char fixed_f_10110c864_t0_a00082000002_gxp_start[];
 extern const unsigned char fixed_f_110000001_t1_gxp_start[];
 extern const unsigned char fixed_f_110000001_t1_a10000000000_gxp_start[];
 extern const unsigned char fixed_f_110000001_t2_gxp_start[];
@@ -146,6 +179,17 @@ extern const unsigned char fixed_f_11110c864_t1_gxp_start[];
 extern const unsigned char fixed_f_11110c864_t1_a10082000002_gxp_start[];
 extern const unsigned char fixed_f_11110c864_t2_gxp_start[];
 extern const unsigned char fixed_f_11110c864_t2_a10082000002_gxp_start[];
+extern const unsigned char fixed_f_120000001_t0_gxp_start[];
+extern const unsigned char fixed_f_120000001_t0_a00000000000_gxp_start[];
+extern const unsigned char fixed_f_120004424_t0_gxp_start[];
+extern const unsigned char fixed_f_120004424_t0_a00000000002_gxp_start[];
+extern const unsigned char fixed_f_120004484_t0_gxp_start[];
+extern const unsigned char fixed_f_120004484_t0_a00000000802_gxp_start[];
+extern const unsigned char fixed_f_120004484_t0_a00000000812_gxp_start[];
+extern const unsigned char fixed_f_12110c464_t0_gxp_start[];
+extern const unsigned char fixed_f_12110c464_t0_a00082000002_gxp_start[];
+extern const unsigned char fixed_f_12110c864_t0_gxp_start[];
+extern const unsigned char fixed_f_12110c864_t0_a00082000002_gxp_start[];
 extern const unsigned char fixed_f_130000001_t1_gxp_start[];
 extern const unsigned char fixed_f_130000001_t1_a10000000000_gxp_start[];
 extern const unsigned char fixed_f_130000001_t2_gxp_start[];
@@ -175,8 +219,19 @@ extern const unsigned char fixed_f_13110c864_t2_a10082000002_gxp_start[];
 #endif
 
 static const GxmFragmentVariant kGxmFragmentVariants[] = {
+    { 0x000000001ull, 0, GXM_ARGS_GENERAL, "fixed_f_000000001_t0", GXM_GXP(fixed_f_000000001_t0), { GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x000000001ull, 0, 0x00000000000ull, "fixed_f_000000001_t0_a00000000000", GXM_GXP(fixed_f_000000001_t0_a00000000000), { GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x000004424ull, 0, GXM_ARGS_GENERAL, "fixed_f_000004424_t0", GXM_GXP(fixed_f_000004424_t0), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x000004424ull, 0, 0x00000000002ull, "fixed_f_000004424_t0_a00000000002", GXM_GXP(fixed_f_000004424_t0_a00000000002), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x000004442ull, 0, GXM_ARGS_GENERAL, "fixed_f_000004442_t0", GXM_GXP(fixed_f_000004442_t0), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x000004442ull, 0, 0x00000000802ull, "fixed_f_000004442_t0_a00000000802", GXM_GXP(fixed_f_000004442_t0_a00000000802), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x000004484ull, 0, GXM_ARGS_GENERAL, "fixed_f_000004484_t0", GXM_GXP(fixed_f_000004484_t0), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x000004484ull, 0, 0x00000000802ull, "fixed_f_000004484_t0_a00000000802", GXM_GXP(fixed_f_000004484_t0_a00000000802), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x000004484ull, 0, 0x00000000812ull, "fixed_f_000004484_t0_a00000000812", GXM_GXP(fixed_f_000004484_t0_a00000000812), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x00110c464ull, 0, GXM_ARGS_GENERAL, "fixed_f_00110c464_t0", GXM_GXP(fixed_f_00110c464_t0), { GXM_SLOT_TEX0, GXM_SLOT_TEX1, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x00110c464ull, 0, 0x00082000002ull, "fixed_f_00110c464_t0_a00082000002", GXM_GXP(fixed_f_00110c464_t0_a00082000002), { GXM_SLOT_TEX0, GXM_SLOT_TEX1, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x00110c864ull, 0, GXM_ARGS_GENERAL, "fixed_f_00110c864_t0", GXM_GXP(fixed_f_00110c864_t0), { GXM_SLOT_CUBE0, GXM_SLOT_TEX1, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x00110c864ull, 0, 0x00082000002ull, "fixed_f_00110c864_t0_a00082000002", GXM_GXP(fixed_f_00110c864_t0_a00082000002), { GXM_SLOT_CUBE0, GXM_SLOT_TEX1, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010000001ull, 1, GXM_ARGS_GENERAL, "fixed_f_010000001_t1", GXM_GXP(fixed_f_010000001_t1), { GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010000001ull, 1, 0x10000000000ull, "fixed_f_010000001_t1_a10000000000", GXM_GXP(fixed_f_010000001_t1_a10000000000), { GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x010000001ull, 2, GXM_ARGS_GENERAL, "fixed_f_010000001_t2", GXM_GXP(fixed_f_010000001_t2), { GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
@@ -227,6 +282,17 @@ static const GxmFragmentVariant kGxmFragmentVariants[] = {
     { 0x01110c864ull, 1, 0x10082000002ull, "fixed_f_01110c864_t1_a10082000002", GXM_GXP(fixed_f_01110c864_t1_a10082000002), { GXM_SLOT_CUBE0, GXM_SLOT_TEX1, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x01110c864ull, 2, GXM_ARGS_GENERAL, "fixed_f_01110c864_t2", GXM_GXP(fixed_f_01110c864_t2), { GXM_SLOT_CUBE0, GXM_SLOT_TEX1, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x01110c864ull, 2, 0x10082000002ull, "fixed_f_01110c864_t2_a10082000002", GXM_GXP(fixed_f_01110c864_t2_a10082000002), { GXM_SLOT_CUBE0, GXM_SLOT_TEX1, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x020000001ull, 0, GXM_ARGS_GENERAL, "fixed_f_020000001_t0", GXM_GXP(fixed_f_020000001_t0), { GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x020000001ull, 0, 0x00000000000ull, "fixed_f_020000001_t0_a00000000000", GXM_GXP(fixed_f_020000001_t0_a00000000000), { GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x020004424ull, 0, GXM_ARGS_GENERAL, "fixed_f_020004424_t0", GXM_GXP(fixed_f_020004424_t0), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x020004424ull, 0, 0x00000000002ull, "fixed_f_020004424_t0_a00000000002", GXM_GXP(fixed_f_020004424_t0_a00000000002), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x020004484ull, 0, GXM_ARGS_GENERAL, "fixed_f_020004484_t0", GXM_GXP(fixed_f_020004484_t0), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x020004484ull, 0, 0x00000000802ull, "fixed_f_020004484_t0_a00000000802", GXM_GXP(fixed_f_020004484_t0_a00000000802), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x020004484ull, 0, 0x00000000812ull, "fixed_f_020004484_t0_a00000000812", GXM_GXP(fixed_f_020004484_t0_a00000000812), { GXM_SLOT_TEX0, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x02110c464ull, 0, GXM_ARGS_GENERAL, "fixed_f_02110c464_t0", GXM_GXP(fixed_f_02110c464_t0), { GXM_SLOT_TEX0, GXM_SLOT_TEX1, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x02110c464ull, 0, 0x00082000002ull, "fixed_f_02110c464_t0_a00082000002", GXM_GXP(fixed_f_02110c464_t0_a00082000002), { GXM_SLOT_TEX0, GXM_SLOT_TEX1, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x02110c864ull, 0, GXM_ARGS_GENERAL, "fixed_f_02110c864_t0", GXM_GXP(fixed_f_02110c864_t0), { GXM_SLOT_CUBE0, GXM_SLOT_TEX1, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x02110c864ull, 0, 0x00082000002ull, "fixed_f_02110c864_t0_a00082000002", GXM_GXP(fixed_f_02110c864_t0_a00082000002), { GXM_SLOT_CUBE0, GXM_SLOT_TEX1, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x030000001ull, 1, GXM_ARGS_GENERAL, "fixed_f_030000001_t1", GXM_GXP(fixed_f_030000001_t1), { GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x030000001ull, 1, 0x10000000000ull, "fixed_f_030000001_t1_a10000000000", GXM_GXP(fixed_f_030000001_t1_a10000000000), { GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x030000001ull, 2, GXM_ARGS_GENERAL, "fixed_f_030000001_t2", GXM_GXP(fixed_f_030000001_t2), { GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
@@ -249,6 +315,17 @@ static const GxmFragmentVariant kGxmFragmentVariants[] = {
     { 0x03110c864ull, 1, 0x10082000002ull, "fixed_f_03110c864_t1_a10082000002", GXM_GXP(fixed_f_03110c864_t1_a10082000002), { GXM_SLOT_CUBE0, GXM_SLOT_TEX1, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x03110c864ull, 2, GXM_ARGS_GENERAL, "fixed_f_03110c864_t2", GXM_GXP(fixed_f_03110c864_t2), { GXM_SLOT_CUBE0, GXM_SLOT_TEX1, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x03110c864ull, 2, 0x10082000002ull, "fixed_f_03110c864_t2_a10082000002", GXM_GXP(fixed_f_03110c864_t2_a10082000002), { GXM_SLOT_CUBE0, GXM_SLOT_TEX1, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x100000001ull, 0, GXM_ARGS_GENERAL, "fixed_f_100000001_t0", GXM_GXP(fixed_f_100000001_t0), { GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x100000001ull, 0, 0x00000000000ull, "fixed_f_100000001_t0_a00000000000", GXM_GXP(fixed_f_100000001_t0_a00000000000), { GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x100004424ull, 0, GXM_ARGS_GENERAL, "fixed_f_100004424_t0", GXM_GXP(fixed_f_100004424_t0), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x100004424ull, 0, 0x00000000002ull, "fixed_f_100004424_t0_a00000000002", GXM_GXP(fixed_f_100004424_t0_a00000000002), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x100004484ull, 0, GXM_ARGS_GENERAL, "fixed_f_100004484_t0", GXM_GXP(fixed_f_100004484_t0), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x100004484ull, 0, 0x00000000802ull, "fixed_f_100004484_t0_a00000000802", GXM_GXP(fixed_f_100004484_t0_a00000000802), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x100004484ull, 0, 0x00000000812ull, "fixed_f_100004484_t0_a00000000812", GXM_GXP(fixed_f_100004484_t0_a00000000812), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x10110c464ull, 0, GXM_ARGS_GENERAL, "fixed_f_10110c464_t0", GXM_GXP(fixed_f_10110c464_t0), { GXM_SLOT_TEX0, GXM_SLOT_TEX1, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x10110c464ull, 0, 0x00082000002ull, "fixed_f_10110c464_t0_a00082000002", GXM_GXP(fixed_f_10110c464_t0_a00082000002), { GXM_SLOT_TEX0, GXM_SLOT_TEX1, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x10110c864ull, 0, GXM_ARGS_GENERAL, "fixed_f_10110c864_t0", GXM_GXP(fixed_f_10110c864_t0), { GXM_SLOT_CUBE0, GXM_SLOT_TEX1, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x10110c864ull, 0, 0x00082000002ull, "fixed_f_10110c864_t0_a00082000002", GXM_GXP(fixed_f_10110c864_t0_a00082000002), { GXM_SLOT_CUBE0, GXM_SLOT_TEX1, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x110000001ull, 1, GXM_ARGS_GENERAL, "fixed_f_110000001_t1", GXM_GXP(fixed_f_110000001_t1), { GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x110000001ull, 1, 0x10000000000ull, "fixed_f_110000001_t1_a10000000000", GXM_GXP(fixed_f_110000001_t1_a10000000000), { GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x110000001ull, 2, GXM_ARGS_GENERAL, "fixed_f_110000001_t2", GXM_GXP(fixed_f_110000001_t2), { GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
@@ -271,6 +348,17 @@ static const GxmFragmentVariant kGxmFragmentVariants[] = {
     { 0x11110c864ull, 1, 0x10082000002ull, "fixed_f_11110c864_t1_a10082000002", GXM_GXP(fixed_f_11110c864_t1_a10082000002), { GXM_SLOT_CUBE0, GXM_SLOT_TEX1, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x11110c864ull, 2, GXM_ARGS_GENERAL, "fixed_f_11110c864_t2", GXM_GXP(fixed_f_11110c864_t2), { GXM_SLOT_CUBE0, GXM_SLOT_TEX1, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x11110c864ull, 2, 0x10082000002ull, "fixed_f_11110c864_t2_a10082000002", GXM_GXP(fixed_f_11110c864_t2_a10082000002), { GXM_SLOT_CUBE0, GXM_SLOT_TEX1, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x120000001ull, 0, GXM_ARGS_GENERAL, "fixed_f_120000001_t0", GXM_GXP(fixed_f_120000001_t0), { GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x120000001ull, 0, 0x00000000000ull, "fixed_f_120000001_t0_a00000000000", GXM_GXP(fixed_f_120000001_t0_a00000000000), { GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x120004424ull, 0, GXM_ARGS_GENERAL, "fixed_f_120004424_t0", GXM_GXP(fixed_f_120004424_t0), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x120004424ull, 0, 0x00000000002ull, "fixed_f_120004424_t0_a00000000002", GXM_GXP(fixed_f_120004424_t0_a00000000002), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x120004484ull, 0, GXM_ARGS_GENERAL, "fixed_f_120004484_t0", GXM_GXP(fixed_f_120004484_t0), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x120004484ull, 0, 0x00000000802ull, "fixed_f_120004484_t0_a00000000802", GXM_GXP(fixed_f_120004484_t0_a00000000802), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x120004484ull, 0, 0x00000000812ull, "fixed_f_120004484_t0_a00000000812", GXM_GXP(fixed_f_120004484_t0_a00000000812), { GXM_SLOT_TEX0, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x12110c464ull, 0, GXM_ARGS_GENERAL, "fixed_f_12110c464_t0", GXM_GXP(fixed_f_12110c464_t0), { GXM_SLOT_TEX0, GXM_SLOT_TEX1, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x12110c464ull, 0, 0x00082000002ull, "fixed_f_12110c464_t0_a00082000002", GXM_GXP(fixed_f_12110c464_t0_a00082000002), { GXM_SLOT_TEX0, GXM_SLOT_TEX1, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x12110c864ull, 0, GXM_ARGS_GENERAL, "fixed_f_12110c864_t0", GXM_GXP(fixed_f_12110c864_t0), { GXM_SLOT_CUBE0, GXM_SLOT_TEX1, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
+    { 0x12110c864ull, 0, 0x00082000002ull, "fixed_f_12110c864_t0_a00082000002", GXM_GXP(fixed_f_12110c864_t0_a00082000002), { GXM_SLOT_CUBE0, GXM_SLOT_TEX1, GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x130000001ull, 1, GXM_ARGS_GENERAL, "fixed_f_130000001_t1", GXM_GXP(fixed_f_130000001_t1), { GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x130000001ull, 1, 0x10000000000ull, "fixed_f_130000001_t1_a10000000000", GXM_GXP(fixed_f_130000001_t1_a10000000000), { GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
     { 0x130000001ull, 2, GXM_ARGS_GENERAL, "fixed_f_130000001_t2", GXM_GXP(fixed_f_130000001_t2), { GXM_SLOT_BACKDROP, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE, GXM_SLOT_NONE } },
@@ -296,31 +384,46 @@ static const GxmFragmentVariant kGxmFragmentVariants[] = {
 };
 
 static const GxmPipelineTriple kGxmPipelineTriples[] = {
-    { 0, 0, 0, true },
-    { 4, 5, 6, false },
-    { 4, 5, 6, true },
-    { 8, 2, 2, false },
-    { 8, 2, 2, true },
-    { 12, 5, 6, true },
-    { 14, 0, 0, false },
-    { 17, 5, 2, false },
-    { 17, 5, 2, true },
-    { 17, 5, 6, false },
-    { 17, 5, 6, true },
-    { 22, 5, 6, true },
-    { 26, 5, 6, true },
-    { 30, 5, 6, true },
-    { 34, 2, 2, true },
-    { 38, 5, 6, true },
-    { 42, 5, 6, true },
-    { 46, 5, 2, false },
-    { 50, 5, 2, false },
-    { 54, 5, 6, false },
-    { 58, 2, 2, false },
-    { 60, 0, 0, false },
-    { 63, 5, 2, false },
+    { 0, 0, 0, false },
+    { 0, 5, 6, false },
+    { 2, 0, 0, false },
+    { 2, 2, 2, false },
+    { 4, 0, 0, true },
+    { 6, 0, 0, false },
+    { 6, 5, 2, false },
+    { 6, 5, 6, false },
+    { 9, 0, 0, false },
+    { 9, 5, 2, false },
+    { 11, 0, 0, false },
+    { 11, 5, 2, false },
+    { 15, 5, 6, false },
+    { 15, 5, 6, true },
+    { 19, 2, 2, false },
+    { 19, 2, 2, true },
+    { 23, 5, 6, true },
+    { 25, 0, 0, false },
+    { 28, 5, 2, false },
+    { 28, 5, 2, true },
+    { 28, 5, 6, false },
+    { 28, 5, 6, true },
+    { 33, 5, 6, true },
+    { 37, 5, 6, true },
+    { 41, 5, 6, true },
+    { 45, 2, 2, true },
+    { 49, 5, 6, true },
+    { 53, 5, 6, true },
+    { 57, 5, 2, false },
+    { 61, 5, 2, false },
+    { 63, 0, 0, false },
     { 63, 5, 6, false },
-    { 68, 5, 2, false },
+    { 65, 0, 0, false },
+    { 65, 2, 2, false },
+    { 67, 0, 0, false },
+    { 67, 5, 2, false },
+    { 67, 5, 6, false },
+    { 70, 0, 0, false },
+    { 70, 5, 2, false },
+    { 72, 0, 0, false },
     { 72, 5, 2, false },
     { 76, 5, 6, false },
     { 80, 2, 2, false },
@@ -329,13 +432,42 @@ static const GxmPipelineTriple kGxmPipelineTriples[] = {
     { 85, 5, 6, false },
     { 90, 5, 2, false },
     { 94, 5, 2, false },
-    { 98, 5, 6, false },
-    { 102, 2, 2, false },
-    { 104, 0, 0, false },
-    { 107, 5, 2, false },
-    { 107, 5, 6, false },
-    { 112, 5, 2, false },
-    { 116, 5, 2, false },
+    { 96, 0, 0, false },
+    { 96, 5, 6, false },
+    { 98, 0, 0, false },
+    { 98, 2, 2, false },
+    { 100, 0, 0, false },
+    { 100, 5, 2, false },
+    { 100, 5, 6, false },
+    { 103, 0, 0, false },
+    { 103, 5, 2, false },
+    { 105, 0, 0, false },
+    { 105, 5, 2, false },
+    { 109, 5, 6, false },
+    { 113, 2, 2, false },
+    { 115, 0, 0, false },
+    { 118, 5, 2, false },
+    { 118, 5, 6, false },
+    { 123, 5, 2, false },
+    { 127, 5, 2, false },
+    { 129, 0, 0, false },
+    { 129, 5, 6, false },
+    { 131, 0, 0, false },
+    { 131, 2, 2, false },
+    { 133, 0, 0, false },
+    { 133, 5, 2, false },
+    { 133, 5, 6, false },
+    { 136, 0, 0, false },
+    { 136, 5, 2, false },
+    { 138, 0, 0, false },
+    { 138, 5, 2, false },
+    { 142, 5, 6, false },
+    { 146, 2, 2, false },
+    { 148, 0, 0, false },
+    { 151, 5, 2, false },
+    { 151, 5, 6, false },
+    { 156, 5, 2, false },
+    { 160, 5, 2, false },
 };
 
 #endif
