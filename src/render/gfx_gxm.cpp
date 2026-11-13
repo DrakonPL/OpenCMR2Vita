@@ -13,6 +13,7 @@
 #include "render/gxm_dialog.h"
 #include "render/gxm_digits.h"
 #include "render/gxm_fragment_uniforms.h"
+#include "render/gxm_key_cache.h"
 #include "render/gxm_readback.h"
 #include "render/gxm_textures.h"
 #include "render/gxm_vertex_uniforms.h"
@@ -143,8 +144,9 @@ struct GxmVertexBuffer {
     uint32_t version = 0;
     uint32_t noRoomVersion = 0; // the version the pool had no room for (0: none)
     // The vertex ranges drawn from rangesVersion of the buffer, by first
-    // vertex << 32 | count.
-    std::unordered_map<uint64_t, DrawRange> ranges;
+    // vertex << 32 | count: made at the buffer's first 3D draw. A range
+    // that lost its slot to another range is measured again.
+    std::unique_ptr<GxmKeyCache<DrawRange, 8>> ranges;
     uint32_t rangesVersion = 0;
 };
 
@@ -1205,17 +1207,19 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         const size_t first = c.firstVertexByte / sizeof(GfxVertex);
         if (g == nullptr || first + c.vertexCount > c.buffer->vertices.size())
             return nullptr;
-        if (g->rangesVersion != c.buffer->version) {
-            g->ranges.clear();
+        if (g->ranges == nullptr) {
+            g->ranges.reset(new GxmKeyCache<DrawRange, 8>());
+            g->rangesVersion = c.buffer->version;
+        } else if (g->rangesVersion != c.buffer->version) {
+            g->ranges->Clear();
             g->rangesVersion = c.buffer->version;
         }
         const uint64_t key = (uint64_t)first << 32 | c.vertexCount;
-        auto it = g->ranges.find(key);
-        if (it == g->ranges.end()) {
-            it = g->ranges.emplace(key, DrawRange()).first;
-            MeasureRange(&c.buffer->vertices[first], c.vertexCount, true, true, it->second);
-        }
-        return &it->second;
+        if (DrawRange *range = g->ranges->Find(key))
+            return range;
+        DrawRange &range = g->ranges->Put(key);
+        MeasureRange(&c.buffer->vertices[first], c.vertexCount, true, true, range);
+        return &range;
     }
 
     // The least alpha (0..1) the texture read of a stage gives: 1 with no
@@ -1319,7 +1323,10 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         const bool fadeKey = (key & kFadeKeyBit) != 0 && probe.mode != PROBE_FADE_ALWAYS;
         const bool depthCandidate = s.alphaBlend && s.alphaTest && s.depthTest && s.depthWrite &&
                                     probe.mode != PROBE_NO_DEPTH_PASS;
-        const bool needAlpha = depthCandidate && probe.mode != PROBE_DEPTH_PASS_ALWAYS;
+        // The single pass draws the same pixels with or without a discard
+        // that never fails: there the least alpha of the draw is not asked.
+        const bool single = probe.mode != PROBE_TWO_PASSES && (singlePass || probe.mode == PROBE_SINGLE_PASS);
+        const bool needAlpha = depthCandidate && !single && probe.mode != PROBE_DEPTH_PASS_ALWAYS;
         DrawRange scratch;
         // The frame's own vertices have no box that is kept: their farthest
         // vertex is measured.
@@ -1366,8 +1373,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                 if (!resolved->depthLooked) {
                     resolved->depthLooked = true;
                     resolved->depthVariant = LookupVariant(key, 1, args);
-                    if (resolved->depthVariant >= 0 && probe.mode != PROBE_TWO_PASSES &&
-                        (singlePass || probe.mode == PROBE_SINGLE_PASS))
+                    if (resolved->depthVariant >= 0 && single)
                         resolved->single = FragmentProgram(resolved->depthVariant, true, s.srcBlend, s.destBlend,
                                                            c.transformed);
                     if (resolved->depthVariant >= 0 && resolved->single == nullptr)
