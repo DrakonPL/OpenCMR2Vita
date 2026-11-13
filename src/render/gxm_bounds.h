@@ -34,25 +34,29 @@ inline GxmBounds Gxm_VertexBounds(const void *vertices, size_t stride, unsigned 
     return b;
 }
 
-// The largest distance from the eye of a point of the box, after worldView
-// (a Direct3D row-vector matrix, its rows 0 to 3: the eye space of
-// fixed3d_v.cg). The distance is largest at a corner of the box, so no vertex
-// in the box is farther.
-inline float Gxm_FarthestEyeDistance(const GxmBounds &b, const float worldView[4][4])
+// An upper bound of the distance from the eye of a point of the box, after
+// worldView (a Direct3D row-vector matrix, its rows 0 to 3: the eye space of
+// fixed3d_v.cg). It takes the box's centre in eye space and, on each eye axis,
+// the reach of the box's half sides from it. That is the farthest corner of
+// the eye-space box around the turned box: exact for a matrix that does not
+// turn the box, a little above the farthest vertex otherwise, never below it.
+// It costs a quarter of the eight corners, for each 3D draw.
+inline float Gxm_EyeDistanceBound(const GxmBounds &b, const float worldView[4][4])
 {
-    float farthest = 0.0f;
-    for (int corner = 0; corner < 8; corner++) {
-        const float x = (corner & 1) ? b.high[0] : b.low[0];
-        const float y = (corner & 2) ? b.high[1] : b.low[1];
-        const float z = (corner & 4) ? b.high[2] : b.low[2];
-        float squared = 0.0f;
-        for (int k = 0; k < 3; k++) {
-            const float e = x * worldView[0][k] + y * worldView[1][k] + z * worldView[2][k] + worldView[3][k];
-            squared += e * e;
-        }
-        farthest = squared > farthest ? squared : farthest;
+    float centre[3], half[3], squared = 0.0f;
+    for (int k = 0; k < 3; k++) {
+        centre[k] = (b.low[k] + b.high[k]) * 0.5f;
+        half[k] = (b.high[k] - b.low[k]) * 0.5f;
     }
-    return sqrtf(farthest);
+    for (int k = 0; k < 3; k++) {
+        const float eye = centre[0] * worldView[0][k] + centre[1] * worldView[1][k] + centre[2] * worldView[2][k] +
+                          worldView[3][k];
+        const float reach = half[0] * fabsf(worldView[0][k]) + half[1] * fabsf(worldView[1][k]) +
+                            half[2] * fabsf(worldView[2][k]);
+        const float far = fabsf(eye) + reach;
+        squared += far * far;
+    }
+    return sqrtf(squared);
 }
 
 #endif

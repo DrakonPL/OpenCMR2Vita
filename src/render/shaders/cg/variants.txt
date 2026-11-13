@@ -100,3 +100,7 @@ args 13110c464 10082000002  # the fog form: italy-cube-maps
 args 01110c864 10082000002  # a draw too near for the distance fade
 args 03110c864 10082000002  # a draw too near for the distance fade
 args 000004442 00000000802  # the intro movies (the device log)
+args 010004484 10000000812  # the medium graphics options on the device (the texture alpha as the colour)
+args 110004484 10000000812  # the medium graphics options on the device (the texture alpha as the colour)
+args 030004484 10000000812  # the medium graphics options on the device (the texture alpha as the colour), the fog form
+args 130004484 10000000812  # the medium graphics options on the device (the texture alpha as the colour), the fog form
