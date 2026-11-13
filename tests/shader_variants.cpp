@@ -188,6 +188,32 @@ int main(int argc, char **argv)
         if ((a.first & kFadeBit) != 0)
             REQUIRE(args.count({ a.first & ~kFadeBit, a.second }) == 1);
 
+    // The alpha test switch of the graphics menu (video.alpha_test = 0) draws
+    // each 3D draw without the alpha test. Each 3D key with the alpha test
+    // thus has the key without it, with the same blend pairs and with
+    // blending off (the blending switch), and the same arguments keys with
+    // the compare off. Without them, the executor has no variant for the 3D
+    // draws and leaves them out.
+    std::set<uint64_t> keys3d;
+    for (const ListedTriple &t : triples)
+        if (!t.transformed && (t.key & kAlphaTestBit) != 0)
+            keys3d.insert(t.key);
+    auto listed = [&](uint64_t key, int src, int dest) {
+        for (const ListedTriple &o : triples)
+            if (o.key == key && o.srcBlend == src && o.destBlend == dest && !o.transformed)
+                return true;
+        return false;
+    };
+    for (uint64_t key : keys3d) {
+        REQUIRE(listed(key & ~kAlphaTestBit, 0, 0));
+        for (const ListedTriple &t : triples)
+            if (t.key == key && !t.transformed)
+                REQUIRE(listed(key & ~kAlphaTestBit, t.srcBlend, t.destBlend));
+    }
+    for (const ListedArgs &a : args)
+        if (keys3d.count(a.first) == 1)
+            REQUIRE(args.count({ a.first & ~kAlphaTestBit, a.second & ~(3ull << 40) }) == 1);
+
     printf("shader_variants: %d variants of %d keys, %d triples\n", kVariantCount, (int)keys.size(), kTripleCount);
     return 0;
 }
