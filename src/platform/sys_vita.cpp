@@ -5,6 +5,7 @@
 #include "platform/sys_common.h"
 #include "platform/sys_event_ring.h"
 #include "platform/sys_paths.h"
+#include "port/diagnostics.h"
 #include "port/sys.h"
 #include "render/gxm_dialog.h"
 #include "render/gxm_memory.h"
@@ -335,6 +336,57 @@ void LogFileProbe()
 } // namespace
 
 #ifdef OPENCMR2_DEV
+namespace {
+
+// The parts of the frames of a heartbeat period, from the game's hooks: the
+// simulation ticks (the game runs more of them in a frame that is long), the
+// present, and the whole frame. A present inside a tick is not tick time.
+struct FrameParts : Diagnostics::Observer {
+    uint64_t tickStart = 0, presentStart = 0, frameStart = 0;
+    uint64_t tickMicros = 0, presentMicros = 0, frameMicros = 0, recorderMicros = 0;
+    unsigned ticks = 0;
+    bool inTick = false;
+    void BeginTick(unsigned char) override
+    {
+        tickStart = sceKernelGetProcessTimeWide();
+        inTick = true;
+    }
+    void EndTick() override
+    {
+        tickMicros += sceKernelGetProcessTimeWide() - tickStart;
+        ticks++;
+        inTick = false;
+    }
+    void BeginPresent() override { presentStart = sceKernelGetProcessTimeWide(); }
+    void EndPresent() override
+    {
+        const uint64_t spent = sceKernelGetProcessTimeWide() - presentStart;
+        presentMicros += spent;
+        if (inTick)
+            tickStart += spent;
+    }
+    void BeginFrame() override { frameStart = sceKernelGetProcessTimeWide(); }
+    void EndFrame() override { frameMicros += sceKernelGetProcessTimeWide() - frameStart; }
+    void Reset()
+    {
+        tickMicros = presentMicros = frameMicros = recorderMicros = 0;
+        ticks = 0;
+    }
+};
+FrameParts s_frameParts;
+
+} // namespace
+
+unsigned long long SysVita_Micros(void)
+{
+    return sceKernelGetProcessTimeWide();
+}
+
+void SysVita_RecorderSample(unsigned long long micros)
+{
+    s_frameParts.recorderMicros += micros * kRecorderSampleEvery;
+}
+
 void SysVita_FramePresented(void)
 {
     constexpr uint64_t kPeriodMicros = 5000000;
@@ -343,6 +395,8 @@ void SysVita_FramePresented(void)
     static double sumMs, maxMs;
     static bool first = true;
     const uint64_t now = sceKernelGetProcessTimeWide();
+    if (Diagnostics::observer == nullptr)
+        Diagnostics::observer = &s_frameParts;
     if (last != 0) {
         const double ms = (double)(now - last) / 1000.0;
         sumMs += ms;
@@ -362,6 +416,18 @@ void SysVita_FramePresented(void)
     Sys_Log("heartbeat: %.1f s, frames %u, frame ms avg %.2f max %.2f, heap used %d KB of %d KB, files open %d",
             (double)now / 1e6, frames, periodFrames ? sumMs / periodFrames : 0.0, maxMs, heap.uordblks / 1024,
             heap.arena / 1024, s_openFiles);
+    if (periodFrames > 0) {
+        // The scene: the frame without its ticks and its present.
+        const FrameParts &p = s_frameParts;
+        const double perFrame = 1000.0 * periodFrames;
+        const uint64_t known = p.tickMicros + p.presentMicros;
+        Sys_Log("heartbeat: frame parts ms: ticks %.2f (%.2f ticks), scene %.2f (recorder %.2f), present %.2f, "
+                "other %.2f",
+                p.tickMicros / perFrame, (double)p.ticks / periodFrames,
+                (p.frameMicros > known ? p.frameMicros - known : 0) / perFrame, p.recorderMicros / perFrame,
+                p.presentMicros / perFrame, sumMs / periodFrames - p.frameMicros / perFrame);
+    }
+    s_frameParts.Reset();
     periodStart = now;
     periodFrames = 0;
     sumMs = maxMs = 0.0;

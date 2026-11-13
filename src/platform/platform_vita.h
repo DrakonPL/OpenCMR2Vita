@@ -25,7 +25,14 @@ bool Platform_TakeResumed(void);
 
 #ifdef OPENCMR2_DEV
 // Called once per presented frame: every 5 seconds a heartbeat line in the log.
+// The line splits a frame into the simulation ticks, the scene (the game's
+// draw code with the recorder) and the present (the executor with its wait).
 void SysVita_FramePresented(void);
+// The time of one recorded draw, from one draw in kRecorderSampleEvery: the
+// heartbeat gives the recorder's part of the scene from them.
+constexpr unsigned kRecorderSampleEvery = 16;
+unsigned long long SysVita_Micros(void);
+void SysVita_RecorderSample(unsigned long long micros);
 #endif
 
 #endif
