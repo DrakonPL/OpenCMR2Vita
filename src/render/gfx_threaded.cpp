@@ -12,15 +12,14 @@
 //    the recorder's thread while the worker is idle.
 //  - Each other call (a video mode, a texture or vertex buffer that goes, a
 //    read of a render target) waits for the worker first.
-//  - The small batches of the frame become draws on the worker
-//    (Gfx_ExpandSmallBatches), from the vertices of the recorder's vertex
-//    buffers. That is the one part of the worker's work that reads the
-//    recorder's objects. A gate is closed while it runs: the recorder waits
-//    at the gate before the game writes such vertices (WaitForBatches).
+//  - The small batches of the frame are draws when their jobs are done
+//    (gfx_batch_worker.h): the worker waits for them, then puts the draws
+//    in their place (Gfx_SpliceSmallBatches).
 
 #include "render/gfx_internal.h"
 
 #include "port/sys.h"
+#include "render/gfx_batch_worker.h"
 
 #include <memory>
 #include <utility>
@@ -185,74 +184,6 @@ private:
 #endif
 };
 
-// A gate between two threads: one closes it and opens it, the other waits
-// until it is open. Open at the start.
-class Gate {
-public:
-#ifdef VITA
-    // A semaphore, as the worker has: one signal for each time the gate
-    // opens. Only one thread waits.
-    Gate() { signal = sceKernelCreateSema("gfx_gate", 0, 0, 1, nullptr); }
-    ~Gate()
-    {
-        if (signal >= 0)
-            sceKernelDeleteSema(signal);
-    }
-    bool Ok() const { return signal >= 0; }
-    // Without a semaphore the gate stays open: the caller has another way (Ok).
-    void Close()
-    {
-        if (signal < 0)
-            return;
-        open = false;
-        // The signal of the time before, if no thread waited for it.
-        while (sceKernelPollSema(signal, 1) >= 0) {
-        }
-    }
-    void Open()
-    {
-        if (signal < 0)
-            return;
-        open = true;
-        sceKernelSignalSema(signal, 1);
-    }
-    void WaitOpen()
-    {
-        if (!open)
-            sceKernelWaitSema(signal, 1, nullptr);
-    }
-
-private:
-    SceUID signal = -1;
-    volatile bool open = true;      // no system call for a gate that is open
-#else
-    bool Ok() const { return true; }
-    void Close()
-    {
-        std::lock_guard<std::mutex> lock(mutex);
-        open = false;
-    }
-    void Open()
-    {
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            open = true;
-        }
-        opened.notify_all();
-    }
-    void WaitOpen()
-    {
-        std::unique_lock<std::mutex> lock(mutex);
-        opened.wait(lock, [this] { return open; });
-    }
-
-private:
-    std::mutex mutex;
-    std::condition_variable opened;
-    bool open = true;
-#endif
-};
-
 struct ThreadedExecutor : GfxExecutor {
     std::unique_ptr<GfxExecutor> inner;
     // The frame the worker runs, and how.
@@ -265,9 +196,6 @@ struct ThreadedExecutor : GfxExecutor {
     // For the logs (GfxExecutor::NoteWorkerTimes). The worker writes expand,
     // the game's thread the waits.
     GfxWorkerTimes times;
-    // Closed from the start of a frame on the worker until its small batches
-    // are draws (WaitForBatches).
-    Gate expanded;
     Worker worker;
 
     explicit ThreadedExecutor(GfxExecutor *executor) : inner(executor), worker(&Run, this) {}
@@ -276,9 +204,11 @@ struct ThreadedExecutor : GfxExecutor {
     static void Run(void *data)
     {
         ThreadedExecutor *self = (ThreadedExecutor *)data;
+        // The batch jobs of the frame run while the game records: most are
+        // done by now.
+        Gfx_WaitForBatchJobs(self->frame.batchSequence, 1);
         const unsigned long long start = Micros();
-        Gfx_ExpandSmallBatches(self->frame);
-        self->expanded.Open();
+        Gfx_SpliceSmallBatches(self->frame);
         self->times.expand = (unsigned)(Micros() - start);
         self->inner->Execute(self->frame, self->noTextures, self->noReadback, self->present, self->vsync,
                              self->stretch);
@@ -295,21 +225,6 @@ struct ThreadedExecutor : GfxExecutor {
     }
 
     void Wait() override { WaitInto(times.otherWait); }
-
-    // The worker reads the recorder's vertex buffers only until the gate is
-    // open. Without a gate: until the worker is idle.
-    void WaitForBatches() override
-    {
-        if (worker.OnWorker())
-            return;
-        if (!expanded.Ok()) {
-            Wait();
-            return;
-        }
-        const unsigned long long start = Micros();
-        expanded.WaitOpen();
-        times.otherWait += (unsigned)(Micros() - start);
-    }
 
     bool SetVideoMode(int width, int height, bool fullscreen) override
     {
@@ -334,7 +249,6 @@ struct ThreadedExecutor : GfxExecutor {
         present = presentFrame;
         vsync = vsyncFrame;
         stretch = stretchFrame;
-        expanded.Close();
         worker.Start();
     }
     void DestroyTexture(GfxTexture *texture) override

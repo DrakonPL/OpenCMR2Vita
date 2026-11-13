@@ -2,8 +2,10 @@
 // worker thread, one at a time and in their order, while the caller goes on.
 // Prepare runs on the caller's thread before its frame. Each other call
 // waits for the worker: no call of the inner executor meets a running
-// frame. The small batches of a frame become draws on the worker.
+// frame. The draws of the small batches of a frame go in their place on the
+// worker.
 
+#include "render/gfx_batch_worker.h"
 #include "render/gfx_internal.h"
 
 #include <atomic>
@@ -32,7 +34,6 @@ struct SlowExecutor : GfxExecutor {
     std::atomic<int> destroyed{ 0 };
     std::atomic<int> finished{ 0 };         // frames whose Execute ended
     GfxWorkerTimes noted;                   // us, the sums of NoteWorkerTimes
-    double vertexSum = 0.0;                 // of the last frame: see Execute
     std::vector<int> notesBeforePrepare;    // the NoteWorkerTimes calls before each Prepare
     int notes = 0;
     // The threaded executor: Execute calls its Wait, as a system dialog does
@@ -78,14 +79,6 @@ struct SlowExecutor : GfxExecutor {
             executedOnCaller++;
         for (const GfxCommand &c : frame.commands)
             batchesSeen += c.type == GFX_CMD_SMALL_BATCH ? 1 : 0;
-        // The x of the second vertex of each triangle of the frame's data.
-        double sum = 0.0;
-        for (size_t at = sizeof(GfxVertex); at + sizeof(GfxVertex) <= frame.vertices.size(); at += 3 * sizeof(GfxVertex)) {
-            GfxVertex v;
-            memcpy(&v, frame.vertices.data() + at, sizeof(v));
-            sum += v.x;
-        }
-        vertexSum = sum;
         if (owner != nullptr)
             owner->Wait();
         std::this_thread::sleep_for(std::chrono::milliseconds(30));
@@ -179,7 +172,8 @@ int main()
     REQUIRE(slow->overlaps == 0 && slow->destroyed == 1);
     REQUIRE(slow->executedOnCaller == 0 && slow->preparedElsewhere == 0);
 
-    // A small batch becomes draws on the worker: Execute gets none.
+    // A small batch whose jobs are done becomes draws on the worker, which
+    // puts them in the place of the batch: Execute gets no batch.
     frame = FrameOf(0);
     GfxCommand batch = {};
     batch.type = GFX_CMD_SMALL_BATCH;
@@ -195,40 +189,21 @@ int main()
     GfxVertexBuffer triangle;
     triangle.vertices.resize(3);
     item.buffer = &triangle;
-    frame.smallItems.push_back(item);
-    frame.smallIndices = { 0, 1, 2 };
+    frame.batch = std::make_shared<GfxBatchData>();
+    frame.batch->items.push_back(item);
+    frame.batch->indices = { 0, 1, 2 };
+    GfxBatchJob job = {};
+    job.data = frame.batch.get();
+    job.items = frame.batch->items.data();
+    job.itemCount = 1;
+    job.indices = frame.batch->indices.data();
+    job.indexCount = 3;
+    job.placeholder = 0;
+    job.state = 0;
+    frame.batchSequence = Gfx_AddBatchJob(job);
     threaded->Execute(frame, textures, readback, true, false, false);
     threaded->Wait();
     REQUIRE(slow->batchesSeen == 0 && slow->commandCounts.size() == 7 && slow->commandCounts[6] == 1);
-
-    // The worker reads the vertices of the small batches from their vertex
-    // buffer. WaitForBatches returns when it has read them, before the 30
-    // ms of the frame end: the caller then writes the vertices, and each
-    // draw of the frame has them as they were. 60,000 draws, so that the
-    // worker reads for some time.
-    {
-        const int kItems = 60000;
-        triangle.vertices[1].x = 1.0f;
-        frame = FrameOf(0);
-        batch.itemCount = kItems;
-        frame.commands.push_back(batch);
-        frame.smallItems.assign(kItems, item);
-        frame.smallIndices.clear();
-        for (int i = 0; i < kItems; i++) {
-            frame.smallItems[i].firstIndex = (uint32_t)frame.smallIndices.size();
-            frame.smallIndices.insert(frame.smallIndices.end(), { 0, 1, 2 });
-        }
-        const int finishedBefore = slow->finished;
-        slow->vertexSum = 0.0;
-        threaded->Execute(frame, textures, readback, false, false, false);
-        threaded->WaitForBatches();
-        triangle.vertices[1].x = 5.0f;
-        REQUIRE(slow->finished == finishedBefore);
-        threaded->Wait();
-        // Each draw has x = 1 + 2 (the world matrix moves it by 2).
-        REQUIRE(slow->finished == finishedBefore + 1 && slow->vertexSum == 3.0 * kItems);
-        threaded->WaitForBatches();     // an idle worker: at once
-    }
 
     // An Execute in the middle of a frame that waits for the one before:
     // the wait is that of a flush.
