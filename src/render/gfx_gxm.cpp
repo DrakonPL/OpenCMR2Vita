@@ -206,6 +206,13 @@ struct Stats {
     // wait of its present (the worker with the threaded executor), and the
     // frames presented.
     unsigned prepareMicros = 0, executeMicros = 0, frames = 0;
+    // Of Prepare: the textures, the vertex buffers, the snapshot stage. Of
+    // Execute: the copy of the stage and the frame's vertices into the ring,
+    // and the small batches expanded (the threaded executor). The wait of the
+    // present on the worker (vsync and the display queue), and the wait of
+    // the game's thread for the worker.
+    unsigned textureMicros = 0, bufferMicros = 0, snapshotMicros = 0;
+    unsigned ringCopyMicros = 0, expandMicros = 0, presentWaitMicros = 0, gameWaitMicros = 0;
     // Texture binds of textures with mip levels made here: with a mip
     // filter, and without one (the game's mipmapping option off).
     unsigned mipReads = 0, mipUnread = 0;
@@ -1751,6 +1758,12 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             CollectRead(readback, false);
     }
 
+    void NoteWorkerTimes(unsigned gameWaitMicros, unsigned expandMicros) override
+    {
+        stats.gameWaitMicros += gameWaitMicros;
+        stats.expandMicros += expandMicros;
+    }
+
     // ---- frame execution ----
 
     // What reads the recorder's objects: the textures and the vertex buffers
@@ -1778,10 +1791,15 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         // else when the GPU has done it.
         CollectRead(readback, pendingRead.active && pendingRead.buffer == device.BackBuffer());
         CollectRead(readback, false);
+        const uint64_t texturesStart = sceKernelGetProcessTimeWide();
         EnsureTextures(frame);
         gpuTextures.Upload(textures, presented);
         texturesChanged = gpuTextures.TakeChanged() || texturesChanged;
+        const uint64_t buffersStart = sceKernelGetProcessTimeWide();
         UploadVertexBuffers(frame);
+        const uint64_t snapshotsStart = sceKernelGetProcessTimeWide();
+        stats.textureMicros += (unsigned)(buffersStart - texturesStart);
+        stats.bufferMicros += (unsigned)(snapshotsStart - buffersStart);
         // The part of each buffer locked recently that the frame draws, once:
         // into the stage here, into the ring in Execute (gxm_snapshot_stage.h).
         executeCount++;
@@ -1799,6 +1817,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             snapshotStage.Add(&b->vertices[snapshot.first], bytes, &g->snapshotOffset);
             stats.snapshotBytes += bytes;
         }
+        stats.snapshotMicros += (unsigned)(sceKernelGetProcessTimeWide() - snapshotsStart);
         // The readback of this frame: a rectangle of its display buffer, read
         // when the GPU has done it (the lens flare test of a later frame
         // takes it, as on the PC). A read that the GPU has not done yet
@@ -1838,6 +1857,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             memcpy(ring.At(vertexOffset), frame.vertices.data(), frame.vertices.size());
         if (indexOffset != GxmFrameRing::kFull)
             memcpy(ring.At(indexOffset), frame.indices.data(), frame.indices.size() * 2);
+        stats.ringCopyMicros += (unsigned)(sceKernelGetProcessTimeWide() - entered);
         if ((snapshotOffset == GxmFrameRing::kFull || vertexOffset == GxmFrameRing::kFull ||
              indexOffset == GxmFrameRing::kFull) &&
             !loggedRing) {
@@ -1918,9 +1938,11 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         backdropAhead = false;
         ProbeCheckFrame();
         // The time of the frame's commands, without the wait of the present.
-        stats.executeMicros += (unsigned)(sceKernelGetProcessTimeWide() - entered);
+        const uint64_t presentStart = sceKernelGetProcessTimeWide();
+        stats.executeMicros += (unsigned)(presentStart - entered);
         stats.frames++;
         device.Present(vsync && probe.mode == PROBE_OFF);
+        stats.presentWaitMicros += (unsigned)(sceKernelGetProcessTimeWide() - presentStart);
         ProbeTick();
         presented++;
         frameStarted = false;
@@ -2111,10 +2133,17 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         // Prepare runs on the game's thread; Execute on the worker with the
         // threaded executor.
         const double frames = stats.frames > 0 ? (double)stats.frames : 1.0;
+        const double msPerFrame = 1.0 / 1000.0 / frames;
         Sys_Log("gxm: per frame ms: prepare %.2f, execute %.2f (without the wait of the present); per s binds of "
                 "made mip levels: %u read, %u not read (no mip filter)",
-                stats.prepareMicros / 1000.0 / frames, stats.executeMicros / 1000.0 / frames, stats.mipReads,
-                stats.mipUnread);
+                stats.prepareMicros * msPerFrame, stats.executeMicros * msPerFrame, stats.mipReads, stats.mipUnread);
+        // The game's thread: prepare and its wait for the worker. The worker:
+        // the expand, execute (the ring copy in it) and the present's wait.
+        Sys_Log("gxm: per frame ms: prepare parts: textures %.2f, vertex buffers %.2f, snapshots %.2f; game thread "
+                "waited for the worker %.2f; worker: batches expanded %.2f, ring copy %.2f, present wait %.2f",
+                stats.textureMicros * msPerFrame, stats.bufferMicros * msPerFrame, stats.snapshotMicros * msPerFrame,
+                stats.gameWaitMicros * msPerFrame, stats.expandMicros * msPerFrame, stats.ringCopyMicros * msPerFrame,
+                stats.presentWaitMicros * msPerFrame);
         stats = Stats();
         statsStart = now;
 #endif

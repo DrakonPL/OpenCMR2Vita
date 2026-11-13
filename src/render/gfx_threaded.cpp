@@ -24,14 +24,28 @@
 #include <vector>
 
 #ifdef VITA
+#include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 #else
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
 #endif
 
 namespace {
+
+// A clock in us, for the logs of the executor.
+unsigned long long Micros()
+{
+#ifdef VITA
+    return sceKernelGetProcessTimeWide();
+#else
+    return (unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+#endif
+}
 
 // A thread that runs one job at a time: Start hands it the job, Wait waits
 // until it is done. Only the thread that made it calls Start and Wait.
@@ -177,6 +191,10 @@ struct ThreadedExecutor : GfxExecutor {
     // what it needs of them.
     std::vector<GfxTexture *> noTextures;
     GfxReadback noReadback;
+    // For the logs (GfxExecutor::NoteWorkerTimes): the us the game's thread
+    // waited, and the worker's expand of the last frame.
+    unsigned long long waitMicros = 0;
+    unsigned expandMicros = 0;
     Worker worker;
 
     explicit ThreadedExecutor(GfxExecutor *executor) : inner(executor), worker(&Run, this) {}
@@ -185,15 +203,20 @@ struct ThreadedExecutor : GfxExecutor {
     static void Run(void *data)
     {
         ThreadedExecutor *self = (ThreadedExecutor *)data;
+        const unsigned long long start = Micros();
         Gfx_ExpandSmallBatches(self->frame);
+        self->expandMicros = (unsigned)(Micros() - start);
         self->inner->Execute(self->frame, self->noTextures, self->noReadback, self->present, self->vsync,
                              self->stretch);
     }
 
     void Wait() override
     {
-        if (!worker.OnWorker())
-            worker.Wait();
+        if (worker.OnWorker())
+            return;
+        const unsigned long long start = Micros();
+        worker.Wait();
+        waitMicros += Micros() - start;
     }
 
     bool SetVideoMode(int width, int height, bool fullscreen) override
@@ -212,6 +235,9 @@ struct ThreadedExecutor : GfxExecutor {
                  bool vsyncFrame, bool stretchFrame) override
     {
         Wait();
+        inner->NoteWorkerTimes((unsigned)waitMicros, expandMicros);
+        waitMicros = 0;
+        expandMicros = 0;
         std::swap(frame, recorded);
         inner->Prepare(frame, textures, readback, presentFrame);
         present = presentFrame;

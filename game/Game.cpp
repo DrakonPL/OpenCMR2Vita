@@ -2450,18 +2450,24 @@ void Game_DrawDeferredObjects(void)
     unsigned int i;
 
     if ((unsigned int)CGame::m_deferredDrawCount >= 1) {
-        for (i = 0; i < (unsigned int)CGame::m_deferredDrawCount; i++) {
-            pObject = (StageObjectDraw *)CGame::m_deferredDrawObjects[i];
-            delta.x = g_unk0x0059be6c->world.position.x - pObject->position.x;
-            delta.y = 0;
-            delta.z = g_unk0x0059be6c->world.position.z - pObject->position.z;
-            sorted[i].distance = FixVecLength(&delta);
-            sorted[i].pObject = pObject;
-        }
         // PORT: the order of the objects, the farthest first (see
         // Game_OrderDeferredDraws).
         static unsigned short order[4096];
-        Game_OrderDeferredDraws(sorted, (unsigned int)CGame::m_deferredDrawCount, g_depthSortDrawLists != 0, order);
+        {
+#ifdef OPENCMR2_DEV
+            Diagnostics::ScenePartNest sortPart(Diagnostics::SCENE_PART_DEFERRED_SORT);
+#endif
+            for (i = 0; i < (unsigned int)CGame::m_deferredDrawCount; i++) {
+                pObject = (StageObjectDraw *)CGame::m_deferredDrawObjects[i];
+                delta.x = g_unk0x0059be6c->world.position.x - pObject->position.x;
+                delta.y = 0;
+                delta.z = g_unk0x0059be6c->world.position.z - pObject->position.z;
+                sorted[i].distance = FixVecLength(&delta);
+                sorted[i].pObject = pObject;
+            }
+            Game_OrderDeferredDraws(sorted, (unsigned int)CGame::m_deferredDrawCount, g_depthSortDrawLists != 0,
+                                    order);
+        }
         // PORT: the trees in batches (Game_AddTreeToBatch). The last object
         // is drawn alone: the state after the loop is then the original's.
         const bool batches = Sys_GetOption("video.tree_batch", 1) != 0;
@@ -2988,6 +2994,18 @@ static inline void Game_ScenePart(int part)
         Diagnostics::observer->ScenePart(part);
 }
 
+// PORT: a call timed as an inner part of the scene in dev builds
+// (Diagnostics::ScenePartNest). Other builds make the call alone.
+#ifdef OPENCMR2_DEV
+#define GAME_TIMED(part, call)                                \
+    do {                                                      \
+        Diagnostics::ScenePartNest timedPart(Diagnostics::part); \
+        call;                                                 \
+    } while (0)
+#else
+#define GAME_TIMED(part, call) call
+#endif
+
 // match 94%: the residual diff is register allocation (the relight loop walks
 // the sector list from a register where the original keeps the pointer in the
 // argument slot, and the inlined fixed point normalisation uses different
@@ -3032,15 +3050,20 @@ int Game_DrawSceneViewport(SceneNode *pRoot, SceneNode *pCamera, void *pRect, in
     // frame.
     CGraphics::SetZWriteEnable(0);
     CGraphics::SetZEnable(0);
-    ScreenLine2D_Draw(4);
-    Tri2D_DrawLayer(4);
-    Sprite_DrawLayer(4);
+    GAME_TIMED(SCENE_PART_2D, ScreenLine2D_Draw(4));
+    GAME_TIMED(SCENE_PART_2D, Tri2D_DrawLayer(4));
+    GAME_TIMED(SCENE_PART_2D, Sprite_DrawLayer(4));
     if (flag != 0) {
         if (CGraphics::m_unk0x0072d56c != 0) {
             Gfx_SetTransform(GFX_TRANSFORM_WORLD, &g_identityWorldMatrix);
-            Sector_CullGridAroundViewNode(pCamera, pRect);
-            for (i = 0; i < (unsigned int)g_sectorCullEnabled; i++)
-                Scene_RelightSector(((unsigned short *)g_visibleSectorIndices)[i]);
+            GAME_TIMED(SCENE_PART_SECTOR_CULL, Sector_CullGridAroundViewNode(pCamera, pRect));
+            {
+#ifdef OPENCMR2_DEV
+                Diagnostics::ScenePartNest relightPart(Diagnostics::SCENE_PART_RELIGHT);
+#endif
+                for (i = 0; i < (unsigned int)g_sectorCullEnabled; i++)
+                    Scene_RelightSector(((unsigned short *)g_visibleSectorIndices)[i]);
+            }
         }
         CGraphics::SetCullMode(CGame::GetSectorDrawState());
         FixMatrix_GetPosition(&cameraPosition, &pCamera->world);
@@ -3088,10 +3111,10 @@ int Game_DrawSceneViewport(SceneNode *pRoot, SceneNode *pCamera, void *pRect, in
             Game_DrawCulledSectorShadows();
             Game_ScenePart(Diagnostics::SCENE_PART_LAYERS);
             Graphics_SwitchAlphaBlendAndTest(1);
-            Glow_Draw(pCamera, (BYTE)bit);
-            Quad2D_DrawLayer(8);
+            GAME_TIMED(SCENE_PART_GLOW, Glow_Draw(pCamera, (BYTE)bit));
+            GAME_TIMED(SCENE_PART_QUADS, Quad2D_DrawLayer(8));
             Graphics_SetLightingMode(4);
-            Quad2D_DrawLayer(0x20);
+            GAME_TIMED(SCENE_PART_QUADS, Quad2D_DrawLayer(0x20));
             Graphics_SetLightingMode(1);
             if (CGame::m_unk0x0059ce14 != 0) {
                 Game_ScenePart(Diagnostics::SCENE_PART_OBJECTS);
@@ -3104,7 +3127,7 @@ int Game_DrawSceneViewport(SceneNode *pRoot, SceneNode *pCamera, void *pRect, in
                 CGraphics::SetCachedSourceDestinationBlend(5, 6);
                 Gfx_SetFog(0);
                 Graphics_SetLightingMode(5);
-                Quad2D_DrawLayer(0x10);
+                GAME_TIMED(SCENE_PART_QUADS, Quad2D_DrawLayer(0x10));
                 Line2D_Draw();
                 Billboard_Draw(pCamera);
                 Graphics_SetLightingMode(1);
@@ -3131,9 +3154,9 @@ int Game_DrawSceneViewport(SceneNode *pRoot, SceneNode *pCamera, void *pRect, in
         CGraphics::SetCachedSourceDestinationBlend(5, 6);
         Gfx_SetFog(0);
         Graphics_SetLightingMode(5);
-        Quad2D_DrawLayer(0x10);
+        GAME_TIMED(SCENE_PART_QUADS, Quad2D_DrawLayer(0x10));
         Graphics_SetLightingMode(4);
-        Quad2D_DrawLayer(0x40);
+        GAME_TIMED(SCENE_PART_QUADS, Quad2D_DrawLayer(0x40));
         Graphics_SetLightingMode(5);
         Line2D_Draw();
         Billboard_Draw(pCamera);
@@ -3152,15 +3175,15 @@ int Game_DrawSceneViewport(SceneNode *pRoot, SceneNode *pCamera, void *pRect, in
     viewport.maxZ = 1.0f;
     Gfx_SetViewport(&viewport);
     CGraphics::SetCullMode(3);
-    ScreenLine2D_Draw(3);
-    Tri2D_DrawLayer(3);
-    Sprite_DrawLayer(3);
-    ScreenLine2D_Draw(2);
-    Tri2D_DrawLayer(2);
-    Sprite_DrawLayer(2);
-    ScreenLine2D_Draw(1);
-    Tri2D_DrawLayer(1);
-    Sprite_DrawLayer(1);
+    GAME_TIMED(SCENE_PART_2D, ScreenLine2D_Draw(3));
+    GAME_TIMED(SCENE_PART_2D, Tri2D_DrawLayer(3));
+    GAME_TIMED(SCENE_PART_2D, Sprite_DrawLayer(3));
+    GAME_TIMED(SCENE_PART_2D, ScreenLine2D_Draw(2));
+    GAME_TIMED(SCENE_PART_2D, Tri2D_DrawLayer(2));
+    GAME_TIMED(SCENE_PART_2D, Sprite_DrawLayer(2));
+    GAME_TIMED(SCENE_PART_2D, ScreenLine2D_Draw(1));
+    GAME_TIMED(SCENE_PART_2D, Tri2D_DrawLayer(1));
+    GAME_TIMED(SCENE_PART_2D, Sprite_DrawLayer(1));
     CGraphics::SetCullMode(CGame::GetSectorDrawState());
     Graphics_UpdateFrameStatistics();
     Game_ScenePart(Diagnostics::SCENE_PART_NONE);

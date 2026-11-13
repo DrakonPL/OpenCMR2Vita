@@ -6139,6 +6139,7 @@ void RallyData_UpdateViewFrameAndDebugOverlay(CallbackStateMachine *param1, int 
     orderCount = Car_GetOrderCount();
     RallyData_ClearStageDepthBuffer();
     g_viewScreenRect = RallyData_GetViewScreenRectangle(maskedView);
+    Diagnostics::ScenePart(Diagnostics::SCENE_PART_CAR_NODES);
     RallyData_ApplyPlayerFlagsToObjects(maskedView);
     StageObject_ApplyInterpolatedNodeMatrices(maskedView);
     if (CGraphics::GetRasterCapabilityField84() != 0)
@@ -6146,6 +6147,7 @@ void RallyData_UpdateViewFrameAndDebugOverlay(CallbackStateMachine *param1, int 
     Car_UpdateViewNodes(maskedView);
     StageObject_RebuildViewWeatherLighting(maskedView);
     StageObject_PositionSplitViewNodes(maskedView);
+    Diagnostics::ScenePart(Diagnostics::SCENE_PART_WHEELS);
     if ((BYTE)view == 0 && (BYTE)RallyDataState() == 1 &&
         CGameInfo::IsInRaceMenuOpen() == 0 &&
         (StageTiming_GetStartTableRecord(0)->detailCode == 'A' || StageTiming_GetStartTableRecord(0)->detailCode == 'C')) {
@@ -6154,6 +6156,7 @@ void RallyData_UpdateViewFrameAndDebugOverlay(CallbackStateMachine *param1, int 
     }
     for (i = 0; i < orderCount; i++)
         StageObject_AverageWheelGroundLighting(i, maskedView);
+    Diagnostics::ScenePart(Diagnostics::SCENE_PART_VIEW);
     View_SelectVisibleCars(maskedView, (short *)g_viewScreenRect);
     Replay_HideFinishedGhostCarNodes();
     StageObject_PositionRearViewLightNodes(View_GetActiveCameraFlags(maskedView));
@@ -6307,11 +6310,12 @@ void RallyData_UpdateViewFrameAndDebugOverlay(CallbackStateMachine *param1, int 
     }
     if (RallyData_GetSelectionFlag28() != 0 && CGameInfo::GetSoundOptionBit30() != 0)
         StageObject_UpdateProjectedDistanceFade(maskedView);
-    Diagnostics::ScenePart(Diagnostics::SCENE_PART_TYRE_MARKS);
+    Diagnostics::ScenePart(Diagnostics::SCENE_PART_SKID_TRAILS);
     if (CGameInfo::IsInRaceMenuOpen() == 0) {
         StageObject_RebuildCarExhaustPoints(maskedView);
         StageObject_UpdateSkidTrails(maskedView);
     }
+    Diagnostics::ScenePart(Diagnostics::SCENE_PART_TYRE_MARKS);
     StageObject_UpdateRaceSkidTrails(maskedView);
     Diagnostics::ScenePart(Diagnostics::SCENE_PART_VIEW);
     Race_ClearMessageDrawLatch();

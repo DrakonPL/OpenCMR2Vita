@@ -399,6 +399,7 @@ struct FrameParts : Diagnostics::Observer {
     }
     void BeginFrame() override { frameStart = sceKernelGetProcessTimeWide(); }
     void EndFrame() override { frameMicros += sceKernelGetProcessTimeWide() - frameStart; }
+    int Part() const override { return part; }
     void Reset()
     {
         tickMicros = presentMicros = frameMicros = recorderMicros = 0;
@@ -411,10 +412,42 @@ struct FrameParts : Diagnostics::Observer {
 FrameParts s_frameParts;
 
 // The names of the parts, for the heartbeat.
-const char *const kPartNames[Diagnostics::SCENE_PART_COUNT] = {
+const char *const kPartNames[] = {
     "other", "setup", "particles", "sky", "ground", "shadows", "objects", "billboards",
-    "nodes", "layers", "view", "prepare", "car shadows", "reflections", "hud", "off road", "tyre marks"
+    "nodes", "layers", "view", "prepare", "car shadows", "reflections", "hud", "off road", "tyre marks",
+    "sector cull", "relight", "deferred sort", "glow", "quads", "2d", "car nodes", "wheels", "skid trails"
 };
+static_assert(sizeof(kPartNames) / sizeof(kPartNames[0]) == Diagnostics::SCENE_PART_COUNT,
+              "a name for each scene part");
+
+// The parts of a heartbeat line, in the order of the line.
+const int kSceneParts[] = {
+    Diagnostics::SCENE_PART_SETUP, Diagnostics::SCENE_PART_PARTICLES, Diagnostics::SCENE_PART_SKY,
+    Diagnostics::SCENE_PART_GROUND, Diagnostics::SCENE_PART_SHADOWS, Diagnostics::SCENE_PART_OBJECTS,
+    Diagnostics::SCENE_PART_BILLBOARDS, Diagnostics::SCENE_PART_NODES, Diagnostics::SCENE_PART_LAYERS,
+};
+const int kViewParts[] = {
+    Diagnostics::SCENE_PART_VIEW, Diagnostics::SCENE_PART_CAR_NODES, Diagnostics::SCENE_PART_WHEELS,
+    Diagnostics::SCENE_PART_OFF_ROAD, Diagnostics::SCENE_PART_SKID_TRAILS, Diagnostics::SCENE_PART_TYRE_MARKS,
+    Diagnostics::SCENE_PART_PREPARE, Diagnostics::SCENE_PART_CAR_SHADOWS, Diagnostics::SCENE_PART_REFLECTIONS,
+    Diagnostics::SCENE_PART_HUD,
+};
+const int kInnerParts[] = {
+    Diagnostics::SCENE_PART_SECTOR_CULL, Diagnostics::SCENE_PART_RELIGHT, Diagnostics::SCENE_PART_DEFERRED_SORT,
+    Diagnostics::SCENE_PART_GLOW, Diagnostics::SCENE_PART_QUADS, Diagnostics::SCENE_PART_2D,
+};
+
+// A heartbeat line of the ms of parts in a frame.
+template <size_t N>
+void LogParts(const char *title, const int (&parts)[N], const FrameParts &p, double perFrame)
+{
+    char text[512];
+    size_t used = 0;
+    for (size_t i = 0; i < N && used < sizeof(text); i++)
+        used += (size_t)snprintf(text + used, sizeof(text) - used, "%s%s %.2f", i ? ", " : "",
+                                 kPartNames[parts[i]], p.partMicros[parts[i]] / perFrame);
+    Sys_Log("heartbeat: %s ms: %s", title, text);
+}
 
 } // namespace
 
@@ -480,6 +513,16 @@ void SysVita_FramePresented(bool stats)
             heap.arena / 1024, s_openFiles);
     if (!stats)
         Sys_Log("heartbeat: the performance stats are off (video.perf_stats = 0)");
+    // The work of the sound threads on core 1, in ms of each second.
+    static unsigned lastMixer, lastMusic;
+    unsigned mixer, music;
+    SysVita_AudioBusyMicros(&mixer, &music);
+    const double seconds = (double)(now - periodStart) / 1e6;
+    if (stats)
+        Sys_Log("heartbeat: core 1 busy ms per s: mixer %.1f, music %.1f", (mixer - lastMixer) / 1000.0 / seconds,
+                (music - lastMusic) / 1000.0 / seconds);
+    lastMixer = mixer;
+    lastMusic = music;
     if (periodFrames > 0 && partsValid) {
         // The scene: the frame without its ticks and its present.
         const FrameParts &p = s_frameParts;
@@ -496,32 +539,16 @@ void SysVita_FramePresented(bool stats)
         uint64_t parts = 0;
         for (int i = 1; i < Diagnostics::SCENE_PART_COUNT; i++)
             parts += p.partMicros[i];
-        if (parts > 0)
-            Sys_Log("heartbeat: scene parts ms: setup %.2f, particles %.2f, sky %.2f, ground %.2f, shadows %.2f, "
-                    "objects %.2f, billboards %.2f, nodes %.2f, layers %.2f",
-                    p.partMicros[Diagnostics::SCENE_PART_SETUP] / perFrame,
-                    p.partMicros[Diagnostics::SCENE_PART_PARTICLES] / perFrame,
-                    p.partMicros[Diagnostics::SCENE_PART_SKY] / perFrame,
-                    p.partMicros[Diagnostics::SCENE_PART_GROUND] / perFrame,
-                    p.partMicros[Diagnostics::SCENE_PART_SHADOWS] / perFrame,
-                    p.partMicros[Diagnostics::SCENE_PART_OBJECTS] / perFrame,
-                    p.partMicros[Diagnostics::SCENE_PART_BILLBOARDS] / perFrame,
-                    p.partMicros[Diagnostics::SCENE_PART_NODES] / perFrame,
-                    p.partMicros[Diagnostics::SCENE_PART_LAYERS] / perFrame);
-        if (parts > 0)
-            Sys_Log("heartbeat: view parts ms: view %.2f, off road %.2f, tyre marks %.2f, prepare %.2f, "
-                    "car shadows %.2f, reflections %.2f, hud %.2f",
-                    p.partMicros[Diagnostics::SCENE_PART_VIEW] / perFrame,
-                    p.partMicros[Diagnostics::SCENE_PART_OFF_ROAD] / perFrame,
-                    p.partMicros[Diagnostics::SCENE_PART_TYRE_MARKS] / perFrame,
-                    p.partMicros[Diagnostics::SCENE_PART_PREPARE] / perFrame,
-                    p.partMicros[Diagnostics::SCENE_PART_CAR_SHADOWS] / perFrame,
-                    p.partMicros[Diagnostics::SCENE_PART_REFLECTIONS] / perFrame,
-                    p.partMicros[Diagnostics::SCENE_PART_HUD] / perFrame);
+        // An inner part's time is not in the part around it.
+        if (parts > 0) {
+            LogParts("scene parts", kSceneParts, p, perFrame);
+            LogParts("view parts", kViewParts, p, perFrame);
+            LogParts("inner parts", kInnerParts, p, perFrame);
+        }
         // The draws of each part in a frame: the calls of the game, the
         // commands they became, and the vertices copied into the frame.
         s_frameParts.ScenePart(s_frameParts.part);
-        char text[512];
+        char text[900];
         size_t used = 0;
         for (int i = 0; i < Diagnostics::SCENE_PART_COUNT; i++) {
             const SysVitaDrawCounts &d = p.partDraws[i];
