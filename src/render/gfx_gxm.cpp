@@ -661,6 +661,10 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     {
         if (!ready) {
             singlePass = Platform_GetSettingInt("video.single_pass", 1) != 0;
+            // The mip levels of the BC3 textures (video.mipmaps, 1 by
+            // default): the game's graphics menu chooses how a draw reads
+            // them (its mipmapping option), as for the textures with levels.
+            gpuTextures.SetMipmaps(Platform_GetSettingInt("video.mipmaps", 1) != 0);
             ready = device.Init() && memory.Init() && CreatePrograms() && CreateBuffers();
             // GXM runs from here: a message box draws through this display.
             if (ready)

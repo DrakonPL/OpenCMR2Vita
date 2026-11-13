@@ -6,6 +6,7 @@
 
 #include "port/gfx.h"
 #include "render/gxm_key_cache.h"
+#include "render/texture_mips.h"
 
 #include <stdint.h>
 
@@ -30,6 +31,13 @@ struct GfxTexture {
     GfxTexture *faceViews[6];   // a cube: its face views (1..5; 0 is itself)
     // CPU copy of every level of every face, tightly packed rows.
     std::vector<uint8_t> levels[6][16];
+    // The mip levels an executor makes of a BC3 texture of one level
+    // (texture_mips.h): at most mipLimit (0: down to 1x1), and the part of
+    // level 0 that changed since the last upload (empty: all of it). The
+    // atlas of the small quads keeps 3 levels: the border of a texture in it
+    // is 4 texels.
+    int mipLimit = 0;
+    GfxMipRect changedRect;
 };
 
 // The texture a draw reads for t: its cube, or its replacement.

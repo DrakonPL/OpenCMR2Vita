@@ -1174,6 +1174,9 @@ int main()
                 REQUIRE(Draws() == 4 && Draw(0).vertexCount == 8 && Draw(1).textures[0] == bark);
                 REQUIRE(Draw(2).snapshot && Draw(3).vertexCount == 4 && Draw(0).textures[0] == Draw(3).textures[0]);
                 REQUIRE(Draw(0).textures[0] != oak && Draw(0).reach > 0.0f && Draw(0).hasBox);
+                // The atlas keeps 3 mip levels, and tells the part that
+                // changed (the executor's levels of it).
+                REQUIRE(Draw(0).textures[0]->mipLimit == 3 && !Draw(0).textures[0]->changedRect.Empty());
             } else {
                 // Each draw alone; the box of the tree outside the view is
                 // outside it.
@@ -1197,6 +1200,88 @@ int main()
         Gfx_DestroyTexture(oak);
         Gfx_DestroyTexture(pine);
         Gfx_SetStageAddress(0, GFX_ADDRESS_WRAP);
+    }
+
+    // The mip levels of a BC3 texture (render/texture_mips.cpp): each level
+    // a 2x2 box of the level before. In a texture of blocks of grey and
+    // black columns, a texel of level 1 is the mean of its 2x2 texels. A
+    // part that changes (a texture new in the atlas) gives, made again
+    // alone, the levels of the whole texture made again.
+    {
+        REQUIRE(Gfx_MipLevelCount(64, 32, 0) == 7 && Gfx_MipLevelCount(256, 256, 3) == 3);
+        REQUIRE(Gfx_MipLevelCount(1, 1, 0) == 1 && Gfx_MipLevelCount(8, 8, 0) == 4);
+        const int w = 64, h = 32;
+        std::vector<uint8_t> level0((size_t)(w / 4) * (h / 4) * 16);
+        for (int by = 0; by < h / 4; by++)
+            for (int bx = 0; bx < w / 4; bx++) {
+                uint8_t *b = &level0[((size_t)by * (w / 4) + bx) * 16];
+                const int v = 16 + (bx + by) % 16;
+                const uint16_t c = (uint16_t)(v << 11 | (v * 2) << 5 | v);
+                memset(b, 0, 16);
+                b[0] = b[1] = 255;      // alpha 255
+                b[8] = (uint8_t)c;      // colour 0 the grey, colour 1 black
+                b[9] = (uint8_t)(c >> 8);
+                memset(b + 12, 0x44, 4);    // the columns: colour 0, 1, 0, 1
+            }
+        std::vector<uint8_t> mips[16];
+        Gfx_MakeBC3Mips(level0.data(), w, h, 7, GfxMipRect(), mips);
+        REQUIRE(mips[0].empty() && mips[1].size() == 8 * 4 * 16 && mips[5].size() == 16 && mips[6].size() == 16);
+        int worst = 0;
+        for (int y = 0; y < h / 2; y++)
+            for (int x = 0; x < w / 2; x++) {
+                uint32_t a[16], b[16];
+                Gfx_DecodeBlock(GFX_FORMAT_BC3, &mips[1][((size_t)(y / 4) * (w / 8) + x / 4) * 16], a);
+                Gfx_DecodeBlock(GFX_FORMAT_BC3, &level0[((size_t)(2 * y / 4) * (w / 4) + 2 * x / 4) * 16], b);
+                const uint32_t p = a[(y % 4) * 4 + x % 4];
+                const int tx = 2 * x % 4, ty = 2 * y % 4;
+                const uint32_t q[4] = { b[ty * 4 + tx], b[ty * 4 + tx + 1], b[(ty + 1) * 4 + tx],
+                                        b[(ty + 1) * 4 + tx + 1] };
+                REQUIRE(p >> 24 == 255);
+                for (int s = 0; s < 24; s += 8) {
+                    const int mean = (int)((q[0] >> s & 255) + (q[1] >> s & 255) + (q[2] >> s & 255) +
+                                           (q[3] >> s & 255) + 2) / 4;
+                    const int d = (int)(p >> s & 255) - mean;
+                    worst = d > worst ? d : -d > worst ? -d : worst;
+                }
+            }
+        REQUIRE(worst <= 10);
+        // A red texture stays red: red and blue keep their places.
+        std::vector<uint8_t> red((size_t)4 * 4 * 16);
+        for (size_t i = 0; i < red.size(); i += 16) {
+            memset(&red[i], 0, 16);
+            red[i] = red[i + 1] = 255;
+            red[i + 9] = red[i + 11] = 0xf8;    // 0xf800: red 31, green 0, blue 0
+        }
+        std::vector<uint8_t> redMips[16];
+        Gfx_MakeBC3Mips(red.data(), 16, 16, 2, GfxMipRect(), redMips);
+        uint32_t texels[16];
+        Gfx_DecodeBlock(GFX_FORMAT_BC3, redMips[1].data(), texels);
+        REQUIRE((texels[5] >> 16 & 255) >= 240 && (texels[5] & 255) <= 8 && (texels[5] >> 8 & 255) <= 8);
+
+        const int size = 256;
+        std::vector<uint8_t> atlas((size_t)(size / 4) * (size / 4) * 16);
+        unsigned seed = 5;
+        for (uint8_t &byte : atlas) {
+            seed = seed * 1664525u + 1013904223u;
+            byte = (uint8_t)(seed >> 24);
+        }
+        std::vector<uint8_t> kept[16], whole[16];
+        Gfx_MakeBC3Mips(atlas.data(), size, size, 3, GfxMipRect(), kept);
+        const std::vector<uint8_t> before = kept[1];
+        GfxMipRect tile;
+        tile.x0 = 40;
+        tile.y0 = 36;
+        tile.x1 = 72;
+        tile.y1 = 104;
+        for (int by = tile.y0 / 4; by < tile.y1 / 4; by++)
+            for (int bx = tile.x0 / 4; bx < tile.x1 / 4; bx++)
+                for (int i = 0; i < 16; i++) {
+                    seed = seed * 1664525u + 1013904223u;
+                    atlas[((size_t)by * (size / 4) + bx) * 16 + i] = (uint8_t)(seed >> 24);
+                }
+        Gfx_MakeBC3Mips(atlas.data(), size, size, 3, tile, kept);
+        Gfx_MakeBC3Mips(atlas.data(), size, size, 3, GfxMipRect(), whole);
+        REQUIRE(kept[1] == whole[1] && kept[2] == whole[2] && kept[1] != before);
     }
 
     // The performance stats (video.perf_stats = 0): the recorder counts no
