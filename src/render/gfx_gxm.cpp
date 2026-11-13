@@ -191,8 +191,13 @@ struct Stats {
 };
 
 // The frame time probe of dev builds. A tap on the front touch screen starts
-// it: each mode runs for kProbeModeMicros without vsync, and the log gets its
-// frame time. The modes split a frame into its parts:
+// it. It runs without vsync. The modes of kProbeCycle take turns, each for
+// kProbeBlockFrames frames, kProbeCycles times: each mode gets frames from
+// the same parts of the drive, so their times compare (a mode that ran alone
+// for some seconds met a scene of its own). The first frames of a turn are
+// not counted: the GPU still works on frames of the mode before. Then the log
+// gets a line for each mode. Last, "single pass" runs alone for some seconds,
+// for a look at the picture. The modes split a frame into its parts:
 //   normal            the frame as the game draws it
 //   quarter           the back buffer's draws clipped to about a quarter of
 //                     its pixels: the fragment cost goes down with them
@@ -219,6 +224,8 @@ struct Stats {
 //                     draws once, with the discard and its blending, and has
 //                     no depth pass. Look at the trees and the fences in this
 //                     mode: it shows whether the SGX543 draws such a program
+// The modes quarter, general, fade always and depth pass always are not in
+// the cycle: their questions are answered.
 // Each line also has the CPU time of an Execute up to the present: the cost
 // of the draw calls without the wait for the GPU.
 enum ProbeMode {
@@ -244,18 +251,33 @@ enum ProfileSection {
     PROFILE_PASSES,     // the GXM calls of the draw's passes
     PROFILE_SECTIONS
 };
-constexpr uint64_t kProbeModeMicros = 3000000;
-constexpr uint64_t kProbeSettleMicros = 500000;     // at the start of a mode: not counted
+const int kProbeCycle[] = { PROBE_NORMAL, PROBE_NO_3D,           PROBE_LOOKUP_ONLY, PROBE_NO_DEPTH_PASS,
+                            PROBE_TILE,   PROBE_UNIFORMS_ALWAYS, PROBE_SINGLE_PASS, PROBE_PROFILE };
+constexpr unsigned kProbeCycleModes = sizeof(kProbeCycle) / sizeof(kProbeCycle[0]);
+constexpr unsigned kProbeBlockFrames = 8;   // the frames of a mode's turn
+constexpr unsigned kProbeSkipFrames = 2;    // at the start of a turn: not counted
+constexpr unsigned kProbeCycles = 12;
+constexpr uint64_t kProbeSteadyMicros = 6000000;    // "single pass" alone, at the end
 
-struct Probe {
-    int mode = PROBE_OFF;
-    uint64_t modeStart = 0, lastPresent = 0;
+// The sums of a mode over its counted frames.
+struct ProbeSums {
     uint64_t frameMicros = 0, frameMax = 0;
     uint64_t submitMicros = 0;      // in Execute, up to the present
     uint64_t section[PROFILE_SECTIONS] = {};    // the profile mode's sums
+    unsigned frames = 0, draws = 0, draws3d = 0;
+};
+
+struct Probe {
+    int mode = PROBE_OFF;
+    unsigned slot = 0, blockFrame = 0, cycle = 0;   // the place in the cycle
+    uint64_t lastPresent = 0;
+    uint64_t steadyStart = 0;       // not 0: the cycles are done, "single pass" runs alone
+    // The frame that is drawn now.
+    uint64_t submitMicros = 0;
+    uint64_t section[PROFILE_SECTIONS] = {};
     uint64_t mark = 0;              // the end of the step before
-    unsigned draws3d = 0;
-    unsigned frames = 0, draws = 0;
+    unsigned draws3d = 0, draws = 0;
+    ProbeSums sums[PROBE_END];
     bool touchStarted = false, touchDown = false;
 };
 
@@ -323,8 +345,25 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     // The version goes up when a row changes.
     const GfxDrawState *vertexUniformState = nullptr;
     int vertexUniformW = 0, vertexUniformH = 0;
+    bool vertexUniformBackBuffer = false;
     unsigned vertexUniformVersion = 1;
     float vertexUniforms[VU_ROWS][4];
+    // The variant and the programs of the keys of the draws before. Most
+    // draws of a stage have the keys of a draw just before them: they find
+    // their programs here, without the maps.
+    struct Resolved {
+        uint64_t key = ~0ull, args = 0;
+        uint32_t pipeline = 0;      // the blending, the vertex kind, the probe's mode
+        int variant = -1;
+        SceGxmFragmentProgram *fragment = nullptr;      // nullptr: the key cannot draw
+        bool depthLooked = false;   // the depth pass of the key is looked up
+        int depthVariant = -1;
+        SceGxmFragmentProgram *depthProgram = nullptr;
+        SceGxmFragmentProgram *single = nullptr;        // the probe's single pass
+    };
+    Resolved resolvedKeys[4];
+    unsigned resolvedNext = 0;
+
     // Whether a reserved uniform buffer serves the draws that follow: the
     // device answers it at the first video mode (TestKeptUniforms). A draw
     // that fails with a kept buffer also ends it. Without it each pass
@@ -759,6 +798,27 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         return -1;
     }
 
+    // The variant and the fragment program of a draw's keys, or nullptr
+    // where there is none.
+    Resolved *Resolve(uint64_t key, uint64_t args, const GfxDrawState &s, bool transformed)
+    {
+        const uint32_t pipeline = (s.alphaBlend ? 1u | (uint32_t)(s.srcBlend & 15) << 1 | (uint32_t)(s.destBlend & 15) << 5
+                                                : 0u) |
+                                  (transformed ? 1u << 9 : 0u) | (uint32_t)probe.mode << 10;
+        for (Resolved &r : resolvedKeys)
+            if (r.key == key && r.args == args && r.pipeline == pipeline)
+                return r.fragment != nullptr ? &r : nullptr;
+        Resolved &r = resolvedKeys[resolvedNext++ % (sizeof(resolvedKeys) / sizeof(resolvedKeys[0]))];
+        r = Resolved();
+        r.key = key;
+        r.args = args;
+        r.pipeline = pipeline;
+        r.variant = FindVariant(key, args, s, transformed);
+        if (r.variant >= 0)
+            r.fragment = FragmentProgram(r.variant, s.alphaBlend, s.srcBlend, s.destBlend, transformed);
+        return r.fragment != nullptr ? &r : nullptr;
+    }
+
     // ---- state ----
 
     void SetPrograms(const SceGxmVertexProgram *v, const SceGxmFragmentProgram *f)
@@ -1127,15 +1187,20 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         const GfxViewport viewport = ToTarget(s.viewport, s.screenW, s.screenH, backBuffer, targetW, targetH);
         // The vertex uniforms of the state: all rows at first, then only the
         // rows that differ from the 3D draw before.
-        if (!c.transformed && (vertexUniformState != &s || vertexUniformW != targetW || vertexUniformH != targetH)) {
+        if (!c.transformed && (vertexUniformState != &s || vertexUniformW != targetW || vertexUniformH != targetH ||
+                               vertexUniformBackBuffer != backBuffer)) {
             bool changed = true;
-            if (vertexUniformState == nullptr || vertexUniformW != targetW || vertexUniformH != targetH)
+            if (vertexUniformState == nullptr || vertexUniformW != targetW || vertexUniformH != targetH ||
+                vertexUniformBackBuffer != backBuffer)
                 Gxm_FillVertexUniforms(s, viewport, vertexUniforms);
+            else if (vertexUniformState->vertexVersion == s.vertexVersion)
+                changed = false;    // the recorder says so: no look at the 1.3 KB of each state
             else
                 changed = Gxm_UpdateVertexUniforms(*vertexUniformState, s, viewport, vertexUniforms);
             vertexUniformState = &s;
             vertexUniformW = targetW;
             vertexUniformH = targetH;
+            vertexUniformBackBuffer = backBuffer;
             if (changed) {
                 vertexUniformVersion++;
                 stats.vertexFills++;
@@ -1146,6 +1211,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         const uint64_t args = Gfx_FragmentArgsKey(s);
         step(PROFILE_KEYS);
         int variant = -1;
+        Resolved *resolved = nullptr;
         // The fade changes no pixel of a draw whose vertices are all nearer
         // than its start: such a draw takes the variant of its key without
         // the fade, which is much shorter.
@@ -1162,22 +1228,20 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                                  Gxm_EyeDistanceBound(range->box, &vertexUniforms[VU_WORLD_VIEW]) < s.fadeStart;
             step(PROFILE_RANGE);
             if (tooNear)
-                variant = FindVariant(key & ~kFadeKeyBit, args, s, c.transformed);
-            if (variant >= 0) {
+                resolved = Resolve(key & ~kFadeKeyBit, args, s, c.transformed);
+            if (resolved != nullptr) {
                 key &= ~kFadeKeyBit;
                 stats.nearDraws++;
             } else {
                 stats.fadeDraws++;
             }
         }
-        if (variant < 0)
-            variant = FindVariant(key, args, s, c.transformed);
-        if (variant < 0)
+        if (resolved == nullptr)
+            resolved = Resolve(key, args, s, c.transformed);
+        if (resolved == nullptr)
             return;
-        SceGxmFragmentProgram *fragment = FragmentProgram(variant, s.alphaBlend, s.srcBlend, s.destBlend,
-                                                          c.transformed);
-        if (fragment == nullptr)
-            return;
+        variant = resolved->variant;
+        SceGxmFragmentProgram *fragment = resolved->fragment;
         step(PROFILE_VARIANT);
         // A blended draw with the alpha test cannot discard (the SGX543), so
         // its program writes each pixel. Its depth must be written only where
@@ -1191,17 +1255,23 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             if (needAlpha && range != nullptr && AlphaTestAlwaysPasses(s, *range)) {
                 stats.depthSkipped++;
             } else {
-                depthVariant = LookupVariant(key, 1, args);
-                SceGxmFragmentProgram *single = nullptr;
-                if (depthVariant >= 0 && probe.mode == PROBE_SINGLE_PASS)
-                    single = FragmentProgram(depthVariant, true, s.srcBlend, s.destBlend, c.transformed);
-                if (single != nullptr) {
+                if (!resolved->depthLooked) {
+                    resolved->depthLooked = true;
+                    resolved->depthVariant = LookupVariant(key, 1, args);
+                    if (resolved->depthVariant >= 0 && probe.mode == PROBE_SINGLE_PASS)
+                        resolved->single = FragmentProgram(resolved->depthVariant, true, s.srcBlend, s.destBlend,
+                                                           c.transformed);
+                    if (resolved->depthVariant >= 0 && resolved->single == nullptr)
+                        resolved->depthProgram = FragmentProgram(resolved->depthVariant, false, 0, 0, c.transformed,
+                                                                 true);
+                }
+                if (resolved->single != nullptr) {
                     // The probe's single pass: the discard form with the draw's blending.
-                    variant = depthVariant;
-                    fragment = single;
-                    depthVariant = -1;
-                } else if (depthVariant >= 0) {
-                    depthProgram = FragmentProgram(depthVariant, false, 0, 0, c.transformed, true);
+                    variant = resolved->depthVariant;
+                    fragment = resolved->single;
+                } else {
+                    depthVariant = resolved->depthVariant;
+                    depthProgram = resolved->depthProgram;
                 }
             }
         }
@@ -1563,33 +1633,58 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             probe.touchDown = down;
             if (!tapped)
                 return;
-            Sys_Log("gxm probe: start, %u ms for each mode, no vsync", (unsigned)(kProbeModeMicros / 1000));
-            probe.mode = PROBE_NORMAL;
-            probe.modeStart = now;
-            probe.lastPresent = 0;
-            return;
-        }
-        if (now - probe.modeStart >= kProbeSettleMicros) {
-            if (probe.lastPresent != 0) {
-                const uint64_t frame = now - probe.lastPresent;
-                probe.frameMicros += frame;
-                probe.frameMax = frame > probe.frameMax ? frame : probe.frameMax;
-                probe.frames++;
-            } else {
-                probe.draws = 0;
-                probe.draws3d = 0;
-                probe.submitMicros = 0;
-                memset(probe.section, 0, sizeof(probe.section));
-            }
+            const bool touchStarted = probe.touchStarted;
+            probe = Probe();
+            probe.touchStarted = touchStarted;
+            probe.touchDown = true;
+            probe.mode = kProbeCycle[0];
             probe.lastPresent = now;
-        }
-        if (now - probe.modeStart < kProbeModeMicros)
+            Sys_Log("gxm probe: start, %u modes take turns of %u frames, %u times, no vsync", kProbeCycleModes,
+                    kProbeBlockFrames, kProbeCycles);
             return;
-        const unsigned frames = probe.frames > 0 ? probe.frames : 1;
-        Sys_Log("gxm probe: %s: frame ms avg %.2f max %.2f over %u frames, %u draws per frame, draw calls %.2f ms",
-                kProbeNames[probe.mode], probe.frameMicros / 1000.0 / frames, probe.frameMax / 1000.0, probe.frames,
-                probe.draws / frames, probe.submitMicros / 1000.0 / frames);
-        if (probe.mode == PROBE_PROFILE) {
+        }
+        const uint64_t frame = now - probe.lastPresent;
+        probe.lastPresent = now;
+        if (probe.steadyStart == 0 && probe.blockFrame >= kProbeSkipFrames) {
+            ProbeSums &sums = probe.sums[probe.mode];
+            sums.frameMicros += frame;
+            sums.frameMax = frame > sums.frameMax ? frame : sums.frameMax;
+            sums.submitMicros += probe.submitMicros;
+            sums.frames++;
+            sums.draws += probe.draws;
+            sums.draws3d += probe.draws3d;
+            for (int i = 0; i < PROFILE_SECTIONS; i++)
+                sums.section[i] += probe.section[i];
+        }
+        probe.submitMicros = 0;
+        probe.draws = probe.draws3d = 0;
+        memset(probe.section, 0, sizeof(probe.section));
+        if (probe.steadyStart != 0) {
+            if (now - probe.steadyStart < kProbeSteadyMicros)
+                return;
+            probe.mode = PROBE_OFF;
+            Sys_Log("gxm probe: done");
+            return;
+        }
+        if (++probe.blockFrame < kProbeBlockFrames)
+            return;
+        probe.blockFrame = 0;
+        if (++probe.slot == kProbeCycleModes) {
+            probe.slot = 0;
+            probe.cycle++;
+        }
+        if (probe.cycle < kProbeCycles) {
+            probe.mode = kProbeCycle[probe.slot];
+            return;
+        }
+        for (int mode : kProbeCycle) {
+            const ProbeSums &sums = probe.sums[mode];
+            const unsigned frames = sums.frames > 0 ? sums.frames : 1;
+            Sys_Log("gxm probe: %s: frame ms avg %.2f max %.2f over %u frames, %u draws per frame, draw calls %.2f ms",
+                    kProbeNames[mode], sums.frameMicros / 1000.0 / frames, sums.frameMax / 1000.0, sums.frames,
+                    sums.draws / frames, sums.submitMicros / 1000.0 / frames);
+            if (mode != PROBE_PROFILE)
+                continue;
             // What a time read costs: the steps of each draw have 7 of them.
             const uint64_t t0 = sceKernelGetProcessTimeWide();
             uint64_t t1 = t0;
@@ -1598,21 +1693,16 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             const double perFrame = 1000.0 * frames;
             Sys_Log("gxm probe: profile ms per frame: setup %.2f, state %.2f, keys %.2f, range %.2f, variant %.2f, "
                     "depth %.2f, vertices %.2f, passes %.2f (%u 3D draws per frame, a time read %.2f us)",
-                    probe.section[PROFILE_SETUP] / perFrame, probe.section[PROFILE_STATE] / perFrame,
-                    probe.section[PROFILE_KEYS] / perFrame, probe.section[PROFILE_RANGE] / perFrame,
-                    probe.section[PROFILE_VARIANT] / perFrame, probe.section[PROFILE_DEPTH] / perFrame,
-                    probe.section[PROFILE_VERTICES] / perFrame, probe.section[PROFILE_PASSES] / perFrame,
-                    probe.draws3d / frames, (double)(t1 - t0) / 256.0);
+                    sums.section[PROFILE_SETUP] / perFrame, sums.section[PROFILE_STATE] / perFrame,
+                    sums.section[PROFILE_KEYS] / perFrame, sums.section[PROFILE_RANGE] / perFrame,
+                    sums.section[PROFILE_VARIANT] / perFrame, sums.section[PROFILE_DEPTH] / perFrame,
+                    sums.section[PROFILE_VERTICES] / perFrame, sums.section[PROFILE_PASSES] / perFrame,
+                    sums.draws3d / frames, (double)(t1 - t0) / 256.0);
         }
-        const bool touchDown = probe.touchDown;
-        const int next = probe.mode + 1;
-        probe = Probe();
-        probe.touchStarted = true;
-        probe.touchDown = touchDown;
-        probe.modeStart = now;
-        probe.mode = next == PROBE_END ? PROBE_OFF : next;
-        if (probe.mode == PROBE_OFF)
-            Sys_Log("gxm probe: done");
+        probe.mode = PROBE_SINGLE_PASS;
+        probe.steadyStart = sceKernelGetProcessTimeWide();
+        Sys_Log("gxm probe: single pass alone for %u s: look at the trees and the fences",
+                (unsigned)(kProbeSteadyMicros / 1000000));
 #endif
     }
 
