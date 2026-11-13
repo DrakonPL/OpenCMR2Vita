@@ -512,10 +512,12 @@ BOOL CGraphics::EnumerateDisplayDriverDescriptions(void) {
 
 // FUNCTION: CMR2 0x004a8da0
 // PORT: called for each of the renderer's modes. The original's checks
-// (at least 640x480, 16 or 32 bits, three buffers fit in video memory) are
-// kept; the table holds 10 modes.
+// (16 or 32 bits, three buffers fit in video memory) are kept, and a width of
+// at least 640; the table holds 10 modes. A mode needs 368 lines, not 480:
+// the PS Vita's display scales 640x368 and 720x408 to the whole screen
+// (render/gxm_device.h). Each mode of the PC has 480 lines or more.
 HRESULT CGraphics::EnumerateCompatibleDisplayModes(int width, int height, int bpp) {
-    if (m_displayCount < 10 && width >= 0x280 && height >= 0x1e0 && (bpp == 0x10 || bpp == 0x20)) {
+    if (m_displayCount < 10 && width >= 0x280 && height >= 0x170 && (bpp == 0x10 || bpp == 0x20)) {
         DWORD textureMemory = QueryAvailableVideoMemoryForCaps(0x10000000);
 
         if ((DWORD)(bpp / 8) * height * width * 3 < textureMemory) {
