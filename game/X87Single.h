@@ -29,6 +29,7 @@
 #define X87S_ADD(a, b) a + b
 #define X87S_SUB(a, b) a - b
 #define X87S_MUL(a, b) a * b
+#define X87S_MUL_FIX16(a, b) a * b
 #define X87S_DIV(a, b) a / b
 #define X87S_SQRT(x) sqrt(x)
 #define X87S_FILD(type, x) (type)x
@@ -136,6 +137,12 @@ static double X87s_MulGeneral(double a, double b, uint64_t x, uint64_t y)
     double hi, lo;
     const unsigned ex = (unsigned)(x >> 52) & 0x7ff, ey = (unsigned)(y >> 52) & 0x7ff;
 
+    // PORT: a zero times a finite number is a zero with the sign of the
+    // product, exact. Half of the texture coordinates of the 2D layers and
+    // of the tyre marks are zeros, and many numbers of a matrix: each took
+    // the exact product of Dekker.
+    if (((x << 1) == 0 && ey != 0x7ff) || ((y << 1) == 0 && ex != 0x7ff))
+        return a * b;
     // Two normal numbers (an exponent field of 0 is a zero or a subnormal)
     // with a normal product: a product below the normal range loses bits.
     if (ex != 0 && ey != 0 && X87s_MantissaBits(x) + X87s_MantissaBits(y) <= 53) {
@@ -192,6 +199,12 @@ static inline double X87s_Sqrt(double x)
 #define X87S_ADD(a, b) X87s_Add((double)(a), (double)(b))
 #define X87S_SUB(a, b) X87s_Add((double)(a), -(double)(b))
 #define X87S_MUL(a, b) X87s_Mul((double)(a), (double)(b))
+// PORT: X87S_MUL for a whole number of 32 bits (a: a 16.16 number) and b the
+// double 1/65536 (CGraphics::m_oneOver65536). The product is exact for each
+// such number, and the conversion to float rounds it as the x87 does: no
+// look at the bits of the operands. For a place that makes many of them (a
+// triangle of a 3D layer has 15). tests/x87_round.cpp compares the two.
+#define X87S_MUL_FIX16(a, b) ((void)sizeof(b), (double)(float)((double)(int)(a) * (1.0 / 65536.0)))
 #define X87S_DIV(a, b) X87s_Div((double)(a), (double)(b))
 #define X87S_SQRT(x) X87s_Sqrt((double)(x))
 #define X87S_FILD(type, x) ((double)(x))

@@ -887,29 +887,31 @@ void Quad2D_QueueFixedTriangle(int, Quad2DInputVertex *pA,
     p->pTexture = pTexture;
     p->flags = (unsigned int)pDest;
 
-    p->verts.v[0].x = (float)(X87S_MUL(pA->x, CGraphics::m_oneOver65536));
-    p->verts.v[0].y = (float)(X87S_MUL(pA->y, CGraphics::m_oneOver65536));
-    p->verts.v[0].z = (float)(X87S_MUL(pA->z, CGraphics::m_oneOver65536));
-    p->verts.v[0].u = (float)(X87S_MUL(pA->u, CGraphics::m_oneOver65536));
-    p->verts.v[0].v = (float)(X87S_MUL(pA->v, CGraphics::m_oneOver65536));
+    // PORT: X87S_MUL_FIX16 is X87S_MUL for these operands (X87Single.h): the
+    // tyre marks are some 1,450 triangles in a frame.
+    p->verts.v[0].x = (float)(X87S_MUL_FIX16(pA->x, CGraphics::m_oneOver65536));
+    p->verts.v[0].y = (float)(X87S_MUL_FIX16(pA->y, CGraphics::m_oneOver65536));
+    p->verts.v[0].z = (float)(X87S_MUL_FIX16(pA->z, CGraphics::m_oneOver65536));
+    p->verts.v[0].u = (float)(X87S_MUL_FIX16(pA->u, CGraphics::m_oneOver65536));
+    p->verts.v[0].v = (float)(X87S_MUL_FIX16(pA->v, CGraphics::m_oneOver65536));
     p->verts.v[0].colour = GFX_RGBA(pA->colour[0], pA->colour[1],
                                       pA->colour[2], pA->colour[3]);
     p->verts.v[0].specular = 0xff000000;
 
-    p->verts.v[1].x = (float)(X87S_MUL(pB->x, CGraphics::m_oneOver65536));
-    p->verts.v[1].y = (float)(X87S_MUL(pB->y, CGraphics::m_oneOver65536));
-    p->verts.v[1].z = (float)(X87S_MUL(pB->z, CGraphics::m_oneOver65536));
-    p->verts.v[1].u = (float)(X87S_MUL(pB->u, CGraphics::m_oneOver65536));
-    p->verts.v[1].v = (float)(X87S_MUL(pB->v, CGraphics::m_oneOver65536));
+    p->verts.v[1].x = (float)(X87S_MUL_FIX16(pB->x, CGraphics::m_oneOver65536));
+    p->verts.v[1].y = (float)(X87S_MUL_FIX16(pB->y, CGraphics::m_oneOver65536));
+    p->verts.v[1].z = (float)(X87S_MUL_FIX16(pB->z, CGraphics::m_oneOver65536));
+    p->verts.v[1].u = (float)(X87S_MUL_FIX16(pB->u, CGraphics::m_oneOver65536));
+    p->verts.v[1].v = (float)(X87S_MUL_FIX16(pB->v, CGraphics::m_oneOver65536));
     p->verts.v[1].colour = GFX_RGBA(pB->colour[0], pB->colour[1],
                                       pB->colour[2], pB->colour[3]);
     p->verts.v[1].specular = 0xff000000;
 
-    p->verts.v[2].x = (float)(X87S_MUL(pC->x, CGraphics::m_oneOver65536));
-    p->verts.v[2].y = (float)(X87S_MUL(pC->y, CGraphics::m_oneOver65536));
-    p->verts.v[2].z = (float)(X87S_MUL(pC->z, CGraphics::m_oneOver65536));
-    p->verts.v[2].u = (float)(X87S_MUL(pC->u, CGraphics::m_oneOver65536));
-    p->verts.v[2].v = (float)(X87S_MUL(pC->v, CGraphics::m_oneOver65536));
+    p->verts.v[2].x = (float)(X87S_MUL_FIX16(pC->x, CGraphics::m_oneOver65536));
+    p->verts.v[2].y = (float)(X87S_MUL_FIX16(pC->y, CGraphics::m_oneOver65536));
+    p->verts.v[2].z = (float)(X87S_MUL_FIX16(pC->z, CGraphics::m_oneOver65536));
+    p->verts.v[2].u = (float)(X87S_MUL_FIX16(pC->u, CGraphics::m_oneOver65536));
+    p->verts.v[2].v = (float)(X87S_MUL_FIX16(pC->v, CGraphics::m_oneOver65536));
     p->verts.v[2].colour = GFX_RGBA(pC->colour[0], pC->colour[1],
                                       pC->colour[2], pC->colour[3]);
     p->verts.v[2].specular = 0xff000000;

@@ -142,6 +142,31 @@ int main()
     for (double a : special)
         for (double b : { 0.0, -0.0, 1.5, -2.0, 1e300, 1e-300, 3.0000000001 })
             REQUIRE(SameProduct(a, b) && SameProduct(b, a));
+    // A zero of each sign times a number (the short way of the zero): any
+    // bits, with an infinity and a NaN among them, and the power of two of
+    // the game's 16.16 numbers.
+    for (int i = 0; i < 500000; i++) {
+        const double any = FromBits(Random());
+        REQUIRE(SameProduct(0.0, any) && SameProduct(-0.0, any) && SameProduct(any, 0.0) && SameProduct(any, -0.0));
+    }
+    REQUIRE(SameProduct(0.0, FromBits(0x7ff0000000000000ull)) && SameProduct(FromBits(0xfff0000000000000ull), -0.0));
+    REQUIRE(SameProduct(0.0, 1.0 / 65536.0) && SameProduct(-0.0, 1.0 / 65536.0) && SameProduct(0.0, -1.0 / 65536.0));
+    REQUIRE(Bits(X87S_MUL((int32_t)0, 1.0f / 65536.0f)) == 0 && Bits(X87S_MUL(-0.0, 1.0f / 65536.0f)) == 1ull << 63);
+    // The short product of a whole number and 1/65536 (X87S_MUL_FIX16)
+    // against the product: any whole number, and those at the edges.
+    {
+        const double scale = 1.0 / 65536.0;
+        const int32_t edges[] = { 0, 1, -1, 0x10000, -0x10000, 0x7fffffff, (int32_t)0x80000000, 0x1000001, 0x1000003,
+                                  -0x1000001, 0x7fffff80, 0x7fffffc0 };
+        for (int32_t whole : edges)
+            REQUIRE(Bits(X87S_MUL_FIX16(whole, scale)) == Bits(X87S_MUL(whole, scale)));
+        for (int i = 0; i < 2000000; i++) {
+            const int32_t whole = (int32_t)Random(), small = whole >> (Random() % 32);
+            REQUIRE(Bits(X87S_MUL_FIX16(whole, scale)) == Bits(X87S_MUL(whole, scale)));
+            REQUIRE(Bits(X87S_MUL_FIX16(small, scale)) == Bits(X87S_MUL(small, scale)));
+            REQUIRE(Bits(X87S_MUL(whole, scale)) == Bits(ReferenceMul(whole, scale)));
+        }
+    }
     // A number times a power of two, through the exponents: inside the
     // range of the short way, at its edges and beyond them.
     for (int i = 0; i < 2000000; i++) {
