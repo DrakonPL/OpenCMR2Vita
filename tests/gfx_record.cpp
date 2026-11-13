@@ -28,8 +28,11 @@ extern "C" int Sys_GetOption(const char *, int fallback) { return fallback; }
 // on. The recorder reads the settings again at each present.
 int s_cullDraws = 0;
 int s_alphaBlend = 1, s_alphaTest = 1;     // video.alpha_blend, video.alpha_test
+int s_perfStats = 1;                        // video.perf_stats
 int Platform_GetSettingInt(const char *key, int value)
 {
+    if (strcmp(key, "video.perf_stats") == 0)
+        return s_perfStats;
     if (strcmp(key, "video.alpha_blend") == 0)
         return s_alphaBlend;
     if (strcmp(key, "video.alpha_test") == 0)
@@ -1058,6 +1061,27 @@ int main()
         Gfx_SetAlphaTest(FALSE);
         Gfx_SetAlphaFunc(GFX_CMP_ALWAYS);
         Gfx_SetAlphaRef(0);
+    }
+
+    // The performance stats (video.perf_stats = 0): the recorder counts no
+    // small draw for the log. On again, it counts after the next log line.
+    {
+        char text[512];
+        s_joins = true;
+        const auto small = [&] {
+            Billboard(2.0f, 10.0f, 5.0f);
+            Gfx_Present(FALSE);
+            Gfx_RecorderCountsText(text, sizeof(text));
+            return strstr(text, "small draws 1 ") != NULL;
+        };
+        Gfx_RecorderCountsText(text, sizeof(text));
+        REQUIRE(Gfx_PerfStatsWanted() && small());
+        s_perfStats = 0;
+        Gfx_Present(FALSE);
+        REQUIRE(!Gfx_PerfStatsWanted() && !small());
+        s_perfStats = 1;
+        Gfx_Present(FALSE);
+        REQUIRE(Gfx_PerfStatsWanted() && !small() && small());
     }
 
     printf("gfx_record: ok\n");

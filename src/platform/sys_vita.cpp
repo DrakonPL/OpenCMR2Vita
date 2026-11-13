@@ -423,16 +423,29 @@ void SysVita_RecorderSample(unsigned long long micros)
     s_frameParts.recorderMicros += micros * kRecorderSampleEvery;
 }
 
-void SysVita_FramePresented(void)
+void SysVita_FramePresented(bool stats)
 {
     constexpr uint64_t kPeriodMicros = 5000000;
     static uint64_t last, periodStart;
     static unsigned frames, periodFrames;
     static double sumMs, maxMs;
     static bool first = true;
+    // The parts of the frames are given only for a period with the stats on
+    // from its start.
+    static bool partsValid = true;
     const uint64_t now = sceKernelGetProcessTimeWide();
-    if (Diagnostics::observer == nullptr)
+    if (!stats) {
+        Diagnostics::observer = nullptr;
+        partsValid = false;
+    } else if (Diagnostics::observer == nullptr) {
+        // The hooks start again here: no part runs, no present runs.
+        s_frameParts.Reset();
+        s_frameParts.part = Diagnostics::SCENE_PART_NONE;
+        s_frameParts.partDrawsStart = g_sysVitaDrawCounts;
+        s_frameParts.presentStart = now;
+        s_frameParts.inTick = false;
         Diagnostics::observer = &s_frameParts;
+    }
     if (last != 0) {
         const double ms = (double)(now - last) / 1000.0;
         sumMs += ms;
@@ -452,7 +465,9 @@ void SysVita_FramePresented(void)
     Sys_Log("heartbeat: %.1f s, frames %u, frame ms avg %.2f max %.2f, heap used %d KB of %d KB, files open %d",
             (double)now / 1e6, frames, periodFrames ? sumMs / periodFrames : 0.0, maxMs, heap.uordblks / 1024,
             heap.arena / 1024, s_openFiles);
-    if (periodFrames > 0) {
+    if (!stats)
+        Sys_Log("heartbeat: the performance stats are off (video.perf_stats = 0)");
+    if (periodFrames > 0 && partsValid) {
         // The scene: the frame without its ticks and its present.
         const FrameParts &p = s_frameParts;
         const double perFrame = 1000.0 * periodFrames;
@@ -501,6 +516,7 @@ void SysVita_FramePresented(void)
             Sys_Log("heartbeat: draws per frame (calls>commands, vertices copied):%s", text);
     }
     s_frameParts.Reset();
+    partsValid = stats;
     periodStart = now;
     periodFrames = 0;
     sumMs = maxMs = 0.0;

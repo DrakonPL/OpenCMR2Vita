@@ -385,6 +385,13 @@ int s_cullSetting = -2, s_snapshotSetting = -2, s_mergeGroundSetting = -2;
 // particles) then are opaque. The 2D draws (the HUD, the menus) keep both.
 // The screen options of the graphics menu set them.
 int s_alphaBlendSetting = 1, s_alphaTestSetting = 1;
+// video.perf_stats: 0 stops the performance stats of a development build,
+// for a measurement without their cost: the counts of the recorder, the time
+// of the recorder and of the parts of a frame, the executor's lines in the
+// log and its time of the backdrop copy (which waits for the GPU). The
+// heartbeat keeps its frame time line. The screen options of the graphics
+// menu set it.
+int s_perfStatsSetting = 1;
 
 // What the recorded state of the draw that is recorded now leaves out:
 // OVERRIDE_BLEND, OVERRIDE_TEST. A 3D draw and a 2D draw with one state of
@@ -399,6 +406,10 @@ void ReadDrawSettings()
     s_mergeGroundSetting = Platform_GetSettingInt("video.merge_ground", -1);
     s_alphaBlendSetting = Platform_GetSettingInt("video.alpha_blend", 1);
     s_alphaTestSetting = Platform_GetSettingInt("video.alpha_test", 1);
+    s_perfStatsSetting = Platform_GetSettingInt("video.perf_stats", 1);
+    // A log asks for the counts again after the stats are on again.
+    if (s_perfStatsSetting == 0)
+        s_countsWanted = false;
 }
 
 // The override of a draw (s_drawOverride).
@@ -789,7 +800,7 @@ void RecordDraw(int primitive, bool transformed, const void *vertices, DWORD ver
     g_sysVitaDrawCounts.calls++;
     // The heartbeat's recorder time, from one draw in kRecorderSampleEvery.
     static unsigned count;
-    if (++count % kRecorderSampleEvery == 0) {
+    if (s_perfStatsSetting != 0 && ++count % kRecorderSampleEvery == 0) {
         const unsigned long long start = SysVita_Micros();
         RecordDrawNow(primitive, transformed, vertices, vertexCount, indices, indexCount, buffer, firstVertex);
         SysVita_RecorderSample(SysVita_Micros() - start);
@@ -1315,7 +1326,7 @@ static void Present(BOOL vsync, bool stretch)
     AtlasGrow();
     ReadDrawSettings();
 #if defined(VITA) && defined(OPENCMR2_DEV)
-    SysVita_FramePresented();
+    SysVita_FramePresented(s_perfStatsSetting != 0);
 #endif
     s_stateDirty = true;
     // A frame always starts on the back buffer.
@@ -1357,7 +1368,14 @@ void Gfx_RecorderCountsText(char *text, size_t size)
     list("state parts", n.changed, kChangedNames, CHANGED_COUNT);
     list("no atlas", n.noAtlas, kNoAtlasNames, NO_ATLAS_COUNT);
     s_counts = RecorderCounts();
-    s_countsWanted = true;
+    s_countsWanted = s_perfStatsSetting != 0;
+}
+
+bool Gfx_PerfStatsWanted(void)
+{
+    if (s_cullSetting == -2)
+        ReadDrawSettings();
+    return s_perfStatsSetting != 0;
 }
 
 static void Flush(void)
