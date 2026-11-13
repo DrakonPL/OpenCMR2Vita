@@ -283,6 +283,10 @@ struct GfxExecutor {
                          bool vsync, bool stretch = false) = 0;
     // Returns when no Execute runs (the threaded executor's worker is idle).
     virtual void Wait() {}
+    // For the logs, from the threaded executor before each Prepare: the us
+    // the game's thread waited for the worker since the call before, and the
+    // us the worker took to expand the small batches of the last frame.
+    virtual void NoteWorkerTimes(unsigned, unsigned) {}
     virtual void DestroyTexture(GfxTexture *texture) = 0;
     virtual void DestroyVertexBuffer(GfxVertexBuffer *) {}
     // Whether the recorder joins consecutive draws of one state from the

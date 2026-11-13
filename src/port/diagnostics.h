@@ -17,13 +17,23 @@ enum {
     SCENE_PART_NODES,       // the nodes of the sectors: the cars and what moves
     SCENE_PART_LAYERS,      // the glow, the 2D and 3D layers, the lines
     // The parts of the update of a view, before its scene is drawn.
-    SCENE_PART_VIEW,        // the nodes of the view, the weather lighting, the skid effects
+    SCENE_PART_VIEW,        // the rest of the update of the view
     SCENE_PART_PREPARE,     // Game_PrepareScene
     SCENE_PART_CAR_SHADOWS, // the shadow geometry of the cars
     SCENE_PART_REFLECTIONS, // the cube maps of the car reflections, and the view masks of the cars
     SCENE_PART_HUD,         // the dash and the HUD of the view
-    SCENE_PART_OFF_ROAD,    // the off-road state of the cars in the view (a part of the view)
-    SCENE_PART_TYRE_MARKS,  // the skid trails and the tyre marks (a part of the view)
+    // The parts inside the parts above: their time is not in the part around them.
+    SCENE_PART_OFF_ROAD,    // the off-road state of the cars in the view (view)
+    SCENE_PART_TYRE_MARKS,  // the tyre mark triangles (view)
+    SCENE_PART_SECTOR_CULL, // the culling of the sector grid (setup)
+    SCENE_PART_RELIGHT,     // the relighting of the visible sectors (setup)
+    SCENE_PART_DEFERRED_SORT, // the order of the sorted stage objects (billboards)
+    SCENE_PART_GLOW,        // Glow_Draw (layers)
+    SCENE_PART_QUADS,       // Quad2D_DrawLayer: the 3D quads and triangles of a layer (layers)
+    SCENE_PART_2D,          // the 2D sprites, triangles and lines of a layer (setup, layers)
+    SCENE_PART_CAR_NODES,   // the nodes, the matrices and the weather lighting of the view (view)
+    SCENE_PART_WHEELS,      // the skid effects and the ground lighting of the wheels (view)
+    SCENE_PART_SKID_TRAILS, // the exhaust points and the new skid trail points (view)
     SCENE_PART_COUNT
 };
 
@@ -38,6 +48,8 @@ struct Observer {
     virtual void EndPresent() {}
     // A part of the scene starts (SCENE_PART_*): the part before it ends.
     virtual void ScenePart(int part) {}
+    // The part that runs now.
+    virtual int Part() const { return SCENE_PART_NONE; }
 };
 extern Observer *observer;
 
@@ -52,6 +64,26 @@ inline void ScenePart(int part)
 struct ScenePartScope {
     explicit ScenePartScope(int part) { ScenePart(part); }
     ~ScenePartScope() { ScenePart(SCENE_PART_NONE); }
+};
+
+// A part inside another for the rest of a block: the outer part goes on
+// after it. No observer: no cost.
+struct ScenePartNest {
+    explicit ScenePartNest(int part) : outer(observer ? observer->Part() : -1)
+    {
+        if (outer >= 0)
+            observer->ScenePart(part);
+    }
+    ~ScenePartNest()
+    {
+        if (outer >= 0 && observer)
+            observer->ScenePart(outer);
+    }
+    ScenePartNest(const ScenePartNest &) = delete;
+    ScenePartNest &operator=(const ScenePartNest &) = delete;
+
+private:
+    const int outer;    // -1: no observer at the start
 };
 }
 #endif

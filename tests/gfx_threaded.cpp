@@ -31,6 +31,9 @@ struct SlowExecutor : GfxExecutor {
     std::atomic<int> batchesSeen{ 0 };      // GFX_CMD_SMALL_BATCH commands that reached Execute
     std::atomic<int> destroyed{ 0 };
     std::atomic<int> finished{ 0 };         // frames whose Execute ended
+    unsigned long long notedWait = 0;       // us, the sum of NoteWorkerTimes
+    std::vector<int> notesBeforePrepare;    // the NoteWorkerTimes calls before each Prepare
+    int notes = 0;
     // The threaded executor: Execute calls its Wait, as a system dialog does
     // from the GXM executor (Gfx_WaitForExecutor). It returns at once there.
     GfxExecutor *owner = nullptr;
@@ -54,8 +57,15 @@ struct SlowExecutor : GfxExecutor {
         if (std::this_thread::get_id() != caller)
             preparedElsewhere++;
         preparedCounts.push_back(frame.commands.size());
+        notesBeforePrepare.push_back(notes);
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         preparing = false;
+    }
+    void NoteWorkerTimes(unsigned waitMicros, unsigned) override
+    {
+        Check();
+        notedWait += waitMicros;
+        notes++;
     }
     void Execute(GfxFrame &frame, std::vector<GfxTexture *> &, GfxReadback &, bool, bool, bool) override
     {
@@ -124,9 +134,14 @@ int main()
     REQUIRE(slow->preparedCounts.size() == 1 && slow->preparedCounts[0] == 3);
 
     // The next frame waits for it: the frames run in their order, one at a
-    // time. A texture that goes waits for the frame that runs.
+    // time. A texture that goes waits for the frame that runs. The wait (most
+    // of the 30 ms of the first frame) goes to the inner executor before the
+    // Prepare of the frame.
+    REQUIRE(slow->notedWait == 0);
     frame = FrameOf(5);
     threaded->Execute(frame, textures, readback, true, false, false);
+    REQUIRE(slow->notedWait >= 20000);
+    REQUIRE(slow->notesBeforePrepare.size() == 2 && slow->notesBeforePrepare[1] == 2);
     UntilRunning(*slow);
     threaded->DestroyTexture(nullptr);
     frame = FrameOf(2);

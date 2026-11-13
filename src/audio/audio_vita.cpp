@@ -10,6 +10,7 @@
 #include "port/sys.h"
 
 #include <psp2/audioout.h>
+#include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 
 #include <stdint.h>
@@ -29,6 +30,8 @@ volatile bool s_quit;
 volatile bool s_paused;
 float s_mix[kBlockFrames * 2];
 int16_t s_pcm[2][kBlockFrames * 2];
+// SysVita_AudioBusyMicros: each written by one thread only.
+volatile uint32_t s_mixerBusyMicros, s_musicBusyMicros;
 
 // The rates a BGM port plays; another rate opens at 48000 Hz.
 int PortRate(int rate)
@@ -44,6 +47,7 @@ int Entry(SceSize, void *)
 {
     int block = 0;
     while (!s_quit) {
+        const SceUInt64 start = sceKernelGetProcessTimeWide();
         // Paused (the game is not in front): silence, and the sounds keep
         // their places.
         if (s_paused)
@@ -53,6 +57,7 @@ int Entry(SceSize, void *)
         int16_t *pcm = s_pcm[block];
         for (int i = 0; i < kBlockFrames * 2; i++)
             pcm[i] = (int16_t)(s_mix[i] * 32767.0f);
+        s_mixerBusyMicros += (uint32_t)(sceKernelGetProcessTimeWide() - start);
         sceAudioOutOutput(s_port, pcm);
         block ^= 1;
     }
@@ -125,13 +130,23 @@ int MusicEntry(SceSize, void *)
         if (s_musicQuit)
             break;
         Audio_LockMusic();
+        const SceUInt64 start = sceKernelGetProcessTimeWide();
         s_musicRefill();
+        s_musicBusyMicros += (uint32_t)(sceKernelGetProcessTimeWide() - start);
         Audio_UnlockMusic();
     }
     return 0;
 }
 
 } // namespace
+
+#ifdef OPENCMR2_DEV
+void SysVita_AudioBusyMicros(unsigned *mixer, unsigned *music)
+{
+    *mixer = s_mixerBusyMicros;
+    *music = s_musicBusyMicros;
+}
+#endif
 
 extern "C" BOOL Audio_StartMusicThread(void (*refill)(void), DWORD periodMs)
 {
