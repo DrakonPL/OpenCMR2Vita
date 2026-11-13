@@ -7,6 +7,9 @@
 
 #include "port/sys.h"
 #include "render/gfx_internal.h"
+#include "render/gxm_vertex_uniforms.h"
+
+#include <functional>
 
 #include <cstdio>
 #include <cstring>
@@ -117,6 +120,42 @@ bool IsIdentity(const GfxMatrix &m)
 {
     const GfxMatrix identity = Identity();
     return memcmp(&m, &identity, sizeof(m)) == 0;
+}
+
+// A mesh that is not small: it keeps its world matrix.
+void Mesh()
+{
+    GfxVertex mesh[18] = {};
+    mesh[1].x = 1.0f;
+    Gfx_DrawPrimitive(GFX_TRIANGLELIST, mesh, 18);
+}
+
+// Whether the vertex uniforms of two recorded states are the same: the rows
+// that the GXM executor gives a vertex program (gxm_vertex_uniforms.h).
+bool SameVertexRows(const GfxDrawState &a, const GfxDrawState &b)
+{
+    static float rowsA[VU_ROWS][4], rowsB[VU_ROWS][4];
+    Gxm_FillVertexUniforms(a, a.viewport, rowsA);
+    Gxm_FillVertexUniforms(b, b.viewport, rowsB);
+    return memcmp(rowsA, rowsB, sizeof(rowsA)) == 0;
+}
+
+// Draws a mesh, changes the state, draws again. 1: the vertex uniforms of the
+// two states differ and their numbers differ. 0: the uniforms and the numbers
+// are the same, in two states. -1: something else.
+int VersionAfter(const std::function<void()> &change)
+{
+    Mesh();
+    change();
+    Mesh();
+    Gfx_Present(FALSE);
+    if (Draws() != 2 || Draw(0).state == Draw(1).state)
+        return -1;
+    const GfxDrawState &a = s_frame.states[Draw(0).state], &b = s_frame.states[Draw(1).state];
+    const bool same = SameVertexRows(a, b);
+    if (same != (a.vertexVersion == b.vertexVersion))
+        return -1;
+    return same ? 0 : 1;
 }
 
 } // namespace
@@ -272,6 +311,134 @@ int main()
         REQUIRE(Draws() == 1 && s_frame.states[Draw(0).state].world._34 == 0.5f && Vertex3D(Draw(0), 1).x == 1.0f);
         world = Identity();
         Gfx_SetTransform(GFX_TRANSFORM_WORLD, &world);
+    }
+
+    // The number of a recorded state for the vertex program: it changes with
+    // each part that the vertex uniforms come from, and with no other part.
+    // The GXM executor does not look at a state whose number it has.
+    {
+        s_joins = false;
+        Gfx_SetLighting(TRUE);
+        Gfx_SetFog(TRUE);
+        GfxMatrix m = Identity();
+        m._42 = 3.0f;
+        GfxLight light{};
+        light.type = 3;
+        light.diffuse.r = 0.5f;
+        light.direction.z = 1.0f;
+        GfxMaterial material{};
+        material.diffuse.g = 0.25f;
+        material.power = 4.0f;
+        GfxViewport viewport{};
+        viewport.width = 320;
+        viewport.height = 240;
+        viewport.maxZ = 1.0f;
+        GfxTexture *road = Gfx_CreateTexture(8, 8, GFX_FORMAT_BGRA8, 1, 0);
+        const std::function<void()> vertexParts[] = {
+            [&] { Gfx_SetTransform(GFX_TRANSFORM_WORLD, &m); },
+            [&] { m._41 = 2.0f; Gfx_SetTransform(GFX_TRANSFORM_VIEW, &m); },
+            [&] { m._43 = 5.0f; Gfx_SetTransform(GFX_TRANSFORM_PROJECTION, &m); },
+            [&] { Gfx_SetTransform(GFX_TRANSFORM_TEXTURE0, &m); },
+            [&] { Gfx_SetTransform(GFX_TRANSFORM_TEXTURE1, &m); },
+            [&] { Gfx_EnableLight(1, TRUE); },
+            [&] { Gfx_SetLight(1, &light); },
+            [&] { Gfx_SetMaterial(&material); },
+            [] { Gfx_SetAmbient(0xff203040); },
+            [] { Gfx_SetSpecular(TRUE); },
+            [] { Gfx_SetLocalViewer(FALSE); },
+            [] { Gfx_SetNormalizeNormals(TRUE); },
+            [] { Gfx_SetColorVertex(FALSE); },
+            [] { Gfx_SetDiffuseMaterialSource(GFX_MCS_MATERIAL); },
+            [] { Gfx_SetSpecularMaterialSource(GFX_MCS_MATERIAL); },
+            [] { Gfx_SetAmbientMaterialSource(GFX_MCS_COLOR1); },
+            [] { Gfx_SetEmissiveMaterialSource(GFX_MCS_COLOR1); },
+            [] { Gfx_SetFogVertexMode(GFX_FOG_LINEAR); },
+            [] { Gfx_SetFog(FALSE); },
+            [] { Gfx_SetFog(TRUE); },
+            [] { Gfx_SetFogTableMode(GFX_FOG_LINEAR); },
+            [] { Gfx_SetFogStart(10.0f); },
+            [] { Gfx_SetFogEnd(90.0f); },
+            [] { Gfx_SetStageTexCoordIndex(0, 1); },
+            [] { Gfx_SetStageTextureTransform(1, GFX_TTFF_DISABLE + 2); },
+            [&] { Gfx_SetViewport(&viewport); },
+            [] { Gfx_SetLighting(FALSE); },
+        };
+        int index = 0;
+        for (const auto &change : vertexParts) {
+            if (VersionAfter(change) != 1) {
+                fprintf(stderr, "vertex part %d\n", index);
+                REQUIRE(false);
+            }
+            index++;
+        }
+        const std::function<void()> pixelParts[] = {
+            [&] { Gfx_SetTexture(0, road); },
+            [&] { Gfx_SetTexture(1, road); },
+            [] { Gfx_SetStageColorOp(1, GFX_TOP_MODULATE); },
+            [] { Gfx_SetStageColorArg1(0, GFX_TA_DIFFUSE); },
+            [] { Gfx_SetStageColorArg2(0, GFX_TA_TEXTURE); },
+            [] { Gfx_SetStageAlphaOp(1, GFX_TOP_MODULATE); },
+            [] { Gfx_SetStageAlphaArg1(0, GFX_TA_DIFFUSE); },
+            [] { Gfx_SetStageAlphaArg2(0, GFX_TA_TEXTURE); },
+            [] { Gfx_SetStageAddress(0, GFX_ADDRESS_CLAMP); },
+            [] { Gfx_SetStageMinFilter(0, GFX_FILTER_LINEAR); },
+            [] { Gfx_SetStageMagFilter(0, GFX_FILTER_LINEAR); },
+            [] { Gfx_SetStageMipFilter(0, GFX_MIPFILTER_LINEAR); },
+            [] { Gfx_SetStageMaxMipLevel(0, 2); },
+            [] { Gfx_SetStageBumpEnvLScale(0, 0.5f); },
+            [] { Gfx_SetStageBumpEnvLOffset(0, 0.25f); },
+            [] { Gfx_SetStageBumpEnvMat(0, 1, 0.75f); },
+            [] { Gfx_SetAlphaBlend(FALSE); },
+            [] { Gfx_SetSrcBlend(GFX_BLEND_SRCALPHA); },
+            [] { Gfx_SetDestBlend(GFX_BLEND_INVSRCALPHA); },
+            [] { Gfx_SetAlphaTest(TRUE); },
+            [] { Gfx_SetAlphaFunc(GFX_CMP_GREATEREQUAL); },
+            [] { Gfx_SetAlphaRef(0x55); },
+            [] { Gfx_SetTextureFactor(0x80808080); },
+            [] { Gfx_SetDepthTest(FALSE); },
+            [] { Gfx_SetDepthWrite(FALSE); },
+            [] { Gfx_SetDepthFunc(GFX_CMP_ALWAYS); },
+            [] { Gfx_SetCullMode(GFX_CULL_NONE); },
+            [] { Gfx_SetFogColor(0xff112233); },
+            [] { Gfx_SetDistanceFade(100.0f, 200.0f); },
+        };
+        index = 0;
+        for (const auto &change : pixelParts) {
+            if (VersionAfter(change) != 0) {
+                fprintf(stderr, "pixel part %d\n", index);
+                REQUIRE(false);
+            }
+            index++;
+        }
+        // The number stays over a present, and over a state that comes back.
+        Mesh();
+        Gfx_Present(FALSE);
+        const uint32_t version = s_frame.states[Draw(0).state].vertexVersion;
+        Mesh();
+        Gfx_SetAlphaRef(0x56);
+        Mesh();
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 2 && s_frame.states.size() == 2);
+        REQUIRE(s_frame.states[0].vertexVersion == version && s_frame.states[1].vertexVersion == version);
+        // A small draw in world space, then a mesh: the world matrix of the
+        // recorded states differs, and so do their numbers.
+        s_joins = true;
+        Billboard(2.0f, 10.0f, 5.0f);
+        Mesh();
+        Billboard(3.0f, 20.0f, 6.0f);
+        Billboard(4.0f, 30.0f, 7.0f);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 3 && s_frame.states.size() == 3);
+        REQUIRE(s_frame.states[0].vertexVersion != s_frame.states[1].vertexVersion);
+        REQUIRE(s_frame.states[1].vertexVersion != s_frame.states[2].vertexVersion);
+        REQUIRE(!SameVertexRows(s_frame.states[0], s_frame.states[1]));
+        // Back to the state the tests after this start from.
+        Gfx_SetTexture(0, NULL);
+        Gfx_SetTexture(1, NULL);
+        Gfx_DestroyTexture(road);
+        m = Identity();
+        Gfx_SetTransform(GFX_TRANSFORM_WORLD, &m);
+        Gfx_SetAlphaRef(0);
     }
 
     // A vertex buffer the game has just locked is not drawn by reference:

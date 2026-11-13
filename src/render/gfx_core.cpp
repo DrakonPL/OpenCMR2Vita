@@ -24,6 +24,10 @@ namespace {
 GfxExecutor *s_executor;
 GfxDrawState s_state;
 bool s_stateDirty = true;
+// A part of the state that a vertex program reads changed since the state
+// recorded last (GfxDrawState::vertexVersion), and the number of that state.
+bool s_vertexDirty = true;
+uint32_t s_vertexVersion;
 GfxFrame s_frame;
 GfxReadback s_readback;
 std::vector<GfxTexture *> s_textures;     // every live texture (not face views)
@@ -61,11 +65,13 @@ void ResetState()
     s_state.viewport.minZ = 0.0f;
     s_state.viewport.maxZ = 1.0f;
     s_stateDirty = true;
+    s_vertexDirty = true;
 }
 
 inline void Touch()
 {
     s_stateDirty = true;
+    s_vertexDirty = true;
 }
 
 const GfxMatrix &RecordedWorldOf(bool worldSpace);
@@ -79,6 +85,17 @@ template <typename T> inline void Set(T &field, const T &value)
     if (memcmp(&field, &value, sizeof(T)) != 0) {
         field = value;
         Touch();
+    }
+}
+
+// Sets a part of the state that no vertex program reads: the textures, the
+// stage operations, the blending, the tests of a pixel.
+// tests/gfx_record.cpp checks the choice against the vertex uniforms.
+template <typename T> inline void SetPixels(T &field, const T &value)
+{
+    if (memcmp(&field, &value, sizeof(T)) != 0) {
+        field = value;
+        s_stateDirty = true;
     }
 }
 
@@ -194,10 +211,15 @@ bool StateIsRecorded(bool worldSpace)
 uint32_t RecordState(bool worldSpace = false)
 {
     if (!StateIsRecorded(worldSpace)) {
+        const GfxMatrix &world = RecordedWorldOf(worldSpace);
+        if (s_vertexDirty || memcmp(&world, &s_recordedWorld, sizeof(world)) != 0)
+            s_vertexVersion++;
         s_frame.states.push_back(s_state);
-        s_frame.states.back().world = RecordedWorldOf(worldSpace);
-        s_recordedWorld = RecordedWorldOf(worldSpace);
+        s_frame.states.back().world = world;
+        s_frame.states.back().vertexVersion = s_vertexVersion;
+        s_recordedWorld = world;
         s_stateDirty = false;
+        s_vertexDirty = false;
     }
     return (uint32_t)s_frame.states.size() - 1;
 }
@@ -788,8 +810,8 @@ extern "C" void Gfx_CaptureBackdrop(void)
 
 extern "C" void Gfx_SetDistanceFade(float start, float end)
 {
-    Set(s_state.fadeStart, start);
-    Set(s_state.fadeEnd, end);
+    SetPixels(s_state.fadeStart, start);
+    SetPixels(s_state.fadeEnd, end);
 }
 
 // ---- fixed-function state --------------------------------------------------------------
@@ -851,18 +873,25 @@ SETTER(Gfx_SetDiffuseMaterialSource, int, diffuseSource)
 SETTER(Gfx_SetSpecularMaterialSource, int, specularSource)
 SETTER(Gfx_SetAmbientMaterialSource, int, ambientSource)
 SETTER(Gfx_SetEmissiveMaterialSource, int, emissiveSource)
-SETTER(Gfx_SetFogColor, DWORD, fogColor)
 SETTER(Gfx_SetFogVertexMode, int, fogVertexMode)
 SETTER(Gfx_SetFogTableMode, int, fogTableMode)
 SETTER(Gfx_SetFogStart, float, fogStart)
 SETTER(Gfx_SetFogEnd, float, fogEnd)
-SETTER(Gfx_SetDepthFunc, int, depthFunc)
-SETTER(Gfx_SetCullMode, int, cull)
-SETTER(Gfx_SetSrcBlend, int, srcBlend)
-SETTER(Gfx_SetDestBlend, int, destBlend)
-SETTER(Gfx_SetAlphaFunc, int, alphaFunc)
-SETTER(Gfx_SetAlphaRef, DWORD, alphaRef)
-SETTER(Gfx_SetTextureFactor, DWORD, textureFactor)
+
+#define PIXEL_SETTER(name, type, field) \
+    extern "C" void name(type value)    \
+    {                                   \
+        SetPixels<decltype(s_state.field)>(s_state.field, value); \
+    }
+
+PIXEL_SETTER(Gfx_SetFogColor, DWORD, fogColor)
+PIXEL_SETTER(Gfx_SetDepthFunc, int, depthFunc)
+PIXEL_SETTER(Gfx_SetCullMode, int, cull)
+PIXEL_SETTER(Gfx_SetSrcBlend, int, srcBlend)
+PIXEL_SETTER(Gfx_SetDestBlend, int, destBlend)
+PIXEL_SETTER(Gfx_SetAlphaFunc, int, alphaFunc)
+PIXEL_SETTER(Gfx_SetAlphaRef, DWORD, alphaRef)
+PIXEL_SETTER(Gfx_SetTextureFactor, DWORD, textureFactor)
 
 #define BOOL_SETTER(name, field)        \
     extern "C" void name(BOOL value)    \
@@ -876,10 +905,17 @@ BOOL_SETTER(Gfx_SetLocalViewer, localViewer)
 BOOL_SETTER(Gfx_SetNormalizeNormals, normalizeNormals)
 BOOL_SETTER(Gfx_SetColorVertex, colorVertex)
 BOOL_SETTER(Gfx_SetFog, fog)
-BOOL_SETTER(Gfx_SetDepthTest, depthTest)
-BOOL_SETTER(Gfx_SetDepthWrite, depthWrite)
-BOOL_SETTER(Gfx_SetAlphaBlend, alphaBlend)
-BOOL_SETTER(Gfx_SetAlphaTest, alphaTest)
+
+#define PIXEL_BOOL_SETTER(name, field)  \
+    extern "C" void name(BOOL value)    \
+    {                                   \
+        SetPixels<bool>(s_state.field, value != 0); \
+    }
+
+PIXEL_BOOL_SETTER(Gfx_SetDepthTest, depthTest)
+PIXEL_BOOL_SETTER(Gfx_SetDepthWrite, depthWrite)
+PIXEL_BOOL_SETTER(Gfx_SetAlphaBlend, alphaBlend)
+PIXEL_BOOL_SETTER(Gfx_SetAlphaTest, alphaTest)
 
 #define STAGE_SETTER(name, type, field)             \
     extern "C" void name(int stage, type value)     \
@@ -889,28 +925,37 @@ BOOL_SETTER(Gfx_SetAlphaTest, alphaTest)
             Set<decltype(s->field)>(s->field, value); \
     }
 
-STAGE_SETTER(Gfx_SetTexture, GfxTexture *, texture)
-STAGE_SETTER(Gfx_SetStageColorOp, int, colorOp)
-STAGE_SETTER(Gfx_SetStageColorArg1, int, colorArg1)
-STAGE_SETTER(Gfx_SetStageColorArg2, int, colorArg2)
-STAGE_SETTER(Gfx_SetStageAlphaOp, int, alphaOp)
-STAGE_SETTER(Gfx_SetStageAlphaArg1, int, alphaArg1)
-STAGE_SETTER(Gfx_SetStageAlphaArg2, int, alphaArg2)
-STAGE_SETTER(Gfx_SetStageAddress, int, address)
-STAGE_SETTER(Gfx_SetStageMinFilter, int, minFilter)
-STAGE_SETTER(Gfx_SetStageMagFilter, int, magFilter)
-STAGE_SETTER(Gfx_SetStageMipFilter, int, mipFilter)
-STAGE_SETTER(Gfx_SetStageMaxMipLevel, int, maxMipLevel)
 STAGE_SETTER(Gfx_SetStageTexCoordIndex, DWORD, texCoordIndex)
 STAGE_SETTER(Gfx_SetStageTextureTransform, int, textureTransform)
-STAGE_SETTER(Gfx_SetStageBumpEnvLScale, float, bumpLumScale)
-STAGE_SETTER(Gfx_SetStageBumpEnvLOffset, float, bumpLumOffset)
+
+#define PIXEL_STAGE_SETTER(name, type, field)       \
+    extern "C" void name(int stage, type value)     \
+    {                                               \
+        GfxStageState *s = Stage(stage);            \
+        if (s != NULL)                              \
+            SetPixels<decltype(s->field)>(s->field, value); \
+    }
+
+PIXEL_STAGE_SETTER(Gfx_SetTexture, GfxTexture *, texture)
+PIXEL_STAGE_SETTER(Gfx_SetStageColorOp, int, colorOp)
+PIXEL_STAGE_SETTER(Gfx_SetStageColorArg1, int, colorArg1)
+PIXEL_STAGE_SETTER(Gfx_SetStageColorArg2, int, colorArg2)
+PIXEL_STAGE_SETTER(Gfx_SetStageAlphaOp, int, alphaOp)
+PIXEL_STAGE_SETTER(Gfx_SetStageAlphaArg1, int, alphaArg1)
+PIXEL_STAGE_SETTER(Gfx_SetStageAlphaArg2, int, alphaArg2)
+PIXEL_STAGE_SETTER(Gfx_SetStageAddress, int, address)
+PIXEL_STAGE_SETTER(Gfx_SetStageMinFilter, int, minFilter)
+PIXEL_STAGE_SETTER(Gfx_SetStageMagFilter, int, magFilter)
+PIXEL_STAGE_SETTER(Gfx_SetStageMipFilter, int, mipFilter)
+PIXEL_STAGE_SETTER(Gfx_SetStageMaxMipLevel, int, maxMipLevel)
+PIXEL_STAGE_SETTER(Gfx_SetStageBumpEnvLScale, float, bumpLumScale)
+PIXEL_STAGE_SETTER(Gfx_SetStageBumpEnvLOffset, float, bumpLumOffset)
 
 extern "C" void Gfx_SetStageBumpEnvMat(int stage, int index, float value)
 {
     GfxStageState *s = Stage(stage);
     if (s != NULL && index >= 0 && index < 4)
-        Set(s->bumpMat[index], value);
+        SetPixels(s->bumpMat[index], value);
 }
 
 // ---- geometry ----------------------------------------------------------------------

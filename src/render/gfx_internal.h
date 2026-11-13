@@ -99,6 +99,13 @@ struct GfxDrawState {
     GfxStageState stages[2];
     GfxViewport viewport;
     int screenW = 0, screenH = 0;   // Gfx_SetVirtualScreen (0: the back buffer's size)
+    // In a recorded state: a number that goes up when a part that a vertex
+    // program reads changes (the transforms, the lights, the material, the
+    // fog, the texture coordinate sources, the viewport). Two recorded states
+    // with one number have those parts equal: an executor can tell so
+    // without a look at them. Most draws of a stage differ from the draw
+    // before only in their textures.
+    uint32_t vertexVersion = 0;
 };
 
 enum GfxCommandType {
