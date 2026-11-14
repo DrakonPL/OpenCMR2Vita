@@ -216,9 +216,6 @@ struct Stats {
     // without it, or with it for want of a variant without it.
     unsigned alphaTestDropped = 0, alphaTestNoVariant = 0;
     unsigned alphaOwnVertices = 0;      // the frame's own vertices read for it
-    // Blended draws that write the depth drawn in two passes (SplitPasses):
-    // with the order of their triangles turned, and without.
-    unsigned splitDraws = 0, splitNotTurned = 0;
     unsigned skyPlans[GFX_SKY_RESULT_COUNT] = {};
     // The time of Prepare (the game's thread) and of Execute without the
     // wait of its present (the worker with the threaded executor), and the
@@ -288,8 +285,7 @@ enum ProbeMode {
     PROBE_SINGLE_PASS, PROBE_TWO_PASSES, PROBE_NO_BLENDED_3D, PROBE_NO_2D, PROBE_NO_QUADS, PROBE_NO_LAYERS,
     PROBE_NO_BILLBOARDS, PROBE_NO_PARTICLES, PROBE_NO_BLENDED_SKY, PROBE_NO_BLENDED_GROUND,
     PROBE_NO_BLENDED_OBJECTS, PROBE_NO_BLENDED_NODES, PROBE_SKY_WHITE, PROBE_SKY_OPAQUE, PROBE_TREES_WHITE,
-    PROBE_SKY_AS_RECORDED, PROBE_SKY_FULL, PROBE_SKY_HALF, PROBE_SKY_NO_STENCIL, PROBE_ALPHA_TEST_KEPT,
-    PROBE_TREES_AS_RECORDED, PROBE_TREES_NOT_TURNED, PROBE_END
+    PROBE_SKY_AS_RECORDED, PROBE_SKY_FULL, PROBE_SKY_HALF, PROBE_SKY_NO_STENCIL, PROBE_ALPHA_TEST_KEPT, PROBE_END
 };
 const char *const kProbeNames[PROBE_END] = { "off",         "normal",        "quarter", "tile",
                                              "no 3D",       "no depth pass", "general", "fade always",
@@ -299,7 +295,7 @@ const char *const kProbeNames[PROBE_END] = { "off",         "normal",        "qu
                                              "no blended sky", "no blended ground", "no blended objects",
                                              "no blended nodes", "sky white", "sky opaque", "trees white",
                                              "sky as recorded", "sky full", "sky half", "sky no stencil",
-                                             "alpha test kept", "trees as recorded", "trees not turned" };
+                                             "alpha test kept" };
 
 // The steps the profile mode times: an Execute before its draws, then the
 // steps of a 3D draw in Draw's order.
@@ -340,12 +336,9 @@ enum ProfileSection {
 // ask. "alpha test kept" draws a draw without blending whose alpha test
 // passes for each pixel with the test, as recorded (normal: without it).
 // The mode "tile" left the cycle: "no 3D" gives the cost of the CPU.
-// The trees (the blended draws that write the depth): "trees as recorded"
-// draws them in one pass, "trees not turned" in two passes with the solid
-// one in the game's order, "no billboards" without them. The sky's modes
-// and "alpha test kept" left the cycle: their questions are answered.
-const int kProbeCycle[] = { PROBE_NORMAL,        PROBE_NO_3D,             PROBE_NO_BLENDED_3D,
-                            PROBE_NO_BILLBOARDS, PROBE_TREES_AS_RECORDED, PROBE_TREES_NOT_TURNED };
+const int kProbeCycle[] = { PROBE_NORMAL,          PROBE_NO_3D,           PROBE_ALPHA_TEST_KEPT,
+                            PROBE_NO_BLENDED_3D,   PROBE_NO_BLENDED_SKY,  PROBE_SKY_AS_RECORDED,
+                            PROBE_SKY_FULL,        PROBE_SKY_HALF,        PROBE_SKY_NO_STENCIL };
 
 // The part whose blended 3D draws a mode leaves out, or -1.
 int ProbeBlendedPart(int mode)
@@ -455,9 +448,6 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     // backdrop, its viewport scaled to the backdrop's size.
     GfxSkyPlan skyPlan;
     bool skyUsed = false, skyStretched = false, skyStenciled = false;
-    // video.split_blend: a blended draw that writes the depth (the trees)
-    // in two passes, its solid texels first (see Draw).
-    bool splitBlend = true;
     bool drawStencil = false, intoBackdrop = false;
     // The readback: the notification word the GPU writes after a frame that
     // has one, the last value asked for, and the read not collected yet.
@@ -794,7 +784,6 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
 #else
         showFps = Platform_GetSettingInt("video.show_fps", 0) != 0;
 #endif
-        splitBlend = Platform_GetSettingInt("video.split_blend", 1) != 0;
         // Without it the scenery does not fade, and the game still runs.
         const int scale = Platform_GetSettingInt("video.backdrop_scale", 2);
         backdropScale = scale < 1 ? 1 : scale > 4 ? 4 : scale;
@@ -989,11 +978,11 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         return it->second.general;
     }
 
-    // Whether the variant of a key and an alpha test form (0: none) is made
-    // for the arguments key (not the general one).
-    bool HasMadeVariant(uint64_t key, uint64_t args, uint64_t form = 0) const
+    // Whether the variant of a key without the alpha test is made for the
+    // arguments key (not the general one).
+    bool HasMadeVariant(uint64_t key, uint64_t args) const
     {
-        auto it = variantIndex.find(key << 2 | form);
+        auto it = variantIndex.find(key << 2);
         if (it == variantIndex.end())
             return false;
         for (const auto &made : it->second.made)
@@ -1550,65 +1539,6 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         return AlphaTestAlwaysPasses(s, range);
     }
 
-    // The two passes of a blended draw that writes the depth (see Draw):
-    // false where its solid pass has no program. pass: Draw's pass, which
-    // reads indices and count.
-    template <typename Pass>
-    bool SplitPasses(const GfxCommand &c, GfxFrame &frame, GfxDrawState &s, uint64_t key, uint64_t args,
-                     int blendedVariant, SceGxmFragmentProgram *blendedFragment, const uint16_t *&indices,
-                     unsigned count, Pass &pass)
-    {
-        // The solid pass takes the variant with the discard made for the
-        // draw's arguments (variants.txt has one for each blended one), not
-        // the general one.
-        if (!HasMadeVariant(key, args, 1))
-            return false;
-        // The solid pass: the alpha test at 255, no blending.
-        const bool blend = s.alphaBlend;
-        const int alphaFunc = s.alphaFunc;
-        const DWORD alphaRef = s.alphaRef;
-        s.alphaBlend = false;
-        s.alphaFunc = GFX_CMP_GREATEREQUAL;
-        s.alphaRef = 255;
-        fragmentRowsState = nullptr;
-        Resolved *solid = Resolve(key, args, s, false);
-        bool done = false;
-        if (solid != nullptr) {
-            // The triangles near to far: the turned order of the list, each
-            // triangle as it is (its winding stays).
-            const uint16_t *given = indices;
-            const uint16_t *turned = nullptr;
-            if (c.primitive == GFX_TRIANGLELIST && c.firstIndex != ~0u && count % 3 == 0 &&
-                (size_t)c.firstIndex + count <= frame.indices.size() && probe.mode != PROBE_TREES_NOT_TURNED) {
-                const unsigned offset = memory.FrameRing().Alloc(count * 2, 4);
-                if (offset != GxmFrameRing::kFull) {
-                    uint16_t *out = (uint16_t *)memory.FrameRing().At(offset);
-                    const uint16_t *in = &frame.indices[c.firstIndex];
-                    const unsigned triangles = count / 3;
-                    for (unsigned t = 0; t < triangles; t++)
-                        memcpy(out + 3 * t, in + 3 * (triangles - 1 - t), 3 * sizeof(uint16_t));
-                    turned = out;
-                }
-            }
-            indices = turned != nullptr ? turned : given;
-            pass(solid->variant, solid->fragment, SCE_GXM_DEPTH_FUNC_LESS_EQUAL, true);
-            indices = given;
-            stats.splitDraws++;
-            stats.splitNotTurned += turned == nullptr ? 1 : 0;
-            done = true;
-        }
-        s.alphaBlend = blend;
-        s.alphaFunc = alphaFunc;
-        s.alphaRef = alphaRef;
-        fragmentRowsState = nullptr;
-        if (!done)
-            return false;
-        // The blended pass, as the single pass draws it: what is in front of
-        // the solid texels.
-        pass(blendedVariant, blendedFragment, SCE_GXM_DEPTH_FUNC_LESS, true);
-        return true;
-    }
-
     // vertexOffset, indexOffset: the Execute's data in the ring (kFull: none).
     void Draw(const GfxCommand &c, GfxFrame &frame, unsigned vertexOffset, unsigned indexOffset,
               bool backBuffer, int targetW, int targetH)
@@ -1967,24 +1897,6 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         };
         SceGxmDepthFunc func = s.depthTest ? DepthFunc(s.depthFunc) : SCE_GXM_DEPTH_FUNC_ALWAYS;
         bool depthWrite = s.depthTest && s.depthWrite;
-        // A blended draw that writes the depth, with the single pass (the
-        // trees, sorted far to near): each tree's fragments were shaded and
-        // blended, also those that a nearer tree covers. First its solid
-        // texels (alpha 1) without blending, with the order of its
-        // triangles turned: near to far, the GPU leaves out what they
-        // cover. Then the blended pass in the game's order with the depth
-        // test "less": only what is in front of the nearest solid texel.
-        // A pixel ends as before: a solid texel replaces what is behind it
-        // and keeps no colour of it. Where the game's order of the trees is
-        // wrong for a pixel, an edge in front of a farther tree shows that
-        // tree, not the ground behind it.
-        if (splitBlend && depthCandidate && fragment == resolved->single && resolved->single != nullptr &&
-            !drawStencil && !intoBackdrop && !c.transformed && probe.mode != PROBE_TREES_AS_RECORDED &&
-            (func == SCE_GXM_DEPTH_FUNC_LESS_EQUAL || func == SCE_GXM_DEPTH_FUNC_LESS) &&
-            SplitPasses(c, frame, drawState, key, args, variant, fragment, indices, count, pass)) {
-            step(PROFILE_PASSES);
-            return;
-        }
         if (depthProgram != nullptr && !drawStencil) {
             pass(depthVariant, depthProgram, func, true);
             stats.depthPasses++;
@@ -2705,8 +2617,6 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         gpuTextures.tileTexels = 0;
         // The skies: into the backdrop, stretched, the stencil draws of the
         // near ground, and the plans that drew the sky as recorded.
-        Sys_Log("gxm: per s split blends: %u draws in two passes, %u of them in the game's order",
-                stats.splitDraws, stats.splitNotTurned);
         Sys_Log("gxm: per s alpha test: %u draws without it (it passes for each pixel), %u with it for want of "
                 "a variant, %u own vertices read",
                 stats.alphaTestDropped, stats.alphaTestNoVariant, stats.alphaOwnVertices);

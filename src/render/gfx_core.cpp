@@ -1938,19 +1938,35 @@ extern "C" void Gfx_WriteVertexBufferRange(GfxVertexBuffer *buffer, DWORD firstV
     }
     GfxVertex *target = &buffer->vertices[firstVertex];
     // The vertices that the buffer has: nothing changes, and no draw of
-    // them is a draw of changed vertices.
-    if (memcmp(target, vertices, bytes) == 0)
+    // them is a draw of changed vertices. The first vertex that differs is
+    // found before BeginRangeWrite, which can run the draws recorded so
+    // far: those take the buffer as it is.
+    DWORD first = 0;
+    while (first < vertexCount && memcmp(&target[first], &vertices[first], sizeof(GfxVertex)) == 0)
+        first++;
+    if (first == vertexCount)
         return;
     BeginRangeWrite(buffer, firstVertex, vertexCount);
-    // The least alpha of the buffer, from the vertices that come in.
-    ScanAlpha(vertices, vertexCount, buffer->leastAlpha);
+    // One pass over the rest: each changed vertex is copied and gives the
+    // least alpha of the buffer (an unchanged one gave it when it came).
     // The boxes of these vertices stay while their positions stay (the
     // stage lighting writes colours: a box measured again for each draw of
-    // each mesh in the view took 1 to 2 ms of a frame of a wood).
+    // each mesh in the view took 1 to 2 ms of a frame of a wood). The
+    // stage lighting writes all the meshes in the view again when the light
+    // of the scene changes: four passes over them took 14 to 22 ms of a
+    // frame on the PS Vita.
     bool moved = false;
-    for (DWORD i = 0; i < vertexCount && !moved; i++)
-        moved = memcmp(&target[i].x, &vertices[i].x, 3 * sizeof(float)) != 0;
-    memcpy(target, vertices, bytes);
+    uint8_t diffuse = buffer->leastAlpha[0], specular = buffer->leastAlpha[1];
+    for (DWORD i = first; i < vertexCount; i++) {
+        if (memcmp(&target[i], &vertices[i], sizeof(GfxVertex)) == 0)
+            continue;
+        moved = moved || memcmp(&target[i].x, &vertices[i].x, 3 * sizeof(float)) != 0;
+        diffuse = std::min(diffuse, (uint8_t)(vertices[i].diffuse >> 24));
+        specular = std::min(specular, (uint8_t)(vertices[i].specular >> 24));
+        target[i] = vertices[i];
+    }
+    buffer->leastAlpha[0] = diffuse;
+    buffer->leastAlpha[1] = specular;
     if (moved)
         buffer->lockStamps.Mark(firstVertex, vertexCount, ++buffer->lockSerial);
 }

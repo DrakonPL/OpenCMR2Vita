@@ -551,6 +551,7 @@ const int kViewParts[] = {
 const int kInnerParts[] = {
     Diagnostics::SCENE_PART_SECTOR_CULL, Diagnostics::SCENE_PART_RELIGHT, Diagnostics::SCENE_PART_DEFERRED_SORT,
     Diagnostics::SCENE_PART_GLOW, Diagnostics::SCENE_PART_QUADS, Diagnostics::SCENE_PART_2D,
+    Diagnostics::SCENE_PART_VERTEX_WRITES,
 };
 
 // A heartbeat line of the ms of parts in a frame.

@@ -1002,6 +1002,21 @@ extern int g_unk0x005210c0;
         }                                                                           \
     }
 
+// PORT: the colour of a light level from a table, as Scene_GetLightColourD3D
+// and Scene_GetShadowColourD3D give it, for the loops over the vertices of
+// Scene_RelightSector: no call for each vertex. The tables are built before
+// the loops. When the light of the scene changes, the sectors in the view
+// are lit again in one frame.
+static inline DWORD Scene_LevelColour(const DWORD *pTable, int level)
+{
+    int i = level * 0x31 >> 16;
+    if (i < 0)
+        i = 0;
+    else if (i > 0x31)
+        i = 0x31;
+    return pTable[i];
+}
+
 // Relights a sector when the scene ambient or light colour changed since its
 // last update (ground mesh, static objects, nodes), then its shadow mesh,
 // attenuated by D3D light 1 through the sector light zone when enabled.
@@ -1028,6 +1043,11 @@ void Scene_RelightSector(int sector)
     force = 0;
     if (g_sceneSectorLights == NULL)
         return;
+    // PORT: the tables of Scene_GetLightColourD3D, built once for the loops.
+    if (g_sceneLightDirty != 0) {
+        Scene_BuildLightTables();
+        g_sceneLightDirty = 0;
+    }
     if (g_sceneAmbientColour[0] != ((BYTE *)g_sceneSectorLights)[sector * 4] ||
         g_sceneAmbientColour[1] != ((BYTE *)g_sceneSectorLights)[sector * 4 + 1] ||
         g_sceneAmbientColour[2] != ((BYTE *)g_sceneSectorLights)[sector * 4 + 2] ||
@@ -1043,7 +1063,7 @@ void Scene_RelightSector(int sector)
                 pLevel = pMesh->pLightLevels;
                 pVertex = (BYTE *)pMesh->pVertexData;
                 for (i = 0; i < pMesh->field_0x10; i++) {
-                    Scene_GetLightColourD3D((DWORD *)(pVertex + 0x18), *pLevel);
+                    *(DWORD *)(pVertex + 0x18) = Scene_LevelColour(g_sceneLightTableD3D, *pLevel);
                     pLevel++;
                     pVertex += 0x30;
                 }
@@ -1058,7 +1078,7 @@ void Scene_RelightSector(int sector)
                     pLevel = pMesh->pLightLevels;
                     pVertex = (BYTE *)pMesh->pVertexData;
                     for (i = 0; i < pMesh->field_0x10; i++) {
-                        Scene_GetLightColourD3D((DWORD *)(pVertex + 0x18), *pLevel);
+                        *(DWORD *)(pVertex + 0x18) = Scene_LevelColour(g_sceneLightTableD3D, *pLevel);
                         pLevel++;
                         pVertex += 0x30;
                     }
@@ -1086,13 +1106,14 @@ void Scene_RelightSector(int sector)
                 intensity = pZoneVertex[-2];
                 if (intensity == 0x10000) {
                     for (j = 0; j < *pZoneVertex; j++) {
-                        Scene_GetShadowColourD3D((DWORD *)(pVertex + 0x18), *pLevel);
+                        *(DWORD *)(pVertex + 0x18) = Scene_LevelColour(g_sceneShadowTableD3D, *pLevel);
                         pLevel++;
                         pVertex += 0x30;
                     }
                 } else {
                     for (j = 0; j < *pZoneVertex; j++) {
-                        Scene_GetShadowColourD3D((DWORD *)(pVertex + 0x18), FixMul(intensity, *pLevel));
+                        *(DWORD *)(pVertex + 0x18) =
+                            Scene_LevelColour(g_sceneShadowTableD3D, FixMul(intensity, *pLevel));
                         pLevel++;
                         pVertex += 0x30;
                     }
@@ -1104,7 +1125,7 @@ void Scene_RelightSector(int sector)
         } else {
             pVertex = (BYTE *)pShadow->pVertexData + 0x18;
             for (i = 0; i < pShadow->field_0x10; i++) {
-                Scene_GetShadowColourD3D((DWORD *)pVertex, *pLevel);
+                *(DWORD *)pVertex = Scene_LevelColour(g_sceneShadowTableD3D, *pLevel);
                 pLevel++;
                 pVertex += 0x30;
             }

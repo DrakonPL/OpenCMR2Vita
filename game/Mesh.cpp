@@ -6,6 +6,7 @@
 #include "FileBuffer.h"
 #include "Graphics.h"
 #include "Frontend.h"
+#include "port/diagnostics.h"
 #include <stdio.h>
 
 Mesh *g_meshes[4096];
@@ -252,6 +253,10 @@ void Mesh_UploadVertices(Mesh *pMesh)
 // FUNCTION: CMR2 0x004b2020
 void Mesh_RefreshVertices(Mesh *pMesh)
 {
+#ifdef OPENCMR2_DEV
+    // PORT: an inner part of the scene for the frame timing (the relight).
+    Diagnostics::ScenePartNest part(Diagnostics::SCENE_PART_VERTEX_WRITES);
+#endif
 
     // PORT: a write of the vertices of this mesh alone. A vertex buffer has
     // the vertices of many meshes: the original locked all of it, copied
@@ -271,6 +276,10 @@ void Mesh_SetColourAndRefresh(Mesh *pMesh, DWORD colour)
     int count;
     int i;
 
+#ifdef OPENCMR2_DEV
+    // PORT: an inner part of the scene for the frame timing (the relight).
+    Diagnostics::ScenePartNest part(Diagnostics::SCENE_PART_VERTEX_WRITES);
+#endif
     count = pMesh->field_0x10;
     p = pMesh->pVertexData;
     for (i = 0; i < count; i++)
