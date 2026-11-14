@@ -3098,7 +3098,10 @@ int Game_DrawSceneViewport(SceneNode *pRoot, SceneNode *pCamera, void *pRect, in
             farPlane = CGraphics::m_farPlaneFixed;
             CGraphics::SetProjection(0, 0, 0x960000, 0);
             Game_ScenePart(Diagnostics::SCENE_PART_SKY);
+            // PORT: the renderer gets the draws of the sky (Gfx_MarkSky).
+            Gfx_MarkSky(TRUE);
             Game_DrawUnsortedNodes(bit);
+            Gfx_MarkSky(FALSE);
             CGraphics::SetProjection(0, 0, farPlane, 0);
             // PORT: the scenery fades into the backdrop (Game_BeginDistanceFade).
             Game_BeginDistanceFade();

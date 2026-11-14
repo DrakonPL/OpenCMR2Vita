@@ -4,6 +4,7 @@
 #include "platform/platform.h"
 #include "port/sys.h"
 #include "render/presentation.h"
+#include "render/sdl_frame_pacing.h"
 #include "render/gfx_executor_shared.h"
 #include "render/gfx_internal.h"
 #include "render/shader_key.h"
@@ -173,6 +174,7 @@ struct Executor : GfxExecutor {
     std::unordered_map<uint32_t, SDL_GPUSampler *> samplers;
     bool bcSupported = true;
     bool presentModeVsync = true;
+    GfxFramePacer pacer;    // video.vsync 2
     int anisotropy = 1, smoothScaling = 1;    // video.anisotropy, video.smooth_scaling
     Uint32 presentWidth = 0, presentHeight = 0; // the window's pixels, as last logged
     // Back buffer reads of recently presented frames (the lens flare test).
@@ -1042,7 +1044,7 @@ struct Executor : GfxExecutor {
     }
 
     void Execute(GfxFrame &frame, std::vector<GfxTexture *> &textures, GfxReadback &readback, bool present,
-                 bool vsync, bool stretch) override
+                 int vsync, bool stretch) override
     {
         if (device == NULL)
             return;
@@ -1097,6 +1099,8 @@ struct Executor : GfxExecutor {
                     continue;
                 }
                 if ((target != NULL) != (phase == 0))
+                    continue;
+                if (c.type == GFX_CMD_SKY)
                     continue;
                 if (c.type == GFX_CMD_BACKDROP) {
                     // A copy pass between render passes; the next draw starts a
@@ -1253,14 +1257,17 @@ struct Executor : GfxExecutor {
             readback.requested = false;
         }
 
-        if (vsync != presentModeVsync) {
-            SDL_GPUPresentMode mode = vsync ? SDL_GPU_PRESENTMODE_VSYNC : SDL_GPU_PRESENTMODE_IMMEDIATE;
-            if (!vsync && !SDL_WindowSupportsGPUPresentMode(device, window, mode))
+        if ((vsync != 0) != presentModeVsync) {
+            SDL_GPUPresentMode mode = vsync != 0 ? SDL_GPU_PRESENTMODE_VSYNC : SDL_GPU_PRESENTMODE_IMMEDIATE;
+            if (vsync == 0 && !SDL_WindowSupportsGPUPresentMode(device, window, mode))
                 mode = SDL_GPU_PRESENTMODE_MAILBOX;
             if (SDL_WindowSupportsGPUPresentMode(device, window, mode))
                 SDL_SetGPUSwapchainParameters(device, window, SDL_GPU_SWAPCHAINCOMPOSITION_SDR, mode);
-            presentModeVsync = vsync;
+            presentModeVsync = vsync != 0;
         }
+        // A frame at every second refresh: SDL_GPU has no such mode.
+        if (vsync > 1)
+            Gfx_PaceFrame(pacer, vsync, window);
 
         SDL_GPUTexture *swapchain = NULL;
         Uint32 sw = 0, sh = 0;
@@ -1293,6 +1300,7 @@ struct Executor : GfxExecutor {
         } else {
             SDL_SubmitGPUCommandBuffer(cmd);
         }
+        pacer.Presented(SDL_GetTicksNS() / 1000);
         HashFrame();
     }
 

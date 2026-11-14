@@ -54,9 +54,10 @@ public:
     // A rectangle of a display buffer (inside the back buffer's size) as
     // 0xAARRGGBB pixels, width per row. The GPU must be done with it.
     void ReadPixels(int buffer, int x, int y, int width, int height, uint32_t *pixels) const;
-    // Shows the back buffer: at the next vertical blank with vsync, at once
-    // without. Then the next frame slot.
-    void Present(bool vsync);
+    // Shows the back buffer: vsync vertical blanks after the frame before
+    // it (at least the next blank), or at once with 0. Then the next frame
+    // slot.
+    void Present(int vsync);
     // 0, 1, 2, ...: the slot of the frame being recorded.
     int FrameSlot() const { return frameSlot; }
     // Waits until the GPU has done all queued work.
@@ -95,7 +96,7 @@ private:
     // buffer's where the display scales it (DisplayScales).
     int displayWidth = kDisplayWidth, displayHeight = kDisplayHeight;
     int frameSlot = 0;
-    void QueueFlip(bool vsync, int w, int h);
+    void QueueFlip(int vsync, int w, int h);
 };
 
 #endif

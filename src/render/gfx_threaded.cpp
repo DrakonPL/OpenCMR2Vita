@@ -188,7 +188,8 @@ struct ThreadedExecutor : GfxExecutor {
     std::unique_ptr<GfxExecutor> inner;
     // The frame the worker runs, and how.
     GfxFrame frame;
-    bool present = false, vsync = false, stretch = false;
+    bool present = false, stretch = false;
+    int vsync = 0;
     // The worker's Execute gets no textures and no readback: Prepare took
     // what it needs of them.
     std::vector<GfxTexture *> noTextures;
@@ -239,7 +240,7 @@ struct ThreadedExecutor : GfxExecutor {
     // The recorder's frame changes place with the frame the worker ran: the
     // recorder resets it after this call.
     void Execute(GfxFrame &recorded, std::vector<GfxTexture *> &textures, GfxReadback &readback, bool presentFrame,
-                 bool vsyncFrame, bool stretchFrame) override
+                 int vsyncFrame, bool stretchFrame) override
     {
         WaitInto(presentFrame ? times.presentWait : times.flushWait);
         inner->NoteWorkerTimes(times);
@@ -262,6 +263,7 @@ struct ThreadedExecutor : GfxExecutor {
         inner->DestroyVertexBuffer(buffer);
     }
     bool JoinsDraws() const override { return inner->JoinsDraws(); }
+    bool DrawsHalfSky() const override { return inner->DrawsHalfSky(); }
     void ReadTexture(GfxTexture *texture) override
     {
         Wait();

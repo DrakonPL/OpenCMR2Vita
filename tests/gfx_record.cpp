@@ -32,6 +32,7 @@ extern "C" int Sys_GetOption(const char *, int fallback) { return fallback; }
 int s_cullDraws = 0;
 int s_alphaBlend = 1, s_alphaTest = 1;     // video.alpha_blend, video.alpha_test
 int s_perfStats = 1;                        // video.perf_stats
+int s_skyHalf = 1;                          // video.sky_half
 int Platform_GetSettingInt(const char *key, int value)
 {
     if (strcmp(key, "video.perf_stats") == 0)
@@ -40,6 +41,8 @@ int Platform_GetSettingInt(const char *key, int value)
         return s_alphaBlend;
     if (strcmp(key, "video.alpha_test") == 0)
         return s_alphaTest;
+    if (strcmp(key, "video.sky_half") == 0)
+        return s_skyHalf;
     return strcmp(key, "video.cull_draws") == 0 ? s_cullDraws : value;
 }
 const char *Platform_GetSetting(const char *, const char *value) { return value; }
@@ -52,7 +55,7 @@ GfxFrame s_frame;       // the frame of the last present
 struct CaptureExecutor : GfxExecutor {
     bool SetVideoMode(int, int, bool) override { return true; }
     void SetFullscreen(bool) override {}
-    void Execute(GfxFrame &frame, std::vector<GfxTexture *> &, GfxReadback &, bool, bool, bool) override
+    void Execute(GfxFrame &frame, std::vector<GfxTexture *> &, GfxReadback &, bool, int, bool) override
     {
         s_frame = frame;
     }
@@ -291,6 +294,36 @@ int main()
     REQUIRE(Draw(0).vertexCount == 4 && Draw(1).vertexCount == 8 && Draw(2).vertexCount == 4);
     REQUIRE(Draw(1).state != Draw(0).state && Draw(2).state == Draw(1).state);
     Gfx_SetAlphaRef(0);
+
+    // The markers of the sky: in the back buffer only, with the settings of
+    // the last present, and a run of sprites does not join across them.
+    for (int half = 1; half >= 0; half--) {
+        s_skyHalf = half;
+        Gfx_Present(FALSE);
+        Sprite(0.0f);
+        Gfx_MarkSky(TRUE);
+        Sprite(10.0f);
+        Gfx_MarkSky(FALSE);
+        Sprite(20.0f);
+        Gfx_SetRenderTarget(target);
+        Gfx_MarkSky(TRUE);
+        Gfx_MarkSky(FALSE);
+        Gfx_SetRenderTarget(NULL);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 3);
+        const uint8_t flags = (uint8_t)((half ? GFX_SKY_HALF : 0) | GFX_SKY_STENCIL);
+        unsigned markers = 0;
+        bool begin = true, right = true;
+        for (const GfxCommand &c : s_frame.commands) {
+            if (c.type != GFX_CMD_SKY)
+                continue;
+            markers++;
+            right = right && c.skyBegin == begin && c.skyFlags == flags;
+            begin = false;
+        }
+        REQUIRE(markers == 2 && right);
+    }
+    s_skyHalf = 1;
 
     // Lines join without indices. A line and a sprite do not join.
     Line(0.0f);
