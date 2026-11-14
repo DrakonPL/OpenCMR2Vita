@@ -34,6 +34,7 @@ enum {
     SCENE_PART_CAR_NODES,   // the nodes, the matrices and the weather lighting of the view (view)
     SCENE_PART_WHEELS,      // the skid effects and the ground lighting of the wheels (view)
     SCENE_PART_SKID_TRAILS, // the exhaust points and the new skid trail points (view)
+    SCENE_PART_VERTEX_WRITES, // the meshes written into their vertex buffers (Mesh_RefreshVertices; relight)
     SCENE_PART_COUNT
 };
 
@@ -41,7 +42,8 @@ enum {
 inline constexpr const char *kScenePartNames[] = {
     "other", "setup", "particles", "sky", "ground", "shadows", "objects", "billboards",
     "nodes", "layers", "view", "prepare", "car shadows", "reflections", "hud", "off road", "tyre marks",
-    "sector cull", "relight", "deferred sort", "glow", "quads", "2d", "car nodes", "wheels", "skid trails"
+    "sector cull", "relight", "deferred sort", "glow", "quads", "2d", "car nodes", "wheels", "skid trails",
+    "vertex writes"
 };
 static_assert(sizeof(kScenePartNames) / sizeof(kScenePartNames[0]) == SCENE_PART_COUNT, "a name for each scene part");
 

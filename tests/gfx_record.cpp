@@ -1845,9 +1845,34 @@ int main()
         Gfx_DrawPrimitiveVB(GFX_TRIANGLELIST, fresh, 0, 3);
         Gfx_Present(FALSE);
         REQUIRE(Draws() == 1 && Draw(0).buffer == fresh && Draw(0).vertexAlphaKnown && Draw(0).vertexAlpha[0] == 0);
-        Gfx_SetAlphaTest(FALSE);
         Gfx_DestroyVertexBuffer(fresh);
+        // A range write (the stage lighting): a changed vertex with a lower
+        // alpha lowers the buffer's least alpha; a write of the vertices as
+        // they are changes nothing.
+        s_joins = true;
+        GfxVertexBuffer *lit = Gfx_CreateVertexBuffer(64);
+        v = Gfx_LockVertexBuffer(lit);
+        for (int i = 0; i < 64; i++) {
+            v[i].diffuse = 0xff808080;
+            v[i].specular = 0xff000000;
+        }
+        Gfx_UnlockVertexBuffer(lit);
+        rest();
+        std::vector<GfxVertex> colours(lit->vertices.begin() + 8, lit->vertices.begin() + 16);
+        Gfx_WriteVertexBufferRange(lit, 8, colours.data(), 8);
+        Gfx_DrawPrimitiveVB(GFX_TRIANGLELIST, lit, 0, 60);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && Draw(0).vertexAlphaKnown && Draw(0).vertexAlpha[0] == 0xff);
+        colours[5].diffuse = 0x30404040;
+        Gfx_WriteVertexBufferRange(lit, 8, colours.data(), 8);
+        REQUIRE(lit->vertices[13].diffuse == 0x30404040 && lit->vertices[12].diffuse == 0xff808080);
+        Gfx_DrawPrimitiveVB(GFX_TRIANGLELIST, lit, 0, 60);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && Draw(0).vertexAlphaKnown && Draw(0).vertexAlpha[0] == 0x30);
+        Gfx_SetAlphaTest(FALSE);
+        Gfx_DestroyVertexBuffer(lit);
         Gfx_DestroyVertexBuffer(mesh);
+        s_joins = false;
     }
 
     printf("gfx_record: ok\n");
