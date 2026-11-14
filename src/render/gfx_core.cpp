@@ -2414,6 +2414,7 @@ extern "C" void Gfx_UnlockTexture(GfxTexture *texture, int, int)
     texture = Root(texture);
     texture->dirty = true;
     texture->changedRect = GfxMipRect();
+    texture->changedTiles.Clear();
 }
 
 extern "C" void Gfx_UnlockTextureRect(GfxTexture *texture, int x0, int y0, int x1, int y1)
@@ -2428,11 +2429,16 @@ extern "C" void Gfx_UnlockTextureRect(GfxTexture *texture, int x0, int y0, int x
     part.y1 = y1 < texture->height ? y1 : texture->height;
     if (part.Empty())
         return;
-    // A texture that is dirty in all of it stays so.
-    if (!texture->dirty)
+    // A texture that is dirty in all of it stays so. A lock can give more
+    // than one part.
+    if (!texture->dirty) {
         texture->changedRect = part;
-    else if (!texture->changedRect.Empty())
+        texture->changedTiles.Clear();
+        texture->changedTiles.Add(part, texture->width, texture->height);
+    } else if (!texture->changedRect.Empty()) {
         texture->changedRect = Gfx_MipRectUnion(texture->changedRect, part);
+        texture->changedTiles.Add(part, texture->width, texture->height);
+    }
     texture->dirty = true;
 }
 

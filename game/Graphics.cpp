@@ -609,13 +609,17 @@ static inline BYTE Bump_LowestSetBit(DWORD mask)
     return count;
 }
 
-// PORT: for each lock of m_lockedTextures, the pixels that BlendPixel wrote
-// (x1, y1 past the last), in the level, and the corner of the lock's
-// rectangle. The unlock gives the renderer that part alone: the dirt stamps
-// write some 16 x 16 pixels of a car's body texture of 1,024 x 1,024 in a
-// frame, and the whole texture went to the GPU again (50 ms of each frame
-// of a wet stage on the PS Vita).
+// PORT: for each lock of m_lockedTextures, the part that BlendPixel writes
+// now (x1, y1 past the last), in the level, and the corner of the lock's
+// rectangle. The renderer gets each part alone: the dirt stamps write up to
+// 64 parts of 16 x 16 pixels of a car's body texture of 1,024 x 1,024 in a
+// frame. The whole texture went to the GPU again (50 ms of each frame of a
+// wet stage on the PS Vita), and one rectangle around all the stamps was a
+// quarter of it (18 ms). A part grows while it stays in kLockedPartMax
+// pixels on each side. A pixel out of that range sends the part to the
+// renderer and starts a new one.
 namespace {
+constexpr int kLockedPartMax = 32;
 struct LockedPart {
     int originX, originY;
     int x0, y0, x1, y1;
@@ -754,16 +758,20 @@ void CGraphics::BlendPixel(Texture *pTexture, unsigned int x, unsigned int y, BY
     if (m_lockedTextures[i].desc.format.bitsPerPixel == 16 || m_lockedTextures[i].desc.format.bitsPerPixel == 32) {
         LockedPart &part = s_lockedParts[i];
         const int px = part.originX + (int)x, py = part.originY + (int)y;
-        if (part.x1 <= part.x0) {
+        const int x0 = px < part.x0 ? px : part.x0, y0 = py < part.y0 ? py : part.y0;
+        const int x1 = px + 1 > part.x1 ? px + 1 : part.x1, y1 = py + 1 > part.y1 ? py + 1 : part.y1;
+        if (part.x1 > part.x0 && x1 - x0 <= kLockedPartMax && y1 - y0 <= kLockedPartMax) {
+            part.x0 = x0;
+            part.y0 = y0;
+            part.x1 = x1;
+            part.y1 = y1;
+        } else {
+            if (part.x1 > part.x0)
+                Gfx_UnlockTextureRect(pTexture->pSurface, part.x0, part.y0, part.x1, part.y1);
             part.x0 = px;
             part.y0 = py;
             part.x1 = px + 1;
             part.y1 = py + 1;
-        } else {
-            part.x0 = px < part.x0 ? px : part.x0;
-            part.y0 = py < part.y0 ? py : part.y0;
-            part.x1 = px + 1 > part.x1 ? px + 1 : part.x1;
-            part.y1 = py + 1 > part.y1 ? py + 1 : part.y1;
         }
     }
     stride = m_lockedTextures[i].desc.pitch - ((m_lockedTextures[i].desc.width * m_lockedTextures[i].desc.format.bitsPerPixel) >> 3);
@@ -811,8 +819,8 @@ void CGraphics::UnlockTexture(Texture *pTexture)
     }
     if (i != m_lockedTextureCount) {
         // PORT: BlendPixel is the only writer of this lock: the renderer
-        // gets the part that it wrote (s_lockedParts), or nothing for no
-        // pixel (a compressed texture gets none).
+        // gets the last part that it wrote (s_lockedParts), or nothing for
+        // no pixel (a compressed texture gets none).
         const LockedPart &part = s_lockedParts[i];
         if (part.x1 > part.x0)
             Gfx_UnlockTextureRect(m_lockedTextures[i].pTexture->pSurface, part.x0, part.y0, part.x1, part.y1);

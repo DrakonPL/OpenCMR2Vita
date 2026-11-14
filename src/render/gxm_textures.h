@@ -60,9 +60,11 @@ public:
     // may read gets new memory; the old goes back later. frame: the number
     // of the frame being recorded.
     void Upload(std::vector<GfxTexture *> &textures, unsigned frame);
-    // For the logs: the uploads of a part of a texture (GfxTexture::changedRect),
-    // and of all of a texture.
+    // For the logs: the uploads of a part of a texture (GfxTexture::changedRect
+    // or changedTiles), the texels of the tiles that they wrote, and the
+    // uploads of all of a texture.
     unsigned partUploads = 0, wholeUploads = 0;
+    size_t tileTexels = 0;
     // frame: the number of the frame being recorded.
     void Destroy(GfxTexture *t, unsigned frame);
     // At the start of recording frame: frees what the GPU is done with.

@@ -37,6 +37,14 @@ enum {
     SCENE_PART_COUNT
 };
 
+// The names of the parts, for the logs.
+inline constexpr const char *kScenePartNames[] = {
+    "other", "setup", "particles", "sky", "ground", "shadows", "objects", "billboards",
+    "nodes", "layers", "view", "prepare", "car shadows", "reflections", "hud", "off road", "tyre marks",
+    "sector cull", "relight", "deferred sort", "glow", "quads", "2d", "car nodes", "wheels", "skid trails"
+};
+static_assert(sizeof(kScenePartNames) / sizeof(kScenePartNames[0]) == SCENE_PART_COUNT, "a name for each scene part");
+
 struct Observer {
     virtual ~Observer() = default;
     virtual void BeginTick(unsigned char state) {}
