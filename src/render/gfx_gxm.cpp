@@ -330,8 +330,9 @@ enum ProfileSection {
 // left the cycle. The sky's own modes compare the ways to draw it
 // (gfx_sky_plan.h): "sky as recorded" draws its draws in the back buffer
 // as the game recorded them, "sky full" and "sky half" draw it at the size
-// of the back buffer or stretch the backdrop, "sky no stencil" draws it
-// without the stencil of the near ground. "normal" draws it as the settings
+// of the back buffer or stretch the backdrop, "sky no stencil" draws it at
+// the full size without the stencil of the near ground (the stretched sky
+// has none). "normal" draws it as the settings
 // ask. "alpha test kept" draws a draw without blending whose alpha test
 // passes for each pixel with the test, as recorded (normal: without it).
 // The mode "tile" left the cycle: "no 3D" gives the cost of the CPU.
@@ -1983,13 +1984,17 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             half = false;
         else if (probe.mode == PROBE_SKY_HALF)
             half = true;
-        if (probe.mode == PROBE_SKY_NO_STENCIL)
+        if (probe.mode == PROBE_SKY_NO_STENCIL) {
+            half = false;
             stencil = false;
+        }
         skyUsed = half || skyPlan.backdropAfter;
         skyStretched = half;
         // The list of the plan stands only with the sky in the backdrop
-        // when the frame copies the backdrop.
-        skyStenciled = stencil && !skyPlan.occluders.empty() && (skyUsed || !skyPlan.backdropAfter);
+        // when the frame copies the backdrop. With the stretched sky the
+        // stencil costs more than it saves (drizzle on the PS Vita: 0 to
+        // 1.5 ms more): it is for the sky at the full size.
+        skyStenciled = stencil && !half && !skyPlan.occluders.empty() && (skyUsed || !skyPlan.backdropAfter);
     }
 
     // Before the back buffer's scene: a scene on the backdrop with the
