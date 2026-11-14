@@ -10,7 +10,7 @@
 #define OPENCMR2_GXM_TEXTURE_COPIES_H
 
 #include "render/gxm_frame_ring.h"
-#include "render/texture_mips.h"
+#include "render/texture_tiles.h"
 
 #include <stddef.h>
 
@@ -25,17 +25,17 @@ struct GxmTextureCopies {
     struct Spare {
         void *memory;
         bool whole;             // the spare misses more than a part: all of it is written
-        GfxMipRect stale;       // else the part of level 0 that it misses (empty: none)
+        GfxTileSet stale;       // else the tiles of level 0 that it misses (empty: none)
         unsigned lastDrawn;     // the last frame that drew with it, or kNotDrawn
     };
     std::vector<Spare> spares;
 
-    // A part of level 0 changed in the copy that is drawn: each spare misses it.
-    void Changed(GfxMipRect part)
+    // Tiles of level 0 changed in the copy that is drawn: each spare misses them.
+    void Changed(const GfxTileSet &part)
     {
         for (Spare &s : spares)
             if (!s.whole)
-                s.stale = Gfx_MipRectUnion(s.stale, part);
+                s.stale.Add(part);
     }
     // All of the texture changed (its levels too).
     void ChangedWhole()
@@ -59,15 +59,15 @@ struct GxmTextureCopies {
     {
         if (spares.size() >= kMaxSpares)
             return false;
-        spares.push_back({ memory, true, GfxMipRect(), kNotDrawn });
+        spares.push_back({ memory, true, GfxTileSet(), kNotDrawn });
         return true;
     }
 
     // The spare i, written up to date, becomes the copy that is drawn. The
     // copy that was drawn (its memory and the last frame that drew with it)
-    // is a spare that misses the part that changed now. Returns the memory
+    // is a spare that misses the tiles that changed now. Returns the memory
     // of the copy to draw.
-    void *Swap(int i, void *drawn, unsigned drawnLastDrawn, GfxMipRect part)
+    void *Swap(int i, void *drawn, unsigned drawnLastDrawn, const GfxTileSet &part)
     {
         void *now = spares[(size_t)i].memory;
         spares[(size_t)i] = { drawn, false, part, drawnLastDrawn };

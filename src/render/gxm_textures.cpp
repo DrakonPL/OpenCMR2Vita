@@ -81,13 +81,20 @@ void CopyLevel(int format, const uint8_t *src, const GxmTextureLayout &layout, c
     CopyLinearPart(format, src, l, all, dst);
 }
 
-// Whether the texture's change is a part of level 0 that can go to the GPU
-// alone (GfxTexture::changedRect): a linear layout of one face whose levels
+// Whether the texture's change is tiles of level 0 that can go to the GPU
+// alone (GfxTexture::changedTiles): a linear layout of one face whose levels
 // are those of the CPU copy, that is in memory.
 bool PartUploadFits(const GfxTexture *t, const GxmTexture *g)
 {
     return g->uploaded && !g->layout.swizzled && g->layout.faceBytes == 0 && !g->madeMips && g->target == nullptr &&
-           !t->changedRect.Empty() && !t->levels[0][0].empty();
+           !t->changedRect.Empty() && !t->changedTiles.Empty() && !t->levels[0][0].empty();
+}
+
+// The marked tiles of level 0 of the CPU copy into memory in the layout of g.
+void CopyTiles(const GfxTexture *t, const GxmTexture *g, const GfxTileSet &tiles, uint8_t *memory)
+{
+    const GxmLevelLayout &l0 = g->layout.level[0];
+    tiles.ForEachRun([&](GfxMipRect r) { CopyLinearPart(t->format, t->levels[0][0].data(), l0, r, memory + l0.offset); });
 }
 
 // Writes all levels of the CPU copy into memory in the layout of g.
@@ -318,7 +325,7 @@ void GxmTextures::Upload(std::vector<GfxTexture *> &textures, unsigned frame)
         if (g == nullptr)
             continue;
         // A texture of a linear layout that changed in a part (the dirt
-        // stamps of the game on a car): the rows of the part alone.
+        // stamps of the game on a car): the tiles of the stamps alone.
         if (PartUploadFits(t, g) && UploadPart(t, g, frame))
             continue;
         // A texture that keeps its levels and changed in a part (a texture
@@ -340,6 +347,7 @@ void GxmTextures::Upload(std::vector<GfxTexture *> &textures, unsigned frame)
             mipMicros += sceKernelGetProcessTimeWide() - start;
             mipTextures++;
             t->changedRect = GfxMipRect();
+            t->changedTiles.Clear();
             int minAlpha = g->minAlpha;
             for (int m = 0; m < g->layout.levels; m++) {
                 const GxmLevelLayout &l = g->layout.level[m];
@@ -381,6 +389,7 @@ void GxmTextures::Upload(std::vector<GfxTexture *> &textures, unsigned frame)
             mipTextures++;
         }
         t->changedRect = GfxMipRect();
+        t->changedTiles.Clear();
         // The least alpha of the levels goes with the upload: the executor
         // leaves out work where no texel can fail the alpha test. A render
         // target's is not known.
@@ -391,14 +400,15 @@ void GxmTextures::Upload(std::vector<GfxTexture *> &textures, unsigned frame)
 
 bool GxmTextures::UploadPart(GfxTexture *t, GxmTexture *g, unsigned frame)
 {
-    const GfxMipRect part = t->changedRect;
+    const GfxTileSet &part = t->changedTiles;
     const GxmLevelLayout &l0 = g->layout.level[0];
-    // The memory that is drawn, when no frame on the GPU reads it: the part
-    // goes there. The spares miss it.
+    // The memory that is drawn, when no frame on the GPU reads it: the tiles
+    // go there. The spares miss them.
     uint8_t *target = nullptr;
     if (g->lastDrawn == GxmTextureCopies::kNotDrawn || frame - g->lastDrawn >= (unsigned)kGxmFrameSlots) {
         target = (uint8_t *)g->memory;
-        CopyLinearPart(t->format, t->levels[0][0].data(), l0, part, target + l0.offset);
+        CopyTiles(t, g, part, target);
+        tileTexels += part.Texels();
         g->copies.Changed(part);
     } else {
         // Else a spare that no frame reads, with what it misses.
@@ -416,21 +426,25 @@ bool GxmTextures::UploadPart(GfxTexture *t, GxmTexture *g, unsigned frame)
         g->copies.Changed(part);
         GxmTextureCopies::Spare &s = g->copies.spares[(size_t)spare];
         target = (uint8_t *)s.memory;
-        if (s.whole)
+        if (s.whole) {
             CopyAllLevels(t, g, nullptr, target);
-        else
-            CopyLinearPart(t->format, t->levels[0][0].data(), l0, s.stale, target + l0.offset);
+        } else {
+            CopyTiles(t, g, s.stale, target);
+            tileTexels += s.stale.Texels();
+        }
         g->memory = g->copies.Swap(spare, g->memory, g->lastDrawn, part);
         sceGxmTextureSetData(&g->texture, g->memory);
         g->generation++;
         g->lastDrawn = GxmTextureCopies::kNotDrawn;
     }
-    // The least alpha stays a lower bound: that of the part, and that of the rest.
-    if (g->minAlpha > 0) {
-        const int a = MinAlphaOfPart(t, l0, part);
-        g->minAlpha = (uint8_t)(a < g->minAlpha ? a : g->minAlpha);
-    }
+    // The least alpha stays a lower bound: that of the tiles, and that of the rest.
+    if (g->minAlpha > 0)
+        part.ForEachRun([&](GfxMipRect r) {
+            const int a = MinAlphaOfPart(t, l0, r);
+            g->minAlpha = (uint8_t)(a < g->minAlpha ? a : g->minAlpha);
+        });
     t->changedRect = GfxMipRect();
+    t->changedTiles.Clear();
     partUploads++;
     return true;
 }

@@ -8,6 +8,7 @@
 #include "render/gfx_range_locks.h"
 #include "render/gxm_key_cache.h"
 #include "render/texture_mips.h"
+#include "render/texture_tiles.h"
 
 #include <stdint.h>
 
@@ -48,6 +49,10 @@ struct GfxTexture {
     // is 4 texels.
     int mipLimit = 0;
     GfxMipRect changedRect;
+    // The tiles of level 0 that Gfx_UnlockTextureRect changed while
+    // changedRect is not empty. An executor that writes a part of a linear
+    // texture writes these alone.
+    GfxTileSet changedTiles;
 };
 
 // The texture a draw reads for t: its cube, or its replacement.

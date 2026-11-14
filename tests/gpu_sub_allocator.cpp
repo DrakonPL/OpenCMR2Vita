@@ -206,14 +206,7 @@ int TextureCopies()
 {
     GxmTextureCopies copies;
     char memory[4];     // the copies' memory: 0 drawn, 1 to 3 new
-    const auto rect = [](int x0, int y0, int x1, int y1) {
-        GfxMipRect r;
-        r.x0 = x0;
-        r.y0 = y0;
-        r.x1 = x1;
-        r.y1 = y1;
-        return r;
-    };
+    const int w = 256, h = 64;
     void *drawn = &memory[0];
     unsigned lastDrawn = GxmTextureCopies::kNotDrawn;
     // Which frame last drew each memory, and the parts each copy has.
@@ -222,10 +215,17 @@ int TextureCopies()
     std::vector<GfxMipRect> all;
     int added = 1;
     for (unsigned frame = 10; frame < 40; frame++) {
-        const GfxMipRect part = rect((int)frame, 2, (int)frame + 16, 18);
-        all.push_back(part);
+        // A stamp in a new place in each frame, far from the last.
+        GfxMipRect stamp;
+        stamp.x0 = (int)(frame % 8) * 32;
+        stamp.y0 = (int)(frame % 3) * 20;
+        stamp.x1 = stamp.x0 + 16;
+        stamp.y1 = stamp.y0 + 16;
+        GfxTileSet part;
+        part.Add(stamp, w, h);
+        all.push_back(stamp);
         if (lastDrawn == GxmTextureCopies::kNotDrawn || frame - lastDrawn >= (unsigned)kGxmFrameSlots) {
-            has[(char *)drawn - memory].push_back(part);
+            has[(char *)drawn - memory].push_back(stamp);
             copies.Changed(part);
         } else {
             int spare = copies.Free(frame);
@@ -238,19 +238,22 @@ int TextureCopies()
             const int index = (int)((char *)s.memory - memory);
             // A frame that the GPU draws does not read the spare.
             REQUIRE(drawnAt[index] == 0 || frame - drawnAt[index] >= (unsigned)kGxmFrameSlots);
-            if (s.whole) {
-                has[index] = all;
-            } else {
-                // The stale part of the spare holds each part that it misses.
+            if (!s.whole) {
+                // The stale tiles of the spare hold each part that it misses.
                 for (const GfxMipRect &p : all) {
                     bool in = false;
-                    for (const GfxMipRect &h : has[index])
-                        in = in || (h.x0 == p.x0 && h.y0 == p.y0);
+                    for (const GfxMipRect &e : has[index])
+                        in = in || (e.x0 == p.x0 && e.y0 == p.y0);
                     if (!in)
-                        REQUIRE(s.stale.x0 <= p.x0 && s.stale.y0 <= p.y0 && s.stale.x1 >= p.x1 && s.stale.y1 >= p.y1);
+                        for (int ty = p.y0 / GfxTileSet::kTile; ty <= (p.y1 - 1) / GfxTileSet::kTile; ty++)
+                            for (int tx = p.x0 / GfxTileSet::kTile; tx <= (p.x1 - 1) / GfxTileSet::kTile; tx++)
+                                REQUIRE(s.stale.Has(tx, ty));
                 }
-                has[index] = all;
+                // And no more than the parts of the last frames: not one
+                // rectangle around them.
+                REQUIRE(s.stale.Texels() <= (size_t)kGxmFrameSlots * 24 * 24);
             }
+            has[index] = all;
             drawn = copies.Swap(spare, drawn, lastDrawn, part);
             lastDrawn = GxmTextureCopies::kNotDrawn;
         }

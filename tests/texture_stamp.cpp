@@ -1,6 +1,6 @@
 // The dirt stamps of the game (CGraphics::LockTexture, BlendPixel,
 // UnlockTexture, game/Graphics.cpp): a texture of 32-bit pixels gets the
-// stamp, and the renderer gets the part that changed. A compressed texture
+// stamp, and the renderer gets the part that changed, stamp by stamp. A compressed texture
 // gets no pixel, and stays as it is on the GPU: no new upload in each frame
 // of a wet stage.
 
@@ -21,6 +21,7 @@ struct GfxTexture;
 bool Test_TextureDirty(GfxTexture *t);
 void Test_ClearDirty(GfxTexture *t);
 void Test_ChangedRect(GfxTexture *t, int *x0, int *y0, int *x1, int *y1);
+bool Test_ChangedTexel(GfxTexture *t, int x, int y);
 
 namespace {
 
@@ -98,8 +99,33 @@ int main()
     Stamp(plain);
     REQUIRE(Test_TextureDirty(plain.pSurface));
 
+    // Two stamps of 16 x 16 pixels far apart in one lock: the renderer gets
+    // the tiles of each stamp, and not those between them.
+    Texture body;
+    memset(&body, 0, sizeof(body));
+    body.width = body.height = 256;
+    body.pSurface = Gfx_CreateTexture(256, 256, GFX_FORMAT_BGRA8, 1, 0);
+    REQUIRE(body.pSurface != NULL);
+    Test_ClearDirty(body.pSurface);
+    {
+        BYTE colour[4] = { 0x2f, 0x27, 0x14, 0xc0 };
+        CGraphics::LockTexture(&body, NULL);
+        const int corners[2][2] = { { 8, 8 }, { 200, 200 } };
+        for (const auto &c : corners)
+            for (int j = 0; j < 16; j++)
+                for (int k = 0; k < 16; k++)
+                    CGraphics::BlendPixel(&body, (unsigned)(c[0] + j), (unsigned)(c[1] + k), colour);
+        CGraphics::UnlockTexture(&body);
+    }
+    REQUIRE(Test_TextureDirty(body.pSurface) && ChangedIs(body.pSurface, 8, 8, 216, 216));
+    REQUIRE(Test_ChangedTexel(body.pSurface, 8, 8) && Test_ChangedTexel(body.pSurface, 23, 23));
+    REQUIRE(Test_ChangedTexel(body.pSurface, 200, 200) && Test_ChangedTexel(body.pSurface, 215, 215));
+    REQUIRE(!Test_ChangedTexel(body.pSurface, 100, 100) && !Test_ChangedTexel(body.pSurface, 8, 200));
+    REQUIRE(!Test_ChangedTexel(body.pSurface, 24, 8) && !Test_ChangedTexel(body.pSurface, 0, 0));
+
     Gfx_DestroyTexture(plain.pSurface);
     Gfx_DestroyTexture(compressed.pSurface);
+    Gfx_DestroyTexture(body.pSurface);
     printf("texture_stamp: ok\n");
     return 0;
 }

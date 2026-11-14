@@ -20,3 +20,8 @@ void Test_ChangedRect(GfxTexture *t, int *x0, int *y0, int *x1, int *y1)
     *x1 = t->changedRect.x1;
     *y1 = t->changedRect.y1;
 }
+
+bool Test_ChangedTexel(GfxTexture *t, int x, int y)
+{
+    return t->changedTiles.Has(x / GfxTileSet::kTile, y / GfxTileSet::kTile);
+}
