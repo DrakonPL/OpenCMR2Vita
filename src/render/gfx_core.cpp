@@ -24,6 +24,12 @@
 #include "render/gfx_batch_worker.h"
 
 static void AddPendingBatchJob();
+
+// The part of the scene that runs now (GfxCommand::part).
+static inline uint8_t ScenePartNow()
+{
+    return Diagnostics::observer != nullptr ? (uint8_t)Diagnostics::observer->Part() : 0;
+}
 static void SettleBatches(GfxVertexBuffer *buffer, uint32_t first, uint32_t count);
 
 // Why the recorder runs the draws recorded so far in the middle of a frame.
@@ -987,6 +993,7 @@ void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD 
                    GfxTexture *const textures[2], float reach, const GfxBox *knownBox)
 {
     GfxCommand cmd = {};
+    cmd.part = ScenePartNow();
     cmd.reach = -1.0f;
     // The box of the vertices of a 3D draw that the executor gets in the
     // frame's data (GfxCommand::hasBox).
@@ -1960,6 +1967,7 @@ static void AddPendingBatchJob()
     job.state = batch.state;
     job.texture1 = batch.textures[1];
     job.cull = batch.cull;
+    job.part = batch.part;
     job.view = state.view;
     job.projection = state.projection;
     Gfx_AddBatchJob(job);
@@ -1987,6 +1995,7 @@ void RecordSmallItem(GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCou
         // The draws of the batch before go to their job.
         AddPendingBatchJob();
         GfxCommand cmd = {};
+        cmd.part = ScenePartNow();
         cmd.type = GFX_CMD_SMALL_BATCH;
         cmd.reach = -1.0f;
         cmd.state = RecordState(true);
@@ -2111,6 +2120,7 @@ void RecordDrawInFrame(int primitive, uint32_t offset, DWORD vertexCount)
     const GfxVertex *vertices = (const GfxVertex *)(s_frame.vertices.data() + offset);
     s_drawOverride = DrawOverride(false);
     GfxCommand cmd = {};
+    cmd.part = ScenePartNow();
     cmd.type = GFX_CMD_DRAW;
     cmd.primitive = primitive;
     cmd.transformed = false;

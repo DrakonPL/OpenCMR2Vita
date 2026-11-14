@@ -79,6 +79,7 @@ void Gfx_RunBatchJob(const GfxBatchJob &job)
         GfxBatchOutput made = {};
         made.placeholder = job.placeholder;
         GfxCommand &draw = made.draw;
+        draw.part = job.part;
         draw.type = GFX_CMD_DRAW;
         draw.primitive = GFX_TRIANGLELIST;
         draw.transformed = false;

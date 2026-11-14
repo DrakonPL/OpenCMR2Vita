@@ -188,6 +188,9 @@ enum GfxCommandType {
 
 struct GfxCommand {
     GfxCommandType type;
+    // The part of the scene that recorded it (Diagnostics::SCENE_PART_*), in
+    // a dev build: the frame time probe leaves out the draws of a part.
+    uint8_t part;
     // draw
     int primitive;              // list/strip types only (fans are converted)
     bool transformed;           // GfxTLVertex data
@@ -318,6 +321,7 @@ struct GfxBatchJob {
     uint32_t state;                 // of the batch
     GfxTexture *texture1;
     bool cull;                      // the draws are tested against the view
+    uint8_t part;                   // of the batch (GfxCommand::part)
     GfxMatrix view, projection;     // of the state
 };
 
