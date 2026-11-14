@@ -2198,6 +2198,9 @@ extern "C" void Gfx_DrawBatch(const GfxBatchDraw *draws, DWORD count)
 namespace {
 
 int s_openPrimitive = -1;               // of Gfx_BeginPrimitive; -1: none
+// The box of its vertices from the caller (Gfx_SetPrimitiveBox).
+bool s_openBoxKnown;
+float s_openBoxLow[3], s_openBoxHigh[3];
 bool s_openInFrame;                     // its vertices are in the frame's data, from s_openOffset
 uint32_t s_openOffset;
 std::vector<GfxVertex> s_openVertices;  // its vertices, when they are not in the frame
@@ -2222,7 +2225,12 @@ void RecordDrawInFrame(int primitive, uint32_t offset, DWORD vertexCount)
     cmd.firstVertexByte = offset;
     cmd.hasBox = true;
     cmd.reach = -1.0f;
-    VertexBox(vertices, vertexCount, cmd.boxLow, cmd.boxHigh);
+    if (s_openBoxKnown) {
+        memcpy(cmd.boxLow, s_openBoxLow, sizeof(cmd.boxLow));
+        memcpy(cmd.boxHigh, s_openBoxHigh, sizeof(cmd.boxHigh));
+    } else {
+        VertexBox(vertices, vertexCount, cmd.boxLow, cmd.boxHigh);
+    }
     // The test against the view: a draw outside it is left out, and its
     // vertices with it.
     if (CullWanted()) {
@@ -2252,6 +2260,7 @@ void RecordDrawInFrame(int primitive, uint32_t offset, DWORD vertexCount)
 extern "C" void Gfx_BeginPrimitive(int primitive)
 {
     s_openPrimitive = primitive;
+    s_openBoxKnown = false;
     // In the frame: lists and strips, which are drawn as they are. A fan
     // becomes a list, and the trace has a line for each draw: the other way.
     s_openInFrame = s_executor != NULL && s_executor->JoinsDraws() && TraceFile() == NULL &&
@@ -2271,6 +2280,15 @@ extern "C" void Gfx_AddPrimitiveVertices(const GfxVertex *vertices, DWORD vertex
                                 (const uint8_t *)(vertices + vertexCount));
     else
         s_openVertices.insert(s_openVertices.end(), vertices, vertices + vertexCount);
+}
+
+extern "C" void Gfx_SetPrimitiveBox(const float low[3], const float high[3])
+{
+    if (s_openPrimitive < 0)
+        return;
+    memcpy(s_openBoxLow, low, sizeof(s_openBoxLow));
+    memcpy(s_openBoxHigh, high, sizeof(s_openBoxHigh));
+    s_openBoxKnown = true;
 }
 
 extern "C" void Gfx_EndPrimitive(void)

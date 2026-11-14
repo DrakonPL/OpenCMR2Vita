@@ -7,6 +7,7 @@
 #include "port/sys.h"
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 Sprite g_spriteLayer1[SPRITE_LAYER_MAX];
 Sprite g_spriteLayer2[SPRITE_LAYER_MAX];
@@ -796,7 +797,7 @@ void Quad2D_DrawLayer(unsigned int layer)
         pQuad = g_quad2DLayerD;
         g_quad2DCountD = 0;
     }
-    for (i = count; i > 0; i--) {
+    for (i = count; i > 0;) {
         if (pLastTexture != pQuad->pTexture || lastFlags != pQuad->flags) {
             Gfx_EndPrimitive();
             n = 0;
@@ -810,10 +811,36 @@ void Quad2D_DrawLayer(unsigned int layer)
             pLastTexture = pQuad->pTexture;
             lastFlags = pQuad->flags;
         }
-        Gfx_AddPrimitiveVertices((const GfxVertex *)&pQuad->verts, 3);
-        n += 3;
-        CGame::m_unk0x0059ce20++;
-        pQuad++;
+        // PORT: the run of triangles with this texture and these flags,
+        // with the box of its positions, measured here while each triangle
+        // is in the cache: the renderer measured all of them again (some
+        // 1,450 triangles of the tyre marks).
+        unsigned int run = 1;
+        while (run < i && pQuad[run].pTexture == pLastTexture && pQuad[run].flags == lastFlags)
+            run++;
+        {
+            const Quad2DRenderVertex *pFirst = &pQuad->verts.v[0];
+            float lx = pFirst->x, ly = pFirst->y, lz = pFirst->z;
+            float hx = lx, hy = ly, hz = lz;
+            for (unsigned int k = 0; k < run; k++) {
+                Gfx_AddPrimitiveVertices((const GfxVertex *)&pQuad[k].verts, 3);
+                for (int c = 0; c < 3; c++) {
+                    const Quad2DRenderVertex *pV = &pQuad[k].verts.v[c];
+                    lx = pV->x < lx ? pV->x : lx;
+                    hx = pV->x > hx ? pV->x : hx;
+                    ly = pV->y < ly ? pV->y : ly;
+                    hy = pV->y > hy ? pV->y : hy;
+                    lz = pV->z < lz ? pV->z : lz;
+                    hz = pV->z > hz ? pV->z : hz;
+                }
+            }
+            const float low[3] = { lx, ly, lz }, high[3] = { hx, hy, hz };
+            Gfx_SetPrimitiveBox(low, high);
+        }
+        n += 3 * run;
+        CGame::m_unk0x0059ce20 += run;
+        pQuad += run;
+        i -= run;
     }
     if (n > 0) {
         if (layer & 8)
