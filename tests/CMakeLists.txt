@@ -252,6 +252,12 @@ add_executable(replay_events_test replay_events.cpp)
 target_link_libraries(replay_events_test PRIVATE opencmr2_platform)
 add_test(NAME replay_events COMMAND replay_events_test)
 
+# The game's dirt stamps on a texture: a compressed one stays on the GPU.
+add_executable(texture_stamp_test texture_stamp.cpp texture_stamp_access.cpp)
+target_include_directories(texture_stamp_test PRIVATE ${PROJECT_SOURCE_DIR}/game ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(texture_stamp_test PRIVATE opencmr2_platform)
+add_test(NAME texture_stamp COMMAND texture_stamp_test)
+
 add_executable(sector_culling_test sector_culling.cpp)
 target_link_libraries(sector_culling_test PRIVATE opencmr2_platform)
 add_test(NAME sector_culling COMMAND sector_culling_test)

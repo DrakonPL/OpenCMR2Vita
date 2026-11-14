@@ -780,7 +780,15 @@ void CGraphics::UnlockTexture(Texture *pTexture)
             break;
     }
     if (i != m_lockedTextureCount) {
-        Gfx_UnlockTexture(m_lockedTextures[i].pTexture->pSurface, 0, 0);
+        // PORT: a texture of another pixel size than 16 and 32 bits (a
+        // compressed one) got no pixel from BlendPixel, the only writer of
+        // this lock: it stays as it is on the GPU. The car's body texture of
+        // the dirt stamps is BC3 here, and each unlock made the renderer load
+        // it again with its mip levels in each frame of a wet stage (50 ms
+        // of each frame on the PS Vita).
+        const unsigned int bits = m_lockedTextures[i].desc.format.bitsPerPixel;
+        if (bits == 16 || bits == 32)
+            Gfx_UnlockTexture(m_lockedTextures[i].pTexture->pSurface, 0, 0);
         m_lockedTextures[i].pTexture = NULL;
         m_lockedTextureCount--;
     }

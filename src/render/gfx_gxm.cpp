@@ -269,12 +269,12 @@ struct Stats {
 enum ProbeMode {
     PROBE_OFF, PROBE_NORMAL, PROBE_QUARTER, PROBE_TILE, PROBE_NO_3D, PROBE_NO_DEPTH_PASS, PROBE_GENERAL,
     PROBE_FADE_ALWAYS, PROBE_DEPTH_PASS_ALWAYS, PROBE_LOOKUP_ONLY, PROBE_PROFILE, PROBE_UNIFORMS_ALWAYS,
-    PROBE_SINGLE_PASS, PROBE_TWO_PASSES, PROBE_END
+    PROBE_SINGLE_PASS, PROBE_TWO_PASSES, PROBE_NO_BLENDED_3D, PROBE_NO_2D, PROBE_END
 };
 const char *const kProbeNames[PROBE_END] = { "off",         "normal",        "quarter", "tile",
                                              "no 3D",       "no depth pass", "general", "fade always",
                                              "depth pass always", "lookup only", "profile", "uniforms always",
-                                             "single pass", "two passes" };
+                                             "single pass", "two passes", "no blended 3D", "no 2D" };
 
 // The steps the profile mode times: an Execute before its draws, then the
 // steps of a 3D draw in Draw's order.
@@ -289,8 +289,12 @@ enum ProfileSection {
     PROFILE_PASSES,     // the GXM calls of the draw's passes
     PROFILE_SECTIONS
 };
+// "no blended 3D" and "no 2D" split the GPU time of a frame: the blended 3D
+// draws (the trees, the smoke, the rain and the spray of a wet stage) and
+// the 2D draws (the HUD, the 2D layers).
 const int kProbeCycle[] = { PROBE_NORMAL,          PROBE_NO_3D,      PROBE_LOOKUP_ONLY, PROBE_TILE,
-                            PROBE_UNIFORMS_ALWAYS, PROBE_TWO_PASSES, PROBE_PROFILE };
+                            PROBE_UNIFORMS_ALWAYS, PROBE_TWO_PASSES, PROBE_PROFILE,     PROBE_NO_BLENDED_3D,
+                            PROBE_NO_2D };
 constexpr unsigned kProbeCycleModes = sizeof(kProbeCycle) / sizeof(kProbeCycle[0]);
 constexpr unsigned kProbeBlockFrames = 8;   // the frames of a mode's turn
 constexpr unsigned kProbeSkipFrames = 2;    // at the start of a turn: not counted
@@ -1394,7 +1398,9 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             loggedPrimitive = true;
             return;
         }
-        if (probe.mode == PROBE_NO_3D && !c.transformed)
+        if ((probe.mode == PROBE_NO_3D && !c.transformed) || (probe.mode == PROBE_NO_2D && c.transformed))
+            return;
+        if (probe.mode == PROBE_NO_BLENDED_3D && !c.transformed && frame.states[c.state].alphaBlend)
             return;
         // The profile mode sums the time of each step of a 3D draw.
         const bool profiled = probe.mode == PROBE_PROFILE && !c.transformed;
