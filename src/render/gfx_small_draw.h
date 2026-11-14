@@ -98,18 +98,26 @@ inline float Gfx_SmallDrawReach(const GfxMatrix &v, const GfxVertex *vertices, D
 // The box of the positions of count vertices (count is at least 1).
 inline void Gfx_VertexBox(const GfxVertex *vertices, DWORD count, float low[3], float high[3])
 {
-    low[0] = high[0] = vertices[0].x;
-    low[1] = high[1] = vertices[0].y;
-    low[2] = high[2] = vertices[0].z;
+    // In locals: the outputs can alias the vertices, and the compiler kept
+    // them in memory for each vertex (the tyre marks: 4,400 vertices in a
+    // frame).
+    float lx = vertices[0].x, ly = vertices[0].y, lz = vertices[0].z;
+    float hx = lx, hy = ly, hz = lz;
     for (DWORD i = 1; i < count; i++) {
         const GfxVertex &p = vertices[i];
-        low[0] = p.x < low[0] ? p.x : low[0];
-        high[0] = p.x > high[0] ? p.x : high[0];
-        low[1] = p.y < low[1] ? p.y : low[1];
-        high[1] = p.y > high[1] ? p.y : high[1];
-        low[2] = p.z < low[2] ? p.z : low[2];
-        high[2] = p.z > high[2] ? p.z : high[2];
+        lx = p.x < lx ? p.x : lx;
+        hx = p.x > hx ? p.x : hx;
+        ly = p.y < ly ? p.y : ly;
+        hy = p.y > hy ? p.y : hy;
+        lz = p.z < lz ? p.z : lz;
+        hz = p.z > hz ? p.z : hz;
     }
+    low[0] = lx;
+    low[1] = ly;
+    low[2] = lz;
+    high[0] = hx;
+    high[1] = hy;
+    high[2] = hz;
 }
 
 // Whether the texture coordinates of a draw are inside its texture: the

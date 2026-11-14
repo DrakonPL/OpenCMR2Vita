@@ -14,6 +14,7 @@
 #include "port/diagnostics.h"
 #include "render/gfx_batch_worker.h"
 #include "render/gfx_internal.h"
+#include "render/gfx_small_draw.h"
 #include "render/gxm_vertex_uniforms.h"
 
 #include <functional>
@@ -1188,6 +1189,48 @@ int main()
             REQUIRE(Draws() == (s_cullDraws ? 3u : 4u) && Draw(2).vertexCount == 6);
             REQUIRE(Vertex3D(Draw(1), 5).diffuse == 0xff000005u && Vertex3D(Draw(2), 0).diffuse == 0xff000006u);
             REQUIRE(Draw(1).firstVertexByte % sizeof(GfxVertex) == 0 && Draw(1).firstVertexByte != 0);
+            // The same with the box from the caller (the quad layers of the
+            // game).
+            const auto withBox = [&](int first, int count) {
+                Gfx_BeginPrimitive(GFX_TRIANGLELIST);
+                Gfx_AddPrimitiveVertices(quads + first, (DWORD)count);
+                float low[3], high[3];
+                Gfx_VertexBox(quads + first, (DWORD)count, low, high);
+                Gfx_SetPrimitiveBox(low, high);
+                Gfx_EndPrimitive();
+                return true;
+            };
+            Sprite(1.0f);
+            REQUIRE(withBox(0, 6));
+            Gfx_SetAlphaRef(4);
+            REQUIRE(withBox(6, 6));
+            REQUIRE(withBox(12, 6));
+            Gfx_BeginPrimitive(GFX_TRIANGLELIST);
+            Gfx_EndPrimitive();
+            Gfx_SetAlphaRef(0);
+            Gfx_Present(FALSE);
+            REQUIRE(FrameText() == made && s_frame.vertices.size() == madeBytes);
+        }
+        // The box from the caller is the draw's box, for the view test too:
+        // one outside the view leaves the draw out.
+        {
+            s_joins = true;
+            const float low[3] = { -0.5f, -0.25f, 0.25f }, high[3] = { 0.5f, 0.75f, 0.75f };
+            Gfx_BeginPrimitive(GFX_TRIANGLELIST);
+            Gfx_AddPrimitiveVertices(quads, 3);
+            Gfx_SetPrimitiveBox(low, high);
+            Gfx_EndPrimitive();
+            Gfx_Present(FALSE);
+            REQUIRE(Draws() == 1 && Draw(0).boxLow[0] == -0.5f && Draw(0).boxHigh[1] == 0.75f);
+            s_cullDraws = 1;
+            const float farLow[3] = { 200.0f, 0.0f, 0.5f }, farHigh[3] = { 201.0f, 0.0f, 0.5f };
+            Gfx_BeginPrimitive(GFX_TRIANGLELIST);
+            Gfx_AddPrimitiveVertices(quads, 3);
+            Gfx_SetPrimitiveBox(farLow, farHigh);
+            Gfx_EndPrimitive();
+            Gfx_Present(FALSE);
+            REQUIRE(Draws() == 0 && s_frame.vertices.empty());
+            s_cullDraws = 0;
         }
         s_joins = true;
         s_cullDraws = 0;

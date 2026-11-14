@@ -373,6 +373,9 @@ void Gfx_DrawPrimitiveVB(int primitive, GfxVertexBuffer *buffer, DWORD firstVert
    other draw between the begin and the end. */
 void Gfx_BeginPrimitive(int primitive);
 void Gfx_AddPrimitiveVertices(const GfxVertex *vertices, DWORD vertexCount);
+/* The box of the positions of all the vertices of the primitive, from the
+   caller that measured them: Gfx_EndPrimitive then does not. */
+void Gfx_SetPrimitiveBox(const float low[3], const float high[3]);
 void Gfx_EndPrimitive(void);
 /* Whether a range of a vertex buffer can be in the view, with the current
    world, view and projection matrices: FALSE where each of its vertices is
