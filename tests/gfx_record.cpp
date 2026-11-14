@@ -1789,6 +1789,67 @@ int main()
         REQUIRE(Gfx_PerfStatsWanted() && !small() && small());
     }
 
+    // The least alpha of a buffer's colours goes with each draw of it
+    // without blending and with the alpha test, as of the submit. The
+    // executor then reads no GPU copy. It only goes down. A buffer drawn
+    // from its GPU copy rested since its last lock (kStaticAfterFrames).
+    {
+        s_joins = false;
+        const auto rest = [] {
+            for (int i = 0; i < 5; i++)
+                Gfx_Present(FALSE);
+        };
+        GfxVertexBuffer *mesh = Gfx_CreateVertexBuffer(8);
+        GfxVertex *v = Gfx_LockVertexBuffer(mesh);
+        for (int i = 0; i < 8; i++) {
+            v[i].diffuse = 0xff808080;
+            v[i].specular = 0xf0000000;
+        }
+        Gfx_UnlockVertexBuffer(mesh);
+        rest();
+        Gfx_SetAlphaBlend(FALSE);
+        Gfx_SetAlphaTest(TRUE);
+        Gfx_DrawPrimitiveVB(GFX_TRIANGLELIST, mesh, 0, 3);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && Draw(0).buffer == mesh && Draw(0).vertexAlphaKnown);
+        REQUIRE(Draw(0).vertexAlpha[0] == 0xff && Draw(0).vertexAlpha[1] == 0xf0);
+        // A lock that lowers a vertex outside the draw: the buffer's least
+        // alpha at the next submit.
+        v = Gfx_LockVertexBuffer(mesh);
+        v[5].diffuse = 0x40808080;
+        Gfx_UnlockVertexBuffer(mesh);
+        rest();
+        Gfx_DrawPrimitiveVB(GFX_TRIANGLELIST, mesh, 0, 3);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && Draw(0).buffer == mesh && Draw(0).vertexAlpha[0] == 0x40);
+        // Written back: the least alpha stays.
+        v = Gfx_LockVertexBuffer(mesh);
+        v[5].diffuse = 0xff808080;
+        Gfx_UnlockVertexBuffer(mesh);
+        rest();
+        Gfx_DrawPrimitiveVB(GFX_TRIANGLELIST, mesh, 0, 3);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && Draw(0).buffer == mesh && Draw(0).vertexAlpha[0] == 0x40);
+        // A blended draw, and one without the test: none.
+        Gfx_SetAlphaBlend(TRUE);
+        Gfx_DrawPrimitiveVB(GFX_TRIANGLELIST, mesh, 0, 3);
+        Gfx_SetAlphaBlend(FALSE);
+        Gfx_SetAlphaTest(FALSE);
+        Gfx_DrawPrimitiveVB(GFX_TRIANGLELIST, mesh, 3, 3);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 2 && !Draw(0).vertexAlphaKnown && !Draw(1).vertexAlphaKnown);
+        // A buffer that the game never wrote: alpha 0.
+        GfxVertexBuffer *fresh = Gfx_CreateVertexBuffer(4);
+        rest();
+        Gfx_SetAlphaTest(TRUE);
+        Gfx_DrawPrimitiveVB(GFX_TRIANGLELIST, fresh, 0, 3);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && Draw(0).buffer == fresh && Draw(0).vertexAlphaKnown && Draw(0).vertexAlpha[0] == 0);
+        Gfx_SetAlphaTest(FALSE);
+        Gfx_DestroyVertexBuffer(fresh);
+        Gfx_DestroyVertexBuffer(mesh);
+    }
+
     printf("gfx_record: ok\n");
     return 0;
 }

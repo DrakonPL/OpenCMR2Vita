@@ -215,6 +215,7 @@ struct Stats {
     // Draws without blending whose alpha test passes for each pixel: drawn
     // without it, or with it for want of a variant without it.
     unsigned alphaTestDropped = 0, alphaTestNoVariant = 0;
+    unsigned alphaOwnVertices = 0;      // the frame's own vertices read for it
     unsigned skyPlans[GFX_SKY_RESULT_COUNT] = {};
     // The time of Prepare (the game's thread) and of Execute without the
     // wait of its present (the worker with the threaded executor), and the
@@ -1513,6 +1514,30 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         return bound >= Gfx_AlphaThreshold(s) + 1.0f / 1024.0f;
     }
 
+    // Whether the alpha test of a 3D draw passes for each of its pixels,
+    // without a read of a GPU copy: the least alpha of a buffer's colours
+    // comes with the draw (GfxCommand::vertexAlpha), the frame's own
+    // vertices are in cached memory. The GPU copies are not cached: 200,000
+    // vertices read in each second took 10 ms of each frame of a race.
+    bool AlphaTestPassesEverywhere(const GfxCommand &c, const GfxFrame &frame, const GfxDrawState &s)
+    {
+        DrawRange range;
+        if (c.buffer != nullptr) {
+            if (!c.vertexAlphaKnown)
+                return false;
+            range.diffuseAlpha = c.vertexAlpha[0];
+            range.specularAlpha = c.vertexAlpha[1];
+        } else {
+            if (c.transformed || c.vertexCount == 0 ||
+                (size_t)c.firstVertexByte + (size_t)c.vertexCount * sizeof(GfxVertex) > frame.vertices.size())
+                return false;
+            MeasureRange((const GfxVertex *)(frame.vertices.data() + c.firstVertexByte), c.vertexCount, false, true,
+                         range);
+            stats.alphaOwnVertices += c.vertexCount;
+        }
+        return AlphaTestAlwaysPasses(s, range);
+    }
+
     // vertexOffset, indexOffset: the Execute's data in the ring (kFull: none).
     void Draw(const GfxCommand &c, GfxFrame &frame, unsigned vertexOffset, unsigned indexOffset,
               bool backBuffer, int targetW, int targetH)
@@ -1627,9 +1652,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         // the SGX543 for the pixels of the draw.
         if (!c.transformed && s.alphaTest && !s.alphaBlend && (key & kAlphaTestKeyBit) != 0 &&
             probe.mode != PROBE_ALPHA_TEST_KEPT) {
-            DrawRange alphaScratch;
-            const DrawRange *alphaRange = RangeOf(c, frame, false, true, alphaScratch);
-            if (alphaRange != nullptr && AlphaTestAlwaysPasses(s, *alphaRange)) {
+            if (AlphaTestPassesEverywhere(c, frame, s)) {
                 const uint64_t keyWithout = key & ~kAlphaTestKeyBit, argsWithout = args & ~kAlphaCompareArgs;
                 if (HasMadeVariant(keyWithout, argsWithout)) {
                     key = keyWithout;
@@ -1946,9 +1969,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             GfxDrawState &s = frame.states[c.state];
             s.stages[0].texture = c.textures[0];
             s.stages[1].texture = c.textures[1];
-            DrawRange scratch;
-            const DrawRange *range = RangeOf(c, frame, false, true, scratch);
-            return range != nullptr && AlphaTestAlwaysPasses(s, *range);
+            return AlphaTestPassesEverywhere(c, frame, s);
         });
         stats.skyPlans[skyPlan.result]++;
         // A back buffer scene of an Execute before this one in the frame: a
@@ -2592,7 +2613,8 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         // The skies: into the backdrop, stretched, the stencil draws of the
         // near ground, and the plans that drew the sky as recorded.
         Sys_Log("gxm: per s alpha test: %u draws without it (it passes for each pixel), %u with it for want of "
-                "a variant", stats.alphaTestDropped, stats.alphaTestNoVariant);
+                "a variant, %u own vertices read",
+                stats.alphaTestDropped, stats.alphaTestNoVariant, stats.alphaOwnVertices);
         Sys_Log("gxm: per s sky: %u into the backdrop, %u stretched, %u stencil draws; plans: %u ok, %u none, "
                 "%u many, %u no clear, %u drawn under, %u other draw",
                 stats.skyBackdrop, stats.skyHalf, stats.stencilDraws, stats.skyPlans[GFX_SKY_PLAN_OK],
