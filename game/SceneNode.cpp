@@ -8,6 +8,8 @@
 #include "Graphics.h"
 #include "Game.h"
 #include "Sector.h"
+#include "RelightBudget.h"
+#include "port/sys.h"
 #include "Mesh.h"
 #include "MeshVertex.h"
 #include "ShadowPart.h"
@@ -1002,6 +1004,10 @@ extern int g_unk0x005210c0;
         }                                                                           \
     }
 
+// PORT: the vertices that Scene_RelightSector lit for a new light of the
+// scene (the budget of Scene_RelightVisibleSectors).
+static int s_relitVertices;
+
 // PORT: the colour of a light level from a table, as Scene_GetLightColourD3D
 // and Scene_GetShadowColourD3D give it, for the loops over the vertices of
 // Scene_RelightSector: no call for each vertex. The tables are built before
@@ -1068,9 +1074,11 @@ void Scene_RelightSector(int sector)
                     pVertex += 0x30;
                 }
                 Mesh_RefreshVertices(pMesh);
+                s_relitVertices += pMesh->field_0x10;
             }
             for (pObject = pSector->pObjects; pObject != NULL; pObject = pObject->pNext) {
                 pMesh = pObject->pMesh;
+                s_relitVertices += pMesh->field_0x10;
                 if ((pMesh->flags & 0x80) == 0) {
                     Scene_GetLightColourD3D(&colour, pObject->lightLevel);
                     Mesh_SetColourAndRefresh(pMesh, colour);
@@ -1098,6 +1106,7 @@ void Scene_RelightSector(int sector)
          force) &&
         (pShadow = g_sceneShadowMeshes[sector]) != NULL) {
         pLevel = pShadow->pLightLevels;
+        s_relitVertices += pShadow->field_0x10;
         if (g_unk0x005210c0 != 0) {
             pZone = &g_sceneLightZones[g_sceneSectorZone[sector]];
             pVertex = (BYTE *)pShadow->pVertexData;
@@ -1132,6 +1141,38 @@ void Scene_RelightSector(int sector)
         }
         Mesh_RefreshVertices(pShadow);
     }
+}
+
+// PORT: relights the sectors in view (the indices of g_visibleSectorIndices)
+// within the budget of [video] relight_budget vertices in a frame
+// (RelightBudget.h): a sector whose colours wait for a new light of the
+// scene can wait for the next frame. The loop of Game_DrawSceneViewport
+// without a budget (0: the PC's default).
+void Scene_RelightVisibleSectors(const unsigned short *pIndices, unsigned count)
+{
+    static unsigned s_cursor;
+    const int budget = g_sceneSectorLights != NULL ? Sys_GetOption("video.relight_budget", 0) : 0;
+    s_cursor = Relight_InBudget(
+        count, s_cursor, budget,
+        [pIndices](unsigned i) {
+            const int sector = pIndices[i];
+            const BYTE *pStored = (const BYTE *)g_sceneSectorLights + sector * 4;
+            const BYTE *pStored2 = (const BYTE *)g_sceneSectorLights2 + sector * 4;
+            const bool changed = g_sceneAmbientColour[0] != pStored[0] || g_sceneAmbientColour[1] != pStored[1] ||
+                                 g_sceneAmbientColour[2] != pStored[2] ||
+                                 g_sceneLightColourBytes[0] != pStored2[0] ||
+                                 g_sceneLightColourBytes[1] != pStored2[1] || g_sceneLightColourBytes[2] != pStored2[2];
+            if (!changed)
+                return (int)RELIGHT_NONE;
+            // Never lit: the stage's setup lit each sector, and a lit one keeps
+            // a colour of alpha 0xff.
+            return ((const DWORD *)g_sceneSectorLights)[sector] == 0 ? (int)RELIGHT_NOW : (int)RELIGHT_LATER_OK;
+        },
+        [pIndices](unsigned i) {
+            s_relitVertices = 0;
+            Scene_RelightSector(pIndices[i]);
+            return s_relitVertices;
+        });
 }
 
 int Scene_ApplyGroundLightToMeshTree(SceneNode *pNode, int param_2);
