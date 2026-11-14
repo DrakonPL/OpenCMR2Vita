@@ -172,6 +172,26 @@ int main()
         }
     }
 
+    // An alpha test without blending (the game's ground): a draw whose test
+    // passes for each pixel is listed, one whose test can fail ends the list.
+    {
+        Builder b;
+        const uint32_t sky = b.State(true, true, false, false);
+        const uint32_t tested = b.State(false, true, true, true);
+        b.Clear(GFX_CLEAR_ZBUFFER);
+        b.Sky(true);
+        b.Draw(sky);
+        b.Sky(false);
+        b.Backdrop();
+        const size_t solid = b.Draw(tested);
+        const size_t fence = b.Draw(tested);
+        b.Draw(tested);
+        const GfxSkyPlan plan = Gfx_PlanSky(b.frame, kW, kH, [&](size_t i) { return i != fence; });
+        REQUIRE(plan.result == GFX_SKY_PLAN_OK && plan.occluders.size() == 1 && plan.occluders[0] == solid);
+        // Without the executor's answer: none.
+        REQUIRE(Gfx_PlanSky(b.frame, kW, kH).occluders.empty());
+    }
+
     // A clear of the depth after the sky ends the list; a depth cleared to
     // other than the far plane gives none.
     {
@@ -249,14 +269,27 @@ int main()
         REQUIRE(Gfx_PlanSky(b.frame, kW, kH).result == GFX_SKY_MANY);
     }
     {
-        // No clear of the colour, or a clear of a part of the screen.
+        // A race: the game clears only the depth, and the dome of the sky
+        // covers an older frame. The backdrop starts black; the ground after
+        // the sky is listed.
         Builder b;
         const uint32_t sky = b.State(true, true, false, false);
+        const uint32_t ground = b.State(false, false, true, true);
         b.Clear(GFX_CLEAR_ZBUFFER);
         b.Sky(true);
         b.Draw(sky);
         b.Sky(false);
-        REQUIRE(Gfx_PlanSky(b.frame, kW, kH).result == GFX_SKY_NO_CLEAR);
+        b.Backdrop();
+        const size_t g = b.Draw(ground);
+        GfxSkyPlan plan = Gfx_PlanSky(b.frame, kW, kH);
+        REQUIRE(plan.result == GFX_SKY_PLAN_OK && plan.clearColor == 0xff000000 && plan.backdropAfter);
+        REQUIRE(plan.occluders.size() == 1 && plan.occluders[0] == g);
+        // A draw before the sky with no clear of the colour at all.
+        b.frame.commands.insert(b.frame.commands.begin(), b.frame.commands[g]);
+        REQUIRE(Gfx_PlanSky(b.frame, kW, kH).result == GFX_SKY_DRAWN_UNDER);
+        b.frame.commands.erase(b.frame.commands.begin());
+        b.frame.commands.resize(4);
+        // A clear of the colour over a part of the screen.
         b.frame.commands[0].clearFlags = GFX_CLEAR_TARGET;
         b.frame.commands[0].clearViewport.width = kW / 2;
         REQUIRE(Gfx_PlanSky(b.frame, kW, kH).result == GFX_SKY_NO_CLEAR);
