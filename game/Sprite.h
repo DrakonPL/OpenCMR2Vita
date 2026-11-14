@@ -79,6 +79,10 @@ struct Quad2D {
 
 // A destination is either layer flags or a native address.
 void Quad2D_Queue(Quad2DVertices *pVerts, Texture *pTexture, UINT_PTR pDest);
+// PORT: count triangles that the caller did not queue in the layer 0x20
+// because they draw nothing (behind the camera). They take room in the layer
+// as if queued: the layer is then full at the same triangle as before.
+void Quad2D_LeaveOutTriangles(UINT_PTR pDest, unsigned int count);
 void Quad2D_QueueFixedTriangle(int, Quad2DInputVertex *pA, Quad2DInputVertex *pB, Quad2DInputVertex *pC,
                                Texture *pTexture, UINT_PTR pDest);
 

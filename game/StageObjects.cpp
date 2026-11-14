@@ -41,6 +41,7 @@ short Car_GetOrderCount(void);
 #include "Mesh.h"
 #include "MeshVertex.h"
 #include "CarParts.h"
+#include "EyePlane.h"
 #include "CarLightState.h"
 #include "Graphics.h"
 #include "Font.h"
@@ -1222,6 +1223,15 @@ void CarEffects_DrawTyreMarks(int index)
 
     if (index >= 8 || CGameInfo::GetGraphicsOptionBits25To26() == 2)
         return;
+    // PORT: a mark with each corner behind the eye of the view draws nothing
+    // (EyePlane.h), so its two triangles are not made. In a race most marks
+    // of a car are behind the camera. The view of the renderer is the view
+    // of the draw of the layer: nothing sets it between here and there.
+    GfxMatrix eyeView;
+    GfxMatrix eyeProjection;
+    Gfx_GetTransform(GFX_TRANSFORM_VIEW, &eyeView);
+    Gfx_GetTransform(GFX_TRANSFORM_PROJECTION, &eyeProjection);
+    const EyePlane eye = EyePlane_Of(&eyeView._11, &eyeProjection._11);
     pHead = g_unk0x00549ba0[index];
     base = index * 800;
     a.u = 0;
@@ -1283,6 +1293,17 @@ void CarEffects_DrawTyreMarks(int index)
                     alpha3 = StageObject_ClampByteRange(alpha3);
                     if (alpha0 <= 1 && alpha1 <= 1 && alpha2 <= 1 && alpha3 <= 1)
                         continue;
+                    // PORT: behind the eye (see above). The layer counts the
+                    // two triangles the game would queue, so it is full at
+                    // the same mark as before.
+                    if (EyePlane_Behind(eye, pCur->left.x, pCur->left.y, pCur->left.z) &&
+                        EyePlane_Behind(eye, pCur->right.x, pCur->right.y, pCur->right.z) &&
+                        EyePlane_Behind(eye, pPrev->left.x, pPrev->left.y, pPrev->left.z) &&
+                        EyePlane_Behind(eye, pPrev->right.x, pPrev->right.y, pPrev->right.z)) {
+                        if (pPrev->left.x != pPrev->right.x || pPrev->left.y != pPrev->right.y)
+                            Quad2D_LeaveOutTriangles(0x26, 2);
+                        continue;
+                    }
                     curColour[0] = pCur->colour[0];
                     curColour[1] = pCur->colour[1];
                     curColour[2] = pCur->colour[2];

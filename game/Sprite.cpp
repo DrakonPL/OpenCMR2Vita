@@ -680,6 +680,8 @@ unsigned int g_quad2DCountD;
 BYTE g_quad2DConvertOverflow;
 // GLOBAL: CMR2 0x0081618d
 BYTE g_quad2DOverflow;
+// PORT: the triangles left out of the layer 0x20 (Quad2D_LeaveOutTriangles).
+static unsigned int s_quad2DLeftOutC;
 
 // pDest carries either numeric layer flags or a native destination address.
 // flags retains only the 32-bit render mask; it is never used to rebuild p.
@@ -708,7 +710,7 @@ void Quad2D_Queue(Quad2DVertices *pVerts, Texture *pTexture, UINT_PTR pDest)
         p = &g_quad2DLayerB[g_quad2DCountB];
         g_quad2DCountB++;
     } else if (pDest & 0x20) {
-        if (g_quad2DCountC >= 0x800) {
+        if (g_quad2DCountC + s_quad2DLeftOutC >= 0x800) {
             if (g_quad2DOverflow == 0)
                 g_quad2DOverflow = 1;
             return;
@@ -792,6 +794,7 @@ void Quad2D_DrawLayer(unsigned int layer)
         count = g_quad2DCountC;
         pQuad = g_quad2DLayerC;
         g_quad2DCountC = 0;
+        s_quad2DLeftOutC = 0;
     } else {
         count = g_quad2DCountD;
         pQuad = g_quad2DLayerD;
@@ -863,6 +866,16 @@ void Quad2D_DrawLayer(unsigned int layer)
     CGraphics::InvalidateBlendStateCache();
 }
 
+// PORT: see Sprite.h. Only the layer 0x20 has this count.
+void Quad2D_LeaveOutTriangles(UINT_PTR pDest, unsigned int count)
+{
+    if ((pDest & 0x18) != 0 || (pDest & 0x20) == 0)
+        return;
+    if (g_quad2DCountC + s_quad2DLeftOutC + count > 0x800 && g_quad2DConvertOverflow == 0)
+        g_quad2DConvertOverflow = 1;
+    s_quad2DLeftOutC += count;
+}
+
 // Converts three fixed-point vertices and queues them in the selected layer.
 // FUNCTION: CMR2 0x004bba00
 void Quad2D_QueueFixedTriangle(int, Quad2DInputVertex *pA,
@@ -889,7 +902,7 @@ void Quad2D_QueueFixedTriangle(int, Quad2DInputVertex *pA,
         p = &g_quad2DLayerB[g_quad2DCountB];
         g_quad2DCountB++;
     } else if (pDest & 0x20) {
-        if (g_quad2DCountC >= 0x800) {
+        if (g_quad2DCountC + s_quad2DLeftOutC >= 0x800) {
             if (g_quad2DConvertOverflow == 0)
                 g_quad2DConvertOverflow = 1;
             return;
