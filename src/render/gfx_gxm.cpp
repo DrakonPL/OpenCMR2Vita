@@ -4,6 +4,7 @@
 // fragment key and alpha test form), patched per blend pair.
 
 #include "platform/platform_vita.h"
+#include "port/diagnostics.h"
 #include "port/sys.h"
 #include "render/gfx_batch_worker.h"
 #include "render/gfx_executor_shared.h"
@@ -269,12 +270,14 @@ struct Stats {
 enum ProbeMode {
     PROBE_OFF, PROBE_NORMAL, PROBE_QUARTER, PROBE_TILE, PROBE_NO_3D, PROBE_NO_DEPTH_PASS, PROBE_GENERAL,
     PROBE_FADE_ALWAYS, PROBE_DEPTH_PASS_ALWAYS, PROBE_LOOKUP_ONLY, PROBE_PROFILE, PROBE_UNIFORMS_ALWAYS,
-    PROBE_SINGLE_PASS, PROBE_TWO_PASSES, PROBE_NO_BLENDED_3D, PROBE_NO_2D, PROBE_END
+    PROBE_SINGLE_PASS, PROBE_TWO_PASSES, PROBE_NO_BLENDED_3D, PROBE_NO_2D, PROBE_NO_QUADS, PROBE_NO_LAYERS,
+    PROBE_NO_BILLBOARDS, PROBE_NO_PARTICLES, PROBE_END
 };
 const char *const kProbeNames[PROBE_END] = { "off",         "normal",        "quarter", "tile",
                                              "no 3D",       "no depth pass", "general", "fade always",
                                              "depth pass always", "lookup only", "profile", "uniforms always",
-                                             "single pass", "two passes", "no blended 3D", "no 2D" };
+                                             "single pass", "two passes", "no blended 3D", "no 2D",
+                                             "no 3D quads", "no layers", "no billboards", "no particles" };
 
 // The steps the profile mode times: an Execute before its draws, then the
 // steps of a 3D draw in Draw's order.
@@ -289,12 +292,16 @@ enum ProfileSection {
     PROFILE_PASSES,     // the GXM calls of the draw's passes
     PROFILE_SECTIONS
 };
-// "no blended 3D" and "no 2D" split the GPU time of a frame: the blended 3D
-// draws (the trees, the smoke, the rain and the spray of a wet stage) and
-// the 2D draws (the HUD, the 2D layers).
-const int kProbeCycle[] = { PROBE_NORMAL,          PROBE_NO_3D,      PROBE_LOOKUP_ONLY, PROBE_TILE,
-                            PROBE_UNIFORMS_ALWAYS, PROBE_TWO_PASSES, PROBE_PROFILE,     PROBE_NO_BLENDED_3D,
-                            PROBE_NO_2D };
+// The modes split the GPU time of a frame by its draws: the blended 3D
+// draws (the trees, the smoke, the rain and the spray of a wet stage), the
+// 2D draws (the HUD, the 2D layers), and the draws of a part of the scene
+// (GfxCommand::part, dev builds): the 3D quad layers (the rain streaks, the
+// tyre marks), the rest of the layers (the billboards of the rain splashes
+// and the spray, the lines, the glow), the sorted stage objects (the trees),
+// the particles.
+const int kProbeCycle[] = { PROBE_NORMAL,        PROBE_NO_3D,    PROBE_TILE,      PROBE_NO_BLENDED_3D,
+                            PROBE_NO_2D,         PROBE_NO_QUADS, PROBE_NO_LAYERS, PROBE_NO_BILLBOARDS,
+                            PROBE_NO_PARTICLES };
 constexpr unsigned kProbeCycleModes = sizeof(kProbeCycle) / sizeof(kProbeCycle[0]);
 constexpr unsigned kProbeBlockFrames = 8;   // the frames of a mode's turn
 constexpr unsigned kProbeSkipFrames = 2;    // at the start of a turn: not counted
@@ -1401,6 +1408,11 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         if ((probe.mode == PROBE_NO_3D && !c.transformed) || (probe.mode == PROBE_NO_2D && c.transformed))
             return;
         if (probe.mode == PROBE_NO_BLENDED_3D && !c.transformed && frame.states[c.state].alphaBlend)
+            return;
+        if ((probe.mode == PROBE_NO_QUADS && c.part == Diagnostics::SCENE_PART_QUADS) ||
+            (probe.mode == PROBE_NO_LAYERS && c.part == Diagnostics::SCENE_PART_LAYERS) ||
+            (probe.mode == PROBE_NO_BILLBOARDS && c.part == Diagnostics::SCENE_PART_BILLBOARDS) ||
+            (probe.mode == PROBE_NO_PARTICLES && c.part == Diagnostics::SCENE_PART_PARTICLES))
             return;
         // The profile mode sums the time of each step of a 3D draw.
         const bool profiled = probe.mode == PROBE_PROFILE && !c.transformed;

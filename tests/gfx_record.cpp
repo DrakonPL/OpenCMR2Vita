@@ -11,6 +11,7 @@
 // which the executor copies. A draw outside the view is left out.
 
 #include "port/sys.h"
+#include "port/diagnostics.h"
 #include "render/gfx_batch_worker.h"
 #include "render/gfx_internal.h"
 #include "render/gxm_vertex_uniforms.h"
@@ -1037,6 +1038,51 @@ int main()
         Gfx_SetTransform(GFX_TRANSFORM_VIEW, &view);
         Gfx_SetTransform(GFX_TRANSFORM_PROJECTION, &projection);
         s_cullDraws = 0;
+        Gfx_Present(FALSE);
+    }
+
+    // Each draw has the part of the scene that recorded it (GfxCommand::part,
+    // for the probe): a draw alone, a draw whose vertices come in parts, and
+    // the draws of a batch.
+    {
+        struct PartObserver : Diagnostics::Observer {
+            int part = Diagnostics::SCENE_PART_NONE;
+            int Part() const override { return part; }
+        } parts;
+        s_joins = true;
+        Gfx_Present(FALSE);
+        Diagnostics::observer = &parts;
+        parts.part = Diagnostics::SCENE_PART_LAYERS;
+        Sprite(1.0f);
+        parts.part = Diagnostics::SCENE_PART_QUADS;
+        GfxVertex tri[3] = {};
+        tri[1].x = 1.0f;
+        tri[2].y = 1.0f;
+        Gfx_BeginPrimitive(GFX_TRIANGLELIST);
+        Gfx_AddPrimitiveVertices(tri, 3);
+        Gfx_EndPrimitive();
+        parts.part = Diagnostics::SCENE_PART_BILLBOARDS;
+        GfxVertexBuffer *quadBuffer = Gfx_CreateVertexBuffer(4);
+        GfxVertex *q = Gfx_LockVertexBuffer(quadBuffer);
+        for (int i = 0; i < 4; i++) {
+            q[i].x = (float)(i & 1);
+            q[i].y = (float)(i >> 1);
+        }
+        Gfx_UnlockVertexBuffer(quadBuffer);
+        const WORD quadIndices[6] = { 0, 1, 2, 2, 1, 3 };
+        GfxMatrix world = Identity();
+        world._41 = 0.5f;
+        const GfxBatchDraw one = { &world, NULL, quadBuffer, 0, 4, quadIndices, 6 };
+        Gfx_DrawBatch(&one, 1);
+        parts.part = Diagnostics::SCENE_PART_NONE;
+        Gfx_Present(FALSE);
+        Diagnostics::observer = nullptr;
+        REQUIRE(Draws() == 3);
+        REQUIRE(Draw(0).part == Diagnostics::SCENE_PART_LAYERS && Draw(1).part == Diagnostics::SCENE_PART_QUADS);
+        REQUIRE(Draw(2).part == Diagnostics::SCENE_PART_BILLBOARDS);
+        const GfxMatrix identity = Identity();
+        Gfx_SetTransform(GFX_TRANSFORM_WORLD, &identity);
+        Gfx_DestroyVertexBuffer(quadBuffer);
         Gfx_Present(FALSE);
     }
 
