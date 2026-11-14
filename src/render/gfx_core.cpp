@@ -285,14 +285,7 @@ const AtlasEntry *FindAtlasEntry(GfxTexture *t)
     tile.y0 = y * 4;
     tile.x1 = (x + w + 2) * 4;
     tile.y1 = (y + h + 2) * 4;
-    if (c.Empty()) {
-        c = tile;
-    } else {
-        c.x0 = tile.x0 < c.x0 ? tile.x0 : c.x0;
-        c.y0 = tile.y0 < c.y0 ? tile.y0 : c.y0;
-        c.x1 = tile.x1 > c.x1 ? tile.x1 : c.x1;
-        c.y1 = tile.y1 > c.y1 ? tile.y1 : c.y1;
-    }
+    c = Gfx_MipRectUnion(c, tile);
     s_atlas->dirty = true;
     s_atlasEntries.push_back({ t, (x + 1) * 4, (y + 1) * 4 });
     return &s_atlasEntries.back();
@@ -2411,10 +2404,36 @@ extern "C" BOOL Gfx_LockTexture(GfxTexture *texture, int face, int mip, GfxLocke
     return TRUE;
 }
 
+// GfxTexture::changedRect of a texture that is not the atlas: the part of
+// level 0 that changed since the upload, while the texture is dirty. Empty:
+// all of it (and of each level).
 extern "C" void Gfx_UnlockTexture(GfxTexture *texture, int, int)
 {
-    if (texture != NULL)
-        Root(texture)->dirty = true;
+    if (texture == NULL)
+        return;
+    texture = Root(texture);
+    texture->dirty = true;
+    texture->changedRect = GfxMipRect();
+}
+
+extern "C" void Gfx_UnlockTextureRect(GfxTexture *texture, int x0, int y0, int x1, int y1)
+{
+    if (texture == NULL)
+        return;
+    texture = Root(texture);
+    GfxMipRect part;
+    part.x0 = x0 < 0 ? 0 : x0;
+    part.y0 = y0 < 0 ? 0 : y0;
+    part.x1 = x1 < texture->width ? x1 : texture->width;
+    part.y1 = y1 < texture->height ? y1 : texture->height;
+    if (part.Empty())
+        return;
+    // A texture that is dirty in all of it stays so.
+    if (!texture->dirty)
+        texture->changedRect = part;
+    else if (!texture->changedRect.Empty())
+        texture->changedRect = Gfx_MipRectUnion(texture->changedRect, part);
+    texture->dirty = true;
 }
 
 namespace {

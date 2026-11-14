@@ -1,7 +1,8 @@
 // The dirt stamps of the game (CGraphics::LockTexture, BlendPixel,
 // UnlockTexture, game/Graphics.cpp): a texture of 32-bit pixels gets the
-// stamp and goes to the GPU again. A compressed texture gets no pixel, and
-// stays as it is on the GPU: no new upload in each frame of a wet stage.
+// stamp, and the renderer gets the part that changed. A compressed texture
+// gets no pixel, and stays as it is on the GPU: no new upload in each frame
+// of a wet stage.
 
 #include "port/types.h"
 #include "Graphics.h"
@@ -19,16 +20,27 @@
 struct GfxTexture;
 bool Test_TextureDirty(GfxTexture *t);
 void Test_ClearDirty(GfxTexture *t);
+void Test_ChangedRect(GfxTexture *t, int *x0, int *y0, int *x1, int *y1);
 
 namespace {
 
-int Stamp(Texture &texture)
+// Stamps the pixel x, y of a lock of the rectangle from left, top (as
+// StageObject_StampPendingEventDraws locks a quarter of the texture).
+int Stamp(Texture &texture, int x = 3, int y = 2, int left = 0, int top = 0)
 {
     BYTE colour[4] = { 0x2f, 0x27, 0x14, 0xff };
-    CGraphics::LockTexture(&texture, NULL);
-    CGraphics::BlendPixel(&texture, 3, 2, colour);
+    RECT rect = { left, top, texture.width, texture.height };
+    CGraphics::LockTexture(&texture, left != 0 || top != 0 ? &rect : NULL);
+    CGraphics::BlendPixel(&texture, (unsigned)x, (unsigned)y, colour);
     CGraphics::UnlockTexture(&texture);
     return 0;
+}
+
+bool ChangedIs(GfxTexture *t, int x0, int y0, int x1, int y1)
+{
+    int a, b, c, d;
+    Test_ChangedRect(t, &a, &b, &c, &d);
+    return a == x0 && b == y0 && c == x1 && d == y1;
 }
 
 } // namespace
@@ -52,7 +64,19 @@ int main()
     REQUIRE(pixel == GFX_RGBA(0x2f, 0x27, 0x14, 0xff));
     Test_ClearDirty(plain.pSurface);
     Stamp(plain);
-    REQUIRE(Test_TextureDirty(plain.pSurface));
+    REQUIRE(Test_TextureDirty(plain.pSurface) && ChangedIs(plain.pSurface, 3, 2, 4, 3));
+    // The part of a lock of a rectangle is in the texture's pixels, and two
+    // stamps before the upload give the part with both.
+    Stamp(plain, 1, 4, 8, 8);
+    REQUIRE(ChangedIs(plain.pSurface, 3, 2, 10, 13));
+    REQUIRE(Gfx_LockTexture(plain.pSurface, 0, 0, &rect));
+    memcpy(&pixel, (const BYTE *)rect.pixels + 12 * rect.pitch + 9 * 4, 4);
+    REQUIRE(pixel == GFX_RGBA(0x2f, 0x27, 0x14, 0xff));
+    // A lock of all of the texture (here the renderer's): all of it changed.
+    Gfx_UnlockTexture(plain.pSurface, 0, 0);
+    REQUIRE(ChangedIs(plain.pSurface, 0, 0, 0, 0));
+    Stamp(plain);
+    REQUIRE(ChangedIs(plain.pSurface, 0, 0, 0, 0));
 
     // A BC3 texture: no pixel changes, and it does not go to the GPU again.
     Texture compressed;

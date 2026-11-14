@@ -17,6 +17,21 @@ struct GfxMipRect {
     bool Empty() const { return x1 <= x0 || y1 <= y0; }
 };
 
+// The smallest rectangle with both (an empty one adds nothing).
+inline GfxMipRect Gfx_MipRectUnion(GfxMipRect a, GfxMipRect b)
+{
+    if (a.Empty())
+        return b;
+    if (b.Empty())
+        return a;
+    GfxMipRect r;
+    r.x0 = a.x0 < b.x0 ? a.x0 : b.x0;
+    r.y0 = a.y0 < b.y0 ? a.y0 : b.y0;
+    r.x1 = a.x1 > b.x1 ? a.x1 : b.x1;
+    r.y1 = a.y1 > b.y1 ? a.y1 : b.y1;
+    return r;
+}
+
 // The levels of a texture of width x height down to 1 x 1, at most limit
 // (0: no limit).
 int Gfx_MipLevelCount(int width, int height, int limit);

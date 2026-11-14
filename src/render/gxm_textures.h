@@ -7,6 +7,7 @@
 #include "render/gfx_internal.h"
 #include "render/gxm_deferred_free.h"
 #include "render/gxm_memory.h"
+#include "render/gxm_texture_copies.h"
 #include "render/gxm_texture_layout.h"
 
 #include <psp2/gxm.h>
@@ -38,6 +39,9 @@ struct GxmTexture {
     bool madeMips = false;
     std::unique_ptr<std::vector<uint8_t>[]> keptMips;
     bool uploaded = false;          // each level is in memory: a changed part can go there alone
+    // The spare copies of a texture that changes in a part in each frame
+    // (gxm_texture_copies.h), from the texture pool.
+    GxmTextureCopies copies;
 };
 
 class GxmTextures {
@@ -56,6 +60,9 @@ public:
     // may read gets new memory; the old goes back later. frame: the number
     // of the frame being recorded.
     void Upload(std::vector<GfxTexture *> &textures, unsigned frame);
+    // For the logs: the uploads of a part of a texture (GfxTexture::changedRect),
+    // and of all of a texture.
+    unsigned partUploads = 0, wholeUploads = 0;
     // frame: the number of the frame being recorded.
     void Destroy(GfxTexture *t, unsigned frame);
     // At the start of recording frame: frees what the GPU is done with.
@@ -78,6 +85,9 @@ public:
     void Log();
 
 private:
+    // The rows of the changed part of level 0 (PartUploadFits), into the
+    // memory that is drawn or into a spare copy. False: no memory for a spare.
+    bool UploadPart(GfxTexture *t, GxmTexture *g, unsigned frame);
     bool CreateTarget(const GfxTexture *t, GxmTexture &g);
     bool CreateCubeTarget(const GfxTexture *t, GxmTexture &g);
     void Release(GxmTexture *g);

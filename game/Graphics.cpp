@@ -609,6 +609,20 @@ static inline BYTE Bump_LowestSetBit(DWORD mask)
     return count;
 }
 
+// PORT: for each lock of m_lockedTextures, the pixels that BlendPixel wrote
+// (x1, y1 past the last), in the level, and the corner of the lock's
+// rectangle. The unlock gives the renderer that part alone: the dirt stamps
+// write some 16 x 16 pixels of a car's body texture of 1,024 x 1,024 in a
+// frame, and the whole texture went to the GPU again (50 ms of each frame
+// of a wet stage on the PS Vita).
+namespace {
+struct LockedPart {
+    int originX, originY;
+    int x0, y0, x1, y1;
+};
+LockedPart s_lockedParts[5];
+} // namespace
+
 // FUNCTION: CMR2 0x004a4d30
 // PORT: renderer lock and copy instead of DirectDraw surfaces.
 void CGraphics::RemapTextureAlpha(Texture *pTexture, WORD from0, WORD to0, WORD from1, WORD to1, WORD from2, WORD to2,
@@ -736,6 +750,22 @@ void CGraphics::BlendPixel(Texture *pTexture, unsigned int x, unsigned int y, BY
     }
     if (i == m_lockedTextureCount)
         return;
+    // PORT: the part that changes (s_lockedParts): 16 and 32 bits a pixel.
+    if (m_lockedTextures[i].desc.format.bitsPerPixel == 16 || m_lockedTextures[i].desc.format.bitsPerPixel == 32) {
+        LockedPart &part = s_lockedParts[i];
+        const int px = part.originX + (int)x, py = part.originY + (int)y;
+        if (part.x1 <= part.x0) {
+            part.x0 = px;
+            part.y0 = py;
+            part.x1 = px + 1;
+            part.y1 = py + 1;
+        } else {
+            part.x0 = px < part.x0 ? px : part.x0;
+            part.y0 = py < part.y0 ? py : part.y0;
+            part.x1 = px + 1 > part.x1 ? px + 1 : part.x1;
+            part.y1 = py + 1 > part.y1 ? py + 1 : part.y1;
+        }
+    }
     stride = m_lockedTextures[i].desc.pitch - ((m_lockedTextures[i].desc.width * m_lockedTextures[i].desc.format.bitsPerPixel) >> 3);
     if (m_lockedTextures[i].desc.format.bitsPerPixel == 16) {
         p16 = (WORD *)m_lockedTextures[i].desc.pixels + ((m_lockedTextures[i].desc.width + stride) * y + x);
@@ -780,15 +810,12 @@ void CGraphics::UnlockTexture(Texture *pTexture)
             break;
     }
     if (i != m_lockedTextureCount) {
-        // PORT: a texture of another pixel size than 16 and 32 bits (a
-        // compressed one) got no pixel from BlendPixel, the only writer of
-        // this lock: it stays as it is on the GPU. The car's body texture of
-        // the dirt stamps is BC3 here, and each unlock made the renderer load
-        // it again with its mip levels in each frame of a wet stage (50 ms
-        // of each frame on the PS Vita).
-        const unsigned int bits = m_lockedTextures[i].desc.format.bitsPerPixel;
-        if (bits == 16 || bits == 32)
-            Gfx_UnlockTexture(m_lockedTextures[i].pTexture->pSurface, 0, 0);
+        // PORT: BlendPixel is the only writer of this lock: the renderer
+        // gets the part that it wrote (s_lockedParts), or nothing for no
+        // pixel (a compressed texture gets none).
+        const LockedPart &part = s_lockedParts[i];
+        if (part.x1 > part.x0)
+            Gfx_UnlockTextureRect(m_lockedTextures[i].pTexture->pSurface, part.x0, part.y0, part.x1, part.y1);
         m_lockedTextures[i].pTexture = NULL;
         m_lockedTextureCount--;
     }
@@ -1156,6 +1183,12 @@ void CGraphics::LockTexture(Texture *pTexture, RECT *pRect)
     memset(&m_lockedTextures[m_lockedTextureCount].desc, 0, sizeof(GfxLockedRect));
     if (!Gfx_LockTexture(m_lockedTextures[index].pTexture->pSurface, 0, 0, &m_lockedTextures[m_lockedTextureCount].desc))
         return;
+    {
+        LockedPart &part = s_lockedParts[m_lockedTextureCount];
+        part.originX = pRect != NULL ? pRect->left : 0;
+        part.originY = pRect != NULL ? pRect->top : 0;
+        part.x0 = part.y0 = part.x1 = part.y1 = 0;
+    }
     if (pRect != NULL) {
         GfxLockedRect *pDesc = &m_lockedTextures[m_lockedTextureCount].desc;
         pDesc->pixels = (BYTE *)pDesc->pixels + pRect->top * pDesc->pitch + pRect->left * (pDesc->format.bitsPerPixel / 8);

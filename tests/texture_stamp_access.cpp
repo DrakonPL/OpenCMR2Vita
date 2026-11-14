@@ -12,3 +12,11 @@ void Test_ClearDirty(GfxTexture *t)
 {
     t->dirty = false;
 }
+
+void Test_ChangedRect(GfxTexture *t, int *x0, int *y0, int *x1, int *y1)
+{
+    *x0 = t->changedRect.x0;
+    *y0 = t->changedRect.y0;
+    *x1 = t->changedRect.x1;
+    *y1 = t->changedRect.y1;
+}
