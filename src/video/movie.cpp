@@ -4,10 +4,24 @@
 #include "port/movie.h"
 #include "port/sys.h"
 #include "video/bink_decoder.h"
+#include "video/yuv_convert.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <new>
+#include <vector>
+
+#ifdef __vita__
+#include <psp2/avplayer.h>
+#include <psp2/kernel/sysmem.h>
+#include <psp2/sysmodule.h>
+
+#include <malloc.h>
+#include <stdlib.h>
+#endif
+
+struct HwMovie;
 
 struct Movie {
     SysFile *file = nullptr;
@@ -18,6 +32,7 @@ struct Movie {
     bool decodedCurrent = false, started = false;
     GfxTexture *texture = nullptr;
     AudioStream *audio = nullptr;
+    HwMovie *hw = nullptr;      // the PS Vita's hardware decoder plays it (see HwOpen)
 };
 
 static bool ReadMovie(void *context, uint32_t offset, void *dst, uint32_t bytes)
@@ -54,8 +69,240 @@ static void LogDecodeTime(Movie *movie, double ms)
 }
 #endif
 
+
+#ifdef __vita__
+// ---- the PS Vita's hardware decoder ---------------------------------------------
+//
+// An MP4 file (H.264 and AAC, tools/convert_movies_vita.sh) beside the Bink
+// file plays through sceAvPlayer: the decode of a Bink frame took 33 to 40
+// ms on the CPU, at 30 frames a second. The CPU converts each frame into the
+// texture (video/yuv_convert.h). The decoder keeps the time: Movie_Wait asks
+// it for the next frame. [video] movie_hw = 0 plays the Bink files.
+// [video] movie_chroma_vu: the order of the chroma bytes of the decoder's
+// frames (1: V first).
+
+struct HwMovie {
+    SceAvPlayerHandle handle = 0;
+    SceAvPlayerFrameInfo frame{};
+    bool frameReady = false;    // a frame that Movie_Wait or the open took
+    bool ended = false;
+    bool vFirst = true;
+    unsigned width = 0, height = 0;
+};
+
+static void *HwAlloc(void *, uint32_t alignment, uint32_t size)
+{
+    return memalign(alignment < 64 ? 64 : alignment, size);
+}
+
+static void HwFree(void *, void *p)
+{
+    free(p);
+}
+
+// The decoder writes its frames itself: each frame buffer is a memory block
+// (video memory, else physically contiguous memory), as other players of
+// the PS Vita make them.
+struct HwFrameBlock {
+    void *base;
+    SceUID uid;
+};
+static HwFrameBlock s_hwFrameBlocks[8];
+
+static void *HwAllocFrame(void *, uint32_t, uint32_t size)
+{
+    for (HwFrameBlock &b : s_hwFrameBlocks) {
+        if (b.base != nullptr)
+            continue;
+        SceUID uid = sceKernelAllocMemBlock("movie frame", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW,
+                                            (size + 0x3ffff) & ~0x3ffffu, nullptr);
+        if (uid < 0)
+            uid = sceKernelAllocMemBlock("movie frame", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW,
+                                         (size + 0xfffff) & ~0xfffffu, nullptr);
+        if (uid < 0 || sceKernelGetMemBlockBase(uid, &b.base) < 0) {
+            if (uid >= 0)
+                sceKernelFreeMemBlock(uid);
+            b.base = nullptr;
+            return nullptr;
+        }
+        b.uid = uid;
+        return b.base;
+    }
+    return nullptr;
+}
+
+static void HwFreeFrame(void *, void *p)
+{
+    for (HwFrameBlock &b : s_hwFrameBlocks)
+        if (b.base == p && p != nullptr) {
+            sceKernelFreeMemBlock(b.uid);
+            b.base = nullptr;
+        }
+}
+
+// The MP4 file of a game path: name.mp4 for track 0, name_N.mp4 for the
+// track N (the language of a country's movie), as a host path.
+static bool HwPath(const char *path, int audioTrack, char *host, size_t size)
+{
+    const char *dot = strrchr(path, '.');
+    if (dot == nullptr || strlen(dot) != 4)
+        return false;
+    char name[512];
+    const int base = (int)(dot - path);
+    if (audioTrack > 0)
+        snprintf(name, sizeof(name), "%.*s_%d.mp4", base, path, audioTrack);
+    else
+        snprintf(name, sizeof(name), "%.*s.mp4", base, path);
+    return Sys_ResolvePath(name, FALSE, host, size) != FALSE;
+}
+
+// The sound that the decoder has: into the movie's stream (made at the first
+// frame of sound, at its rate).
+static void HwPumpAudio(Movie *movie)
+{
+    SceAvPlayerFrameInfo sound{};
+    while (sceAvPlayerGetAudioData(movie->hw->handle, &sound)) {
+        const unsigned channels = sound.details.audio.channelCount;
+        const unsigned samples = sound.details.audio.size / 2;
+        if (channels == 0 || samples == 0 || sound.pData == nullptr)
+            continue;
+        if (movie->audio == nullptr) {
+            movie->audio = Audio_CreateStream(sound.details.audio.sampleRate, (int)channels);
+            if (movie->audio == nullptr)
+                return;
+            if (movie->started)
+                Audio_StartStream(movie->audio);
+        }
+        std::vector<float> pcm(samples);
+        const int16_t *in = (const int16_t *)sound.pData;
+        for (unsigned i = 0; i < samples; i++)
+            pcm[i] = in[i] / 32768.0f;
+        if (!Audio_QueueStream(movie->audio, pcm.data(), samples)) {
+            Sys_Log("movie: cannot queue audio");
+            return;
+        }
+    }
+}
+
+// The next frame of the decoder, if its time came: kept for Movie_DecodeFrame.
+static bool HwTakeFrame(Movie *movie)
+{
+    HwMovie *hw = movie->hw;
+    if (hw->frameReady)
+        return true;
+    if (sceAvPlayerGetVideoData(hw->handle, &hw->frame)) {
+        hw->frameReady = true;
+        return true;
+    }
+    if (!sceAvPlayerIsActive(hw->handle))
+        hw->ended = true;
+    return false;
+}
+
+static Movie *HwOpen(const char *path, int audioTrack)
+{
+    char host[1024];
+    if (Sys_GetOption("video.movie_hw", 1) == 0 || !HwPath(path, audioTrack, host, sizeof(host)))
+        return nullptr;
+    static bool loaded;
+    if (!loaded) {
+        if (sceSysmoduleLoadModule(SCE_SYSMODULE_AVPLAYER) < 0) {
+            Sys_Log("movie: the AvPlayer module does not load");
+            return nullptr;
+        }
+        loaded = true;
+    }
+    SceAvPlayerInitData init;
+    memset(&init, 0, sizeof(init));
+    init.memoryReplacement.allocate = HwAlloc;
+    init.memoryReplacement.deallocate = HwFree;
+    init.memoryReplacement.allocateTexture = HwAllocFrame;
+    init.memoryReplacement.deallocateTexture = HwFreeFrame;
+    init.basePriority = 0xA0;
+    init.numOutputVideoFrameBuffers = 2;
+    init.autoStart = SCE_TRUE;
+    const SceAvPlayerHandle handle = sceAvPlayerInit(&init);
+    if (handle <= 0) {
+        Sys_Log("movie %s: sceAvPlayerInit: 0x%08x", host, (unsigned)handle);
+        return nullptr;
+    }
+    Movie *movie = new (std::nothrow) Movie;
+    HwMovie *hw = movie != nullptr ? new (std::nothrow) HwMovie : nullptr;
+    if (hw == nullptr) {
+        delete movie;
+        sceAvPlayerClose(handle);
+        return nullptr;
+    }
+    movie->hw = hw;
+    hw->handle = handle;
+    hw->vFirst = Sys_GetOption("video.movie_chroma_vu", 1) != 0;
+    const int added = sceAvPlayerAddSource(handle, host);
+    // The size of the frames comes with the first one.
+    const DWORD start = Sys_GetTicks();
+    while (added >= 0 && !HwTakeFrame(movie) && !hw->ended && Sys_GetTicks() - start < 2000)
+        Sys_Sleep(2);
+    if (added < 0 || !hw->frameReady) {
+        Sys_Log("movie %s: no frame from the hardware decoder (0x%08x)", host, (unsigned)added);
+        Movie_Close(movie);
+        return nullptr;
+    }
+    hw->width = hw->frame.details.video.width;
+    hw->height = hw->frame.details.video.height;
+    movie->info.width = hw->width;
+    movie->info.height = hw->height;
+    movie->info.frames = 1;     // Movie_GetFrameCount follows the decoder
+    movie->texture = Gfx_CreateTexture(hw->width, hw->height, GFX_FORMAT_BGRX8, 1, GFX_TEXTURE_DYNAMIC);
+    if (movie->texture == nullptr) {
+        Movie_Close(movie);
+        return nullptr;
+    }
+    Sys_Log("movie %s: hardware decoder, %ux%u, chroma %s first", host, hw->width, hw->height,
+            hw->vFirst ? "V" : "U");
+    return movie;
+}
+
+// The kept frame into the texture: the luma plane, then the chroma at half
+// the size, rows of the width rounded up to 16 bytes, the luma plane's
+// rows rounded up to 16.
+static void HwConvertFrame(Movie *movie)
+{
+    HwMovie *hw = movie->hw;
+    const size_t stride = (hw->width + 15) & ~15u;
+    const size_t rows = (hw->height + 15) & ~15u;
+    const uint8_t *luma = hw->frame.pData;
+    GfxLockedRect rect;
+    if (luma != nullptr && Gfx_LockTexture(movie->texture, 0, 0, &rect)) {
+#ifdef OPENCMR2_DEV
+        const double start = Sys_GetTicksPrecise();
+#endif
+        Yuv_SemiPlanarToBgrx(luma, stride, luma + stride * rows, stride, hw->vFirst, hw->width, 0, hw->height,
+                             (uint8_t *)rect.pixels, (size_t)rect.pitch);
+        Gfx_UnlockTexture(movie->texture, 0, 0);
+#ifdef OPENCMR2_DEV
+        static double total, longest;
+        static unsigned frames;
+        const double ms = Sys_GetTicksPrecise() - start;
+        total += ms;
+        longest = ms > longest ? ms : longest;
+        if (++frames == 100) {
+            Sys_Log("movie: frame %u, hardware decoder, convert ms average %.1f max %.1f", movie->frame + 1,
+                    total / frames, longest);
+            total = longest = 0;
+            frames = 0;
+        }
+#endif
+    }
+    hw->frameReady = false;
+    movie->decodedCurrent = true;
+}
+#endif
+
 extern "C" Movie *Movie_Open(const char *path, int audioTrack)
 {
+#ifdef __vita__
+    if (Movie *hwMovie = HwOpen(path, audioTrack))
+        return hwMovie;
+#endif
     SysFile *file = Sys_OpenFile(path, SYS_FILE_READ);
     if (!file)
         return nullptr;
@@ -102,17 +349,41 @@ extern "C" void Movie_Close(Movie *movie)
         return;
     Audio_ReleaseStream(movie->audio);
     Gfx_DestroyTexture(movie->texture);
-    Sys_CloseFile(movie->file);
+#ifdef __vita__
+    if (movie->hw != nullptr) {
+        sceAvPlayerStop(movie->hw->handle);
+        sceAvPlayerClose(movie->hw->handle);
+        delete movie->hw;
+    }
+#endif
+    if (movie->file != nullptr)
+        Sys_CloseFile(movie->file);
     delete movie;
 }
 
 extern "C" DWORD Movie_GetWidth(Movie *movie) { return movie->info.width; }
 extern "C" DWORD Movie_GetHeight(Movie *movie) { return movie->info.height; }
 extern "C" DWORD Movie_GetFrameNumber(Movie *movie) { return movie->frame + 1; }
-extern "C" DWORD Movie_GetFrameCount(Movie *movie) { return movie->info.frames; }
+extern "C" DWORD Movie_GetFrameCount(Movie *movie)
+{
+#ifdef __vita__
+    // The decoder's movie goes on while it has frames.
+    if (movie->hw != nullptr)
+        return movie->hw->ended ? movie->frame : movie->frame + 1;
+#endif
+    return movie->info.frames;
+}
 
 extern "C" void Movie_DecodeFrame(Movie *movie)
 {
+#ifdef __vita__
+    if (movie->hw != nullptr) {
+        HwPumpAudio(movie);
+        if (!movie->decodedCurrent && HwTakeFrame(movie))
+            HwConvertFrame(movie);
+        return;
+    }
+#endif
     if (movie->decodedCurrent || movie->frame >= movie->info.frames)
         return;
 #ifdef OPENCMR2_DEV
@@ -147,6 +418,13 @@ extern "C" void Movie_DecodeFrame(Movie *movie)
 
 extern "C" void Movie_NextFrame(Movie *movie)
 {
+#ifdef __vita__
+    if (movie->hw != nullptr) {
+        ++movie->frame;
+        movie->decodedCurrent = false;
+        return;
+    }
+#endif
     if (movie->frame < movie->info.frames)
         ++movie->frame;
     movie->decodedCurrent = false;
@@ -154,6 +432,13 @@ extern "C" void Movie_NextFrame(Movie *movie)
 
 extern "C" BOOL Movie_Wait(Movie *movie)
 {
+#ifdef __vita__
+    // The decoder's time: wait until it gives the next frame or ends.
+    if (movie->hw != nullptr) {
+        HwPumpAudio(movie);
+        return HwTakeFrame(movie) || movie->hw->ended ? FALSE : TRUE;
+    }
+#endif
     if (!movie->started)
         return FALSE;
     DWORD due = (DWORD)(uint64_t(movie->frame) * 1000 * movie->info.fpsDenominator / movie->info.fpsNumerator);
