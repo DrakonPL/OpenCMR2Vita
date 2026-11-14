@@ -79,6 +79,32 @@ inline bool Gfx_PointsOutsideView(const float *m, const GfxVertex *vertices, DWO
     return all != 0;
 }
 
+// Whether a box is outside one plane of the view: a * x + b * y + c * z + d
+// is below zero for each corner of the box. One corner has the greatest
+// value: for each axis, the high side where the factor is not below zero,
+// else the low side. The box is outside when that corner is.
+inline bool Gfx_BoxOutsidePlane(float a, float b, float c, float d, const float low[3], const float high[3])
+{
+    return a * (a >= 0.0f ? high[0] : low[0]) + b * (b >= 0.0f ? high[1] : low[1]) +
+           c * (c >= 0.0f ? high[2] : low[2]) + d < 0.0f;
+}
+
+// Whether a box draws nothing: it is outside one plane of the view, as
+// Gfx_OutsidePlanes tells it of each corner. The planes come from the
+// columns of the matrix: x + w, w - x, y + w, w - y, z and w - z are each
+// zero or more inside the view. One corner for each plane, not six planes
+// for each of the eight corners: the recorder tests each draw and each
+// stage object of a frame.
+inline bool Gfx_BoxOutsideView(const float *m, const float low[3], const float high[3])
+{
+    return Gfx_BoxOutsidePlane(m[2], m[6], m[10], m[14], low, high) ||
+           Gfx_BoxOutsidePlane(m[3] + m[0], m[7] + m[4], m[11] + m[8], m[15] + m[12], low, high) ||
+           Gfx_BoxOutsidePlane(m[3] - m[0], m[7] - m[4], m[11] - m[8], m[15] - m[12], low, high) ||
+           Gfx_BoxOutsidePlane(m[3] + m[1], m[7] + m[5], m[11] + m[9], m[15] + m[13], low, high) ||
+           Gfx_BoxOutsidePlane(m[3] - m[1], m[7] - m[5], m[11] - m[9], m[15] - m[13], low, high) ||
+           Gfx_BoxOutsidePlane(m[3] - m[2], m[7] - m[6], m[11] - m[10], m[15] - m[14], low, high);
+}
+
 // The eye distance of the farthest vertex of a small draw in world space
 // (its world matrix is the identity: the view matrix gives the eye space).
 inline float Gfx_SmallDrawReach(const GfxMatrix &v, const GfxVertex *vertices, DWORD count)

@@ -559,11 +559,7 @@ inline bool PointsOutsideView(const float *m, const GfxVertex *vertices, DWORD c
 
 bool BoxOutsideView(const float *m, const GfxBox &b)
 {
-    unsigned all = 63;
-    for (int i = 0; i < 8 && all != 0; i++)
-        all &= Gfx_OutsidePlanes(m, (i & 1) ? b.high[0] : b.low[0], (i & 2) ? b.high[1] : b.low[1],
-                                 (i & 4) ? b.high[2] : b.low[2]);
-    return all != 0;
+    return Gfx_BoxOutsideView(m, b.low, b.high);
 }
 
 // A hash of the positions of a buffer: the boxes of its ranges stay while
