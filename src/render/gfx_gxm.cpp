@@ -53,6 +53,8 @@ constexpr int kVariantCount = (int)(sizeof(kGxmFragmentVariants) / sizeof(kGxmFr
 constexpr unsigned kIdentityIndices = 65536;    // a non-indexed draw indexes through these
 constexpr size_t kLoggedUnknownKeys = 64;    // different missing variants logged, at most
 constexpr uint64_t kFadeKeyBit = 1ull << 32;    // the distance fade of a fragment key (shader_key.h)
+constexpr uint64_t kAlphaTestKeyBit = 1ull << 28;   // the alpha test of a fragment key
+constexpr uint64_t kAlphaCompareArgs = 3ull << 40;  // the compare form of an arguments key
 // Dev builds time the backdrop copy once in this many frames (it waits for
 // the GPU before and after it).
 constexpr unsigned kBackdropTimingFrames = 600;
@@ -210,6 +212,9 @@ struct Stats {
     // The skies (gfx_sky_plan.h): drawn into the backdrop, stretched from
     // it, the stencil draws of the near ground, and the plans by result.
     unsigned skyBackdrop = 0, skyHalf = 0, stencilDraws = 0;
+    // Draws without blending whose alpha test passes for each pixel: drawn
+    // without it, or with it for want of a variant without it.
+    unsigned alphaTestDropped = 0, alphaTestNoVariant = 0;
     unsigned skyPlans[GFX_SKY_RESULT_COUNT] = {};
     // The time of Prepare (the game's thread) and of Execute without the
     // wait of its present (the worker with the threaded executor), and the
@@ -279,7 +284,7 @@ enum ProbeMode {
     PROBE_SINGLE_PASS, PROBE_TWO_PASSES, PROBE_NO_BLENDED_3D, PROBE_NO_2D, PROBE_NO_QUADS, PROBE_NO_LAYERS,
     PROBE_NO_BILLBOARDS, PROBE_NO_PARTICLES, PROBE_NO_BLENDED_SKY, PROBE_NO_BLENDED_GROUND,
     PROBE_NO_BLENDED_OBJECTS, PROBE_NO_BLENDED_NODES, PROBE_SKY_WHITE, PROBE_SKY_OPAQUE, PROBE_TREES_WHITE,
-    PROBE_SKY_AS_RECORDED, PROBE_SKY_FULL, PROBE_SKY_HALF, PROBE_SKY_NO_STENCIL, PROBE_END
+    PROBE_SKY_AS_RECORDED, PROBE_SKY_FULL, PROBE_SKY_HALF, PROBE_SKY_NO_STENCIL, PROBE_ALPHA_TEST_KEPT, PROBE_END
 };
 const char *const kProbeNames[PROBE_END] = { "off",         "normal",        "quarter", "tile",
                                              "no 3D",       "no depth pass", "general", "fade always",
@@ -288,7 +293,8 @@ const char *const kProbeNames[PROBE_END] = { "off",         "normal",        "qu
                                              "no 3D quads", "no layers", "no billboards", "no particles",
                                              "no blended sky", "no blended ground", "no blended objects",
                                              "no blended nodes", "sky white", "sky opaque", "trees white",
-                                             "sky as recorded", "sky full", "sky half", "sky no stencil" };
+                                             "sky as recorded", "sky full", "sky half", "sky no stencil",
+                                             "alpha test kept" };
 
 // The steps the profile mode times: an Execute before its draws, then the
 // steps of a 3D draw in Draw's order.
@@ -325,10 +331,12 @@ enum ProfileSection {
 // as the game recorded them, "sky full" and "sky half" draw it at the size
 // of the back buffer or stretch the backdrop, "sky no stencil" draws it
 // without the stencil of the near ground. "normal" draws it as the settings
-// ask.
-const int kProbeCycle[] = { PROBE_NORMAL,          PROBE_NO_3D,    PROBE_TILE,
-                            PROBE_NO_BLENDED_3D,   PROBE_NO_BLENDED_SKY, PROBE_SKY_AS_RECORDED,
-                            PROBE_SKY_FULL,        PROBE_SKY_HALF, PROBE_SKY_NO_STENCIL };
+// ask. "alpha test kept" draws a draw without blending whose alpha test
+// passes for each pixel with the test, as recorded (normal: without it).
+// The mode "tile" left the cycle: "no 3D" gives the cost of the CPU.
+const int kProbeCycle[] = { PROBE_NORMAL,          PROBE_NO_3D,           PROBE_ALPHA_TEST_KEPT,
+                            PROBE_NO_BLENDED_3D,   PROBE_NO_BLENDED_SKY,  PROBE_SKY_AS_RECORDED,
+                            PROBE_SKY_FULL,        PROBE_SKY_HALF,        PROBE_SKY_NO_STENCIL };
 
 // The part whose blended 3D draws a mode leaves out, or -1.
 int ProbeBlendedPart(int mode)
@@ -968,6 +976,19 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         return it->second.general;
     }
 
+    // Whether the variant of a key without the alpha test is made for the
+    // arguments key (not the general one).
+    bool HasMadeVariant(uint64_t key, uint64_t args) const
+    {
+        auto it = variantIndex.find(key << 2);
+        if (it == variantIndex.end())
+            return false;
+        for (const auto &made : it->second.made)
+            if (made.first == args)
+                return true;
+        return false;
+    }
+
     int FindVariant(uint64_t key, uint64_t args, const GfxDrawState &s, bool transformed)
     {
         const bool blend = s.alphaBlend;
@@ -1598,7 +1619,27 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         }
         step(PROFILE_STATE);
         uint64_t key = Gfx_FragmentKey(s, backBuffer && !c.transformed);
-        const uint64_t args = Gfx_FragmentArgsKey(s);
+        uint64_t args = Gfx_FragmentArgsKey(s);
+        // A draw without blending whose alpha test passes for each pixel
+        // (the ground: the game leaves the test on, its textures have no
+        // transparent texel): the variant without the test draws the same
+        // pixels. The test's discard turns off the hidden surface removal of
+        // the SGX543 for the pixels of the draw.
+        if (!c.transformed && s.alphaTest && !s.alphaBlend && (key & kAlphaTestKeyBit) != 0 &&
+            probe.mode != PROBE_ALPHA_TEST_KEPT) {
+            DrawRange alphaScratch;
+            const DrawRange *alphaRange = RangeOf(c, frame, false, true, alphaScratch);
+            if (alphaRange != nullptr && AlphaTestAlwaysPasses(s, *alphaRange)) {
+                const uint64_t keyWithout = key & ~kAlphaTestKeyBit, argsWithout = args & ~kAlphaCompareArgs;
+                if (HasMadeVariant(keyWithout, argsWithout)) {
+                    key = keyWithout;
+                    args = argsWithout;
+                    stats.alphaTestDropped++;
+                } else {
+                    stats.alphaTestNoVariant++;
+                }
+            }
+        }
         step(PROFILE_KEYS);
         int variant = -1;
         Resolved *resolved = nullptr;
@@ -2550,6 +2591,8 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         gpuTextures.tileTexels = 0;
         // The skies: into the backdrop, stretched, the stencil draws of the
         // near ground, and the plans that drew the sky as recorded.
+        Sys_Log("gxm: per s alpha test: %u draws without it (it passes for each pixel), %u with it for want of "
+                "a variant", stats.alphaTestDropped, stats.alphaTestNoVariant);
         Sys_Log("gxm: per s sky: %u into the backdrop, %u stretched, %u stencil draws; plans: %u ok, %u none, "
                 "%u many, %u no clear, %u drawn under, %u other draw",
                 stats.skyBackdrop, stats.skyHalf, stats.stencilDraws, stats.skyPlans[GFX_SKY_PLAN_OK],
