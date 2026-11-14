@@ -1,4 +1,5 @@
 tools/build_vita.sh text eol=lf
+tools/convert_movies_vita.sh text eol=lf
 tools/*.bat text eol=crlf
 # psp2cgc hashes the source text into the .gxp: keep its line ends one form.
 src/render/shaders/cg/** text eol=lf
