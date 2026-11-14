@@ -382,6 +382,18 @@ void Gfx_EndPrimitive(void);
    outside one plane of the view. TRUE where the renderer does not test
    draws against the view (the setting video.cull_draws). */
 BOOL Gfx_IsRangeVisible(GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount);
+/* The six planes of the view in world space, from the view and projection
+   matrices that are set: four numbers (a, b, c, d) each. A point is outside
+   the view when a * x + b * y + c * z + d is below zero for one plane.
+   FALSE where the renderer does not test draws against the view: the
+   caller then leaves nothing out. */
+BOOL Gfx_GetViewPlanes(float planes[24]);
+/* The box of the positions of a range of a vertex buffer. FALSE for a range
+   that is not in the buffer. */
+BOOL Gfx_GetRangeBox(GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount, float low[3], float high[3]);
+/* A number of the buffer that changes when a lock or a write can have
+   changed a position: a box that the caller keeps is good while it stays. */
+DWORD Gfx_GetPositionSerial(GfxVertexBuffer *buffer);
 /* Whether the game draws the ground parts of the visible sectors together,
    one draw for each vertex buffer and texture (the setting
    video.merge_ground; on by default where each draw costs much CPU time,

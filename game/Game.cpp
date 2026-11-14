@@ -2240,6 +2240,7 @@ struct DeferredDraw {
 
 #include "DeferredOrder.h"
 #include "BatchRuns.h"
+#include "TreeCull.h"
 
 static int __cdecl Game_CompareDeferredDistance(const void *a, const void *b)
 {
@@ -2418,6 +2419,290 @@ void Game_AddTreeToBatch(Mesh *pMesh, const float *pMatrix)
     }
 }
 
+// PORT: the trees outside the view are left out before the deferred pass.
+// The game queues each camera-facing object of the sectors in view, makes
+// its matrix, sorts it and gives it to the tree batch. The renderer then
+// leaves out those outside the view: half of the trees of a forest, some
+// 900 instructions each on the game's thread and a transform on the batch
+// thread. A tree that the batch would take, and whose sphere is outside the
+// view (TreeCull.h), is not queued.
+// - The picture is the same: the renderer leaves out each such tree.
+// - The object that the deferred pass draws last is drawn alone, and it
+//   leaves its state. It is the nearest object (the last one of the walk
+//   without the sort). It is queued also when its sphere is outside.
+// - The deferred pass sets the blend mode of the first texture of each
+//   object and marks its mesh. It does the same for the trees left out.
+// - The view at the deferred pass is the view of this pass. If it is
+//   another one, each tree left out goes back into the queue, at its place
+//   in the walk.
+// [video] tree_cull = 0 queues each tree.
+extern GfxMatrix g_unk0x00597cc0;
+
+enum { kTreesOut = 4096, kTreeQueue = 4096 };
+struct TreeBounds {
+    Mesh *pLod;
+    GfxVertexBuffer *pBuffer;
+    int first, count;
+    DWORD serial;
+    float radius;
+};
+struct TreePass {
+    bool cull;                  // the trees outside the view are left out in this pass
+    bool sorted;                // the deferred pass sorts its objects
+    bool whole;                 // the queue of the deferred pass was empty at the start of the pass
+    float planes[24];           // the view of the pass (Gfx_GetViewPlanes)
+    TreeCullView view;
+    unsigned int seen;          // the deferred objects of the walk so far
+    unsigned int queued;        // those that the pass queued
+    // The object that the deferred pass draws last.
+    StageObjectDraw *pLast;
+    unsigned int lastKey, lastSeq;
+    int lastDistance;
+    bool lastOut;
+    // The trees left out, with their numbers in the walk.
+    unsigned int outCount;
+    StageObjectDraw *out[kTreesOut];
+    unsigned int outSeq[kTreesOut];
+    int outDistance[kTreesOut];
+    // For each object of the queue: its number in the walk and its distance.
+    unsigned int keptSeq[kTreeQueue];
+    int distance[kTreeQueue];
+};
+static TreePass s_treePass;
+static TreeBounds s_treeBounds[512];
+#ifdef OPENCMR2_DEV
+static unsigned int s_treeFrames, s_treesSeen, s_treesOut, s_treesMeasured, s_treesRestored;
+#endif
+
+// The matrix of a camera-facing object: the rows of the camera's yaw with
+// the scales of the object, at its place.
+static void Game_SetTreeMatrix(StageObjectDraw *pObject)
+{
+    *(GfxMatrix *)pObject->matrix = g_unk0x00597cc0;
+    if (pObject->scaleX != 0x10000 || pObject->scaleY != 0x10000 || pObject->scaleZ != 0x10000) {
+        float scale;
+        scale = (float)(X87S_MUL_FIX16(pObject->scaleX, CGraphics::m_oneOver65536));
+        pObject->matrix[0] = scale * pObject->matrix[0];
+        pObject->matrix[1] = scale * pObject->matrix[1];
+        pObject->matrix[2] = scale * pObject->matrix[2];
+        scale = (float)(X87S_MUL_FIX16(pObject->scaleY, CGraphics::m_oneOver65536));
+        pObject->matrix[4] = scale * pObject->matrix[4];
+        pObject->matrix[5] = scale * pObject->matrix[5];
+        pObject->matrix[6] = scale * pObject->matrix[6];
+        scale = (float)(X87S_MUL_FIX16(pObject->scaleZ, CGraphics::m_oneOver65536));
+        pObject->matrix[8] = scale * pObject->matrix[8];
+        pObject->matrix[9] = scale * pObject->matrix[9];
+        pObject->matrix[10] = scale * pObject->matrix[10];
+    }
+    pObject->matrix[12] = (float)(X87S_MUL_FIX16(pObject->offsetX, CGraphics::m_oneOver65536));
+    pObject->matrix[13] = (float)(X87S_MUL_FIX16(pObject->offsetY, CGraphics::m_oneOver65536));
+    pObject->matrix[14] = (float)(X87S_MUL_FIX16(pObject->offsetZ, CGraphics::m_oneOver65536));
+}
+
+// The distance of the farthest vertex of a mesh from its origin, kept while
+// the positions of its vertex buffer stay. Below zero: not known.
+float Game_TreeRadius(Mesh *pLod)
+{
+    GfxVertexBuffer *pBuffer = CGraphics::m_pTextureManager->pVertexBuffers[pLod->vertexBufferIndex];
+    const DWORD serial = Gfx_GetPositionSerial(pBuffer);
+    TreeBounds &b = s_treeBounds[((unsigned int)((UINT_PTR)pLod >> 4) * 2654435761u) >> 23];
+
+    if (b.pLod != pLod || b.pBuffer != pBuffer || b.first != pLod->vertexOffset || b.count != pLod->field_0x10 ||
+        b.serial != serial) {
+        float low[3], high[3];
+        b.pLod = NULL;
+        if (pLod->field_0x10 <= 0 ||
+            !Gfx_GetRangeBox(pBuffer, (DWORD)pLod->vertexOffset, (DWORD)pLod->field_0x10, low, high))
+            return -1.0f;
+        b.pLod = pLod;
+        b.pBuffer = pBuffer;
+        b.first = pLod->vertexOffset;
+        b.count = pLod->field_0x10;
+        // The serial after the box: the box itself reads no lock.
+        b.serial = Gfx_GetPositionSerial(pBuffer);
+        b.radius = TreeCull_BoxRadius(low, high);
+#ifdef OPENCMR2_DEV
+        s_treesMeasured++;
+#endif
+    }
+    return b.radius;
+}
+
+// Whether the sphere of a camera-facing object is outside the view of the
+// pass.
+static bool Game_TreeOutsideView(StageObjectDraw *pObject)
+{
+    Mesh *pLod = (Mesh *)((BYTE *)pObject->pMesh + pObject->pMesh->lodIndex * offsetof(Mesh, field_0x108));
+    const float radius = Game_TreeRadius(pLod);
+    const float k = 1.0f / 65536.0f;
+    float scale;
+
+    if (radius < 0.0f)
+        return false;
+    scale = fabsf((float)pObject->scaleX);
+    scale = fabsf((float)pObject->scaleY) > scale ? fabsf((float)pObject->scaleY) : scale;
+    scale = fabsf((float)pObject->scaleZ) > scale ? fabsf((float)pObject->scaleZ) : scale;
+    return TreeCull_Outside(s_treePass.view, (float)pObject->offsetX * k, (float)pObject->offsetY * k,
+                            (float)pObject->offsetZ * k, radius * scale * k);
+}
+
+static void Game_BeginTreePass(bool batches)
+{
+    TreePass &t = s_treePass;
+
+    t.seen = 0;
+    t.queued = 0;
+    t.outCount = 0;
+    t.pLast = NULL;
+    t.lastKey = 0;
+    t.lastOut = false;
+    t.sorted = g_depthSortDrawLists != 0;
+    t.whole = CGame::m_deferredDrawCount == 0;
+    t.cull = batches && t.whole && Sys_GetOption("video.tree_cull", 1) != 0 && Gfx_GetViewPlanes(t.planes) != FALSE;
+    if (t.cull)
+        TreeCull_SetView(&t.view, t.planes);
+}
+
+// Makes the matrix of a deferred object and queues it.
+static void Game_KeepTree(StageObjectDraw *pObject, int distance, unsigned int seq)
+{
+    TreePass &t = s_treePass;
+    const unsigned int at = (unsigned int)CGame::m_deferredDrawCount;
+
+    Game_SetTreeMatrix(pObject);
+    if (at < kTreeQueue) {
+        t.keptSeq[at] = seq;
+        t.distance[at] = distance;
+    }
+    t.queued++;
+    CGame::QueuePrimaryDrawObject(pObject);
+}
+
+// A deferred object of the walk, with its distance: queued, or left out.
+static void Game_QueueTree(StageObjectDraw *pObject, int distance)
+{
+    TreePass &t = s_treePass;
+    const unsigned int seq = t.seen++;
+    // The key of the sort of the deferred pass: the greatest key is last.
+    const unsigned int key = 0x7fffffffu - (unsigned int)distance;
+    const bool out = t.cull && t.outCount < kTreesOut && Game_TreeBatchable(pObject->pMesh) &&
+                     Game_TreeOutsideView(pObject);
+
+    if (!t.sorted || key >= t.lastKey) {
+        t.pLast = pObject;
+        t.lastKey = key;
+        t.lastSeq = seq;
+        t.lastDistance = distance;
+        t.lastOut = out;
+    }
+    if (out) {
+        t.out[t.outCount] = pObject;
+        t.outSeq[t.outCount] = seq;
+        t.outDistance[t.outCount] = distance;
+        t.outCount++;
+        return;
+    }
+    Game_KeepTree(pObject, distance, seq);
+}
+
+// The end of the walk: the object that the deferred pass draws last is
+// queued, also when its sphere is outside the view.
+static void Game_EndTreePass(void)
+{
+    TreePass &t = s_treePass;
+    unsigned int i;
+
+#ifdef OPENCMR2_DEV
+    s_treesSeen += t.seen;
+    s_treesOut += t.outCount;
+    if (++s_treeFrames == 600) {
+        Sys_Log("trees: in a frame %.1f camera-facing objects, %.1f left out (outside the view); %u spheres "
+                "measured, %u frames with the trees put back, in 600 frames",
+                s_treesSeen / 600.0, s_treesOut / 600.0, s_treesMeasured, s_treesRestored);
+        s_treeFrames = s_treesSeen = s_treesOut = s_treesMeasured = s_treesRestored = 0;
+    }
+#endif
+    if (t.pLast == NULL || !t.lastOut)
+        return;
+    for (i = t.outCount; i-- > 0;)
+        if (t.out[i] == t.pLast && t.outSeq[i] == t.lastSeq) {
+            for (; i + 1 < t.outCount; i++) {
+                t.out[i] = t.out[i + 1];
+                t.outSeq[i] = t.outSeq[i + 1];
+                t.outDistance[i] = t.outDistance[i + 1];
+            }
+            t.outCount--;
+            break;
+        }
+    Game_KeepTree(t.pLast, t.lastDistance, t.lastSeq);
+}
+
+// An object of the queue with its number in the walk.
+struct TreeQueueEntry {
+    unsigned int seq;
+    StageObjectDraw *pObject;
+    int distance;
+};
+
+static int __cdecl Game_CompareTreeQueueEntries(const void *a, const void *b)
+{
+    const unsigned int seqA = ((const TreeQueueEntry *)a)->seq, seqB = ((const TreeQueueEntry *)b)->seq;
+    return seqA < seqB ? -1 : seqA > seqB ? 1 : 0;
+}
+
+// The start of the deferred pass: what it does to each object for the trees
+// left out. With another view than that of the walk, they go back into the
+// queue, each at its place in the walk.
+void Game_SettleTreesLeftOut(void)
+{
+    TreePass &t = s_treePass;
+    float planes[24];
+    unsigned int i;
+
+    if (t.outCount == 0)
+        return;
+    if (Gfx_GetViewPlanes(planes) != FALSE && memcmp(planes, t.planes, sizeof(planes)) == 0) {
+        for (i = 0; i < t.outCount; i++) {
+            Mesh *pMesh = t.out[i]->pMesh;
+            Frontend_SetObjectField118(CGraphics::m_pTextureManager->textureBuffer[pMesh->pTriangles->textures[0]], 0);
+            pMesh->flags |= 8;
+        }
+        t.outCount = 0;
+        return;
+    }
+    typedef TreeQueueEntry Entry;
+    static Entry entries[kTreeQueue + kTreesOut];
+    unsigned int n = 0;
+    const unsigned int count = (unsigned int)CGame::m_deferredDrawCount;
+    // Without the numbers of the queue's objects, the trees go after them.
+    const bool known = t.whole && t.queued == count && count <= kTreeQueue;
+    for (i = 0; i < count && i < kTreeQueue; i++) {
+        const Entry e = { known ? t.keptSeq[i] : 0, (StageObjectDraw *)CGame::m_deferredDrawObjects[i],
+                          known ? t.distance[i] : 0 };
+        entries[n++] = e;
+    }
+    for (i = 0; i < t.outCount; i++) {
+        const Entry e = { t.outSeq[i], t.out[i], t.outDistance[i] };
+        Game_SetTreeMatrix(t.out[i]);
+        entries[n++] = e;
+    }
+    // Each object has a number of its own.
+    if (known)
+        qsort(entries, n, sizeof(entries[0]), Game_CompareTreeQueueEntries);
+    n = n < kTreeQueue ? n : (unsigned int)kTreeQueue;
+    for (i = 0; i < n; i++) {
+        CGame::m_deferredDrawObjects[i] = entries[i].pObject;
+        t.keptSeq[i] = entries[i].seq;
+        t.distance[i] = entries[i].distance;
+    }
+    CGame::m_deferredDrawCount = (int)n;
+    t.queued = known ? n : ~0u;
+    t.outCount = 0;
+#ifdef OPENCMR2_DEV
+    s_treesRestored++;
+#endif
+}
+
 // PORT: the state flags of a mesh for the tree batch (TREE_STATE_FLAGS).
 static unsigned int Game_TreeBatchState(Mesh *pMesh)
 {
@@ -2469,6 +2754,8 @@ void Game_DrawDeferredObjects(void)
     FixVector delta;
     unsigned int i;
 
+    // PORT: the trees that the walk left out (Game_QueueTree).
+    Game_SettleTreesLeftOut();
     if ((unsigned int)CGame::m_deferredDrawCount >= 1) {
         // PORT: the order of the objects, the farthest first (see
         // Game_OrderDeferredDraws).
@@ -2477,12 +2764,20 @@ void Game_DrawDeferredObjects(void)
 #ifdef OPENCMR2_DEV
             Diagnostics::ScenePartNest sortPart(Diagnostics::SCENE_PART_DEFERRED_SORT);
 #endif
+            // PORT: the distance of each object from the walk that queued
+            // it (Game_KeepTree), where the queue is that of the walk.
+            const bool known = s_treePass.whole && s_treePass.queued == (unsigned int)CGame::m_deferredDrawCount &&
+                               (unsigned int)CGame::m_deferredDrawCount <= kTreeQueue;
             for (i = 0; i < (unsigned int)CGame::m_deferredDrawCount; i++) {
                 pObject = (StageObjectDraw *)CGame::m_deferredDrawObjects[i];
-                delta.x = g_unk0x0059be6c->world.position.x - pObject->position.x;
-                delta.y = 0;
-                delta.z = g_unk0x0059be6c->world.position.z - pObject->position.z;
-                sorted[i].distance = FixVecLength(&delta);
+                if (known) {
+                    sorted[i].distance = s_treePass.distance[i];
+                } else {
+                    delta.x = g_unk0x0059be6c->world.position.x - pObject->position.x;
+                    delta.y = 0;
+                    delta.z = g_unk0x0059be6c->world.position.z - pObject->position.z;
+                    sorted[i].distance = FixVecLength(&delta);
+                }
                 sorted[i].pObject = pObject;
             }
             Game_OrderDeferredDraws(sorted, (unsigned int)CGame::m_deferredDrawCount, g_depthSortDrawLists != 0,
@@ -2511,6 +2806,8 @@ void Game_DrawDeferredObjects(void)
         }
         CGame::m_deferredDrawCount = 0;
     }
+    // PORT: the queue is empty: its numbers of the walk are no longer good.
+    s_treePass.queued = ~0u;
 }
 
 // qsort comparator of the transparent draw list (0x49cd20): type 0x14 goes
@@ -2570,38 +2867,20 @@ void Game_DrawStaticStageObjects(void)
     const bool batches = Sys_GetOption("video.tree_batch", 1) != 0;
     static GfxMatrix world;
 
+    Game_BeginTreePass(batches);
     for (i = 0; i < (unsigned int)g_sectorCullEnabled; i++) {
         pObject = (StageObjectDraw *)g_sectors[g_visibleSectorIndices[i]]->pObjects;
         while (pObject != NULL) {
             if (pObject->field_0x14 != 0) {
                 if ((pObject->pMesh->flags & 2) != 0) {
-                    *(GfxMatrix *)pObject->matrix = g_unk0x00597cc0;
-                    if (pObject->scaleX != 0x10000 || pObject->scaleY != 0x10000 ||
-                        pObject->scaleZ != 0x10000) {
-                        float scale;
-                        scale = X87S_MUL(X87S_FILD(float, pObject->scaleX), CGraphics::m_oneOver65536);
-                        pObject->matrix[0] = scale * pObject->matrix[0];
-                        pObject->matrix[1] = scale * pObject->matrix[1];
-                        pObject->matrix[2] = scale * pObject->matrix[2];
-                        scale = X87S_MUL(X87S_FILD(float, pObject->scaleY), CGraphics::m_oneOver65536);
-                        pObject->matrix[4] = scale * pObject->matrix[4];
-                        pObject->matrix[5] = scale * pObject->matrix[5];
-                        pObject->matrix[6] = scale * pObject->matrix[6];
-                        scale = X87S_MUL(X87S_FILD(float, pObject->scaleZ), CGraphics::m_oneOver65536);
-                        pObject->matrix[8] = scale * pObject->matrix[8];
-                        pObject->matrix[9] = scale * pObject->matrix[9];
-                        pObject->matrix[10] = scale * pObject->matrix[10];
-                    }
-                    pObject->matrix[12] = X87S_MUL(X87S_FILD(float, pObject->offsetX), CGraphics::m_oneOver65536);
-                    pObject->matrix[13] = X87S_MUL(X87S_FILD(float, pObject->offsetY), CGraphics::m_oneOver65536);
-                    pObject->matrix[14] = X87S_MUL(X87S_FILD(float, pObject->offsetZ), CGraphics::m_oneOver65536);
-                }
-                if ((pObject->pMesh->flags & 2) != 0) {
+                    // PORT: the distance first. The object gets its matrix
+                    // and goes into the queue unless it is a tree outside
+                    // the view (Game_QueueTree).
                     delta.x = g_unk0x0059be6c->world.position.x - pObject->position.x;
                     delta.y = 0;
                     delta.z = g_unk0x0059be6c->world.position.z - pObject->position.z;
                     pObject->pMesh->field_0x114 = FixVecLength(&delta);
-                    CGame::QueuePrimaryDrawObject(pObject);
+                    Game_QueueTree(pObject, pObject->pMesh->field_0x114);
                 } else if (batches && Game_TreeBatchable(pObject->pMesh)) {
                     const unsigned int state = Game_TreeBatchState(pObject->pMesh);
                     if (g_depthSortDrawLists != 0 && (state & 8) != 0) {
@@ -2630,6 +2909,7 @@ void Game_DrawStaticStageObjects(void)
             pObject = pObject->pNext;
         }
     }
+    Game_EndTreePass();
     Game_EmitObjectRun(&world);
     Game_FlushTreeBatch();
     if (pTrailing != NULL)

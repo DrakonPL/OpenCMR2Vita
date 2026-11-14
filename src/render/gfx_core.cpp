@@ -1815,9 +1815,17 @@ extern "C" void Gfx_SetStageBumpEnvMat(int stage, int index, float value)
 
 // ---- geometry ----------------------------------------------------------------------
 
+// A number for GfxVertexBuffer::positionSerial.
+static uint32_t NewPositionSerial()
+{
+    static uint32_t last;
+    return ++last;
+}
+
 extern "C" GfxVertexBuffer *Gfx_CreateVertexBuffer(DWORD vertexCount)
 {
     GfxVertexBuffer *buffer = new GfxVertexBuffer;
+    buffer->positionSerial = NewPositionSerial();
     buffer->vertices.resize(vertexCount);
     memset(buffer->vertices.data(), 0, vertexCount * sizeof(GfxVertex));
     // A vertex that the game never writes keeps alpha 0.
@@ -1872,6 +1880,7 @@ extern "C" GfxVertex *Gfx_LockVertexBuffer(GfxVertexBuffer *buffer)
     buffer->version++;
     buffer->lastLockFrame = s_presentedFrames;
     buffer->positionsUnknown = true;
+    buffer->positionSerial = NewPositionSerial();
     MarkUnscanned(buffer, 0, (uint32_t)buffer->vertices.size());
     return buffer->vertices.data();
 }
@@ -1926,6 +1935,7 @@ extern "C" GfxVertex *Gfx_LockVertexBufferRange(GfxVertexBuffer *buffer, DWORD f
     // The caller can write any position: the boxes of these vertices are
     // measured again.
     buffer->lockStamps.Mark(firstVertex, vertexCount, ++buffer->lockSerial);
+    buffer->positionSerial = NewPositionSerial();
     MarkUnscanned(buffer, firstVertex, firstVertex + vertexCount);
     return buffer->vertices.data();
 }
@@ -1972,8 +1982,10 @@ extern "C" void Gfx_WriteVertexBufferRange(GfxVertexBuffer *buffer, DWORD firstV
     }
     buffer->leastAlpha[0] = diffuse;
     buffer->leastAlpha[1] = specular;
-    if (moved)
+    if (moved) {
         buffer->lockStamps.Mark(firstVertex, vertexCount, ++buffer->lockSerial);
+        buffer->positionSerial = NewPositionSerial();
+    }
 }
 
 extern "C" void Gfx_UnlockVertexBuffer(GfxVertexBuffer *)
@@ -1987,6 +1999,30 @@ extern "C" BOOL Gfx_IsRangeVisible(GfxVertexBuffer *buffer, DWORD firstVertex, D
     if (s_executor == NULL || !CullWanted())
         return TRUE;
     return BoxOutsideView(ClipPlanes(s_state.world, 0), BufferRangeBox(buffer, firstVertex, vertexCount)) ? FALSE : TRUE;
+}
+
+extern "C" BOOL Gfx_GetViewPlanes(float planes[24])
+{
+    if (s_executor == NULL || !CullWanted())
+        return FALSE;
+    memcpy(planes, ClipPlanes(kIdentityMatrix, 1), 24 * sizeof(float));
+    return TRUE;
+}
+
+extern "C" BOOL Gfx_GetRangeBox(GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount, float low[3],
+                                float high[3])
+{
+    if (buffer == NULL || vertexCount == 0 || firstVertex + vertexCount > buffer->vertices.size())
+        return FALSE;
+    const GfxBox box = BufferRangeBox(buffer, firstVertex, vertexCount);
+    memcpy(low, box.low, sizeof(box.low));
+    memcpy(high, box.high, sizeof(box.high));
+    return TRUE;
+}
+
+extern "C" DWORD Gfx_GetPositionSerial(GfxVertexBuffer *buffer)
+{
+    return buffer != NULL ? buffer->positionSerial : 0;
 }
 
 extern "C" BOOL Gfx_MergesGroundDraws(void)

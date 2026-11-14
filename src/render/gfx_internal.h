@@ -114,6 +114,10 @@ struct GfxVertexBuffer {
     // of a frame on the PS Vita).
     uint32_t lockSerial = 0;
     GfxBlockStamps lockStamps;
+    // A number that no other buffer and no earlier state of this buffer
+    // has: a new one at its start, and at each lock and each write that can
+    // have changed a position (Gfx_GetPositionSerial).
+    uint32_t positionSerial = 0;
     // The recordings whose small batches refer to its vertices
     // (GfxSmallItem::buffer).
     GfxBlockStamps batchBlocks;
