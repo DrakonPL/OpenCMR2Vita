@@ -2239,6 +2239,7 @@ struct DeferredDraw {
 };
 
 #include "DeferredOrder.h"
+#include "BatchRuns.h"
 
 static int __cdecl Game_CompareDeferredDistance(const void *a, const void *b)
 {
@@ -2417,6 +2418,45 @@ void Game_AddTreeToBatch(Mesh *pMesh, const float *pMatrix)
     }
 }
 
+// PORT: the state flags of a mesh for the tree batch (TREE_STATE_FLAGS).
+static unsigned int Game_TreeBatchState(Mesh *pMesh)
+{
+    Mesh *pLod = (Mesh *)((BYTE *)pMesh + pMesh->lodIndex * offsetof(Mesh, field_0x108));
+
+    return pLod->flags & TREE_STATE_FLAGS;
+}
+
+// PORT: a run of static stage objects for the tree batch. The batch draws
+// when an object has another state than the one before, and the objects of
+// a stage alternate between two or three states: the batch drew for nearly
+// each object. The objects of a run are solid and write the depth, so the
+// picture does not depend on their order. They go into the batch with those
+// of their state together, the state of the last object last
+// (BatchRuns.h): the state after the run is the same. A run ends at an
+// object that is drawn alone and at a blended one.
+enum { kObjectRun = 1024 };
+static Mesh *s_objectRunMeshes[kObjectRun];
+static unsigned int s_objectRunStates[kObjectRun];
+static unsigned int s_objectRunCount;
+
+static void Game_EmitObjectRun(GfxMatrix *pWorld)
+{
+    static unsigned short order[kObjectRun];
+    unsigned int i;
+
+    if (s_objectRunCount == 0)
+        return;
+    BatchRun_Order(s_objectRunStates, s_objectRunCount, order);
+    for (i = 0; i < s_objectRunCount; i++) {
+        // The world matrix that is set, while the batch is empty: as each
+        // object of the run read it before.
+        if (g_treeBatchCount == 0)
+            Gfx_GetTransform(GFX_TRANSFORM_WORLD, pWorld);
+        Game_AddTreeToBatch(s_objectRunMeshes[order[i]], &pWorld->_11);
+    }
+    s_objectRunCount = 0;
+}
+
 // Draws the objects the deferred pass of the static stage objects queued:
 // sorts them by view depth (farthest first) and, for each one, binds its
 // texture, sets its world matrix and marks the mesh for the culling test of
@@ -2524,7 +2564,9 @@ void Game_DrawStaticStageObjects(void)
     // into batches, as the trees do (Game_AddTreeToBatch), with the world
     // matrix that is set: their vertices are in world space. The renderer
     // leaves out those outside the view. The matrix is read again while the
-    // batch is empty: a mesh drawn alone can change it.
+    // batch is empty: a mesh drawn alone can change it. The objects wait in
+    // a run and go into the batch with those of their state together
+    // (Game_EmitObjectRun).
     const bool batches = Sys_GetOption("video.tree_batch", 1) != 0;
     static GfxMatrix world;
 
@@ -2561,13 +2603,25 @@ void Game_DrawStaticStageObjects(void)
                     pObject->pMesh->field_0x114 = FixVecLength(&delta);
                     CGame::QueuePrimaryDrawObject(pObject);
                 } else if (batches && Game_TreeBatchable(pObject->pMesh)) {
-                    if (g_treeBatchCount == 0)
-                        Gfx_GetTransform(GFX_TRANSFORM_WORLD, &world);
-                    Game_AddTreeToBatch(pObject->pMesh, &world._11);
+                    const unsigned int state = Game_TreeBatchState(pObject->pMesh);
+                    if (g_depthSortDrawLists != 0 && (state & 8) != 0) {
+                        // Blended: in its place, after the run before it.
+                        Game_EmitObjectRun(&world);
+                        if (g_treeBatchCount == 0)
+                            Gfx_GetTransform(GFX_TRANSFORM_WORLD, &world);
+                        Game_AddTreeToBatch(pObject->pMesh, &world._11);
+                    } else {
+                        if (s_objectRunCount == kObjectRun)
+                            Game_EmitObjectRun(&world);
+                        s_objectRunMeshes[s_objectRunCount] = pObject->pMesh;
+                        s_objectRunStates[s_objectRunCount] = state;
+                        s_objectRunCount++;
+                    }
                     pTrailing = NULL;
                 } else if (Game_StageMeshOutsideView(pObject->pMesh)) {
                     pTrailing = pObject;
                 } else {
+                    Game_EmitObjectRun(&world);
                     Game_FlushTreeBatch();
                     Graphics_DrawMeshLOD(pObject->pMesh, 1, 0, 0);
                     pTrailing = NULL;
@@ -2576,6 +2630,7 @@ void Game_DrawStaticStageObjects(void)
             pObject = pObject->pNext;
         }
     }
+    Game_EmitObjectRun(&world);
     Game_FlushTreeBatch();
     if (pTrailing != NULL)
         Graphics_DrawMeshLOD(pTrailing->pMesh, 1, 0, 0);
