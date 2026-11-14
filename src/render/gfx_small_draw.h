@@ -79,6 +79,52 @@ inline bool Gfx_PointsOutsideView(const float *m, const GfxVertex *vertices, DWO
     return all != 0;
 }
 
+// Whether a box is outside one plane of the view: a * x + b * y + c * z + d
+// is below zero for each corner of the box. One corner has the greatest
+// value: for each axis, the high side where the factor is not below zero,
+// else the low side. The box is outside when that corner is.
+inline bool Gfx_BoxOutsidePlane(float a, float b, float c, float d, const float low[3], const float high[3])
+{
+    return a * (a >= 0.0f ? high[0] : low[0]) + b * (b >= 0.0f ? high[1] : low[1]) +
+           c * (c >= 0.0f ? high[2] : low[2]) + d < 0.0f;
+}
+
+// The six planes of the view from the clip matrix, four numbers (a, b, c,
+// d) each. They come from the columns of the matrix: z, x + w, w - x,
+// y + w, w - y and w - z are each zero or more inside the view.
+inline void Gfx_ViewPlanesOf(const float *m, float planes[24])
+{
+    for (int i = 0; i < 4; i++) {
+        const float x = m[i * 4], y = m[i * 4 + 1], z = m[i * 4 + 2], w = m[i * 4 + 3];
+        planes[i] = z;
+        planes[4 + i] = w + x;
+        planes[8 + i] = w - x;
+        planes[12 + i] = w + y;
+        planes[16 + i] = w - y;
+        planes[20 + i] = w - z;
+    }
+}
+
+// Whether a box draws nothing: it is outside one plane of the view, as
+// Gfx_OutsidePlanes tells it of each corner. One corner for each plane, not
+// six planes for each of the eight corners: the recorder tests each draw
+// and each stage object of a frame.
+inline bool Gfx_BoxOutsidePlanes(const float *planes, const float low[3], const float high[3])
+{
+    for (int p = 0; p < 24; p += 4)
+        if (Gfx_BoxOutsidePlane(planes[p], planes[p + 1], planes[p + 2], planes[p + 3], low, high))
+            return true;
+    return false;
+}
+
+// The same from the clip matrix.
+inline bool Gfx_BoxOutsideView(const float *m, const float low[3], const float high[3])
+{
+    float planes[24];
+    Gfx_ViewPlanesOf(m, planes);
+    return Gfx_BoxOutsidePlanes(planes, low, high);
+}
+
 // The eye distance of the farthest vertex of a small draw in world space
 // (its world matrix is the identity: the view matrix gives the eye space).
 inline float Gfx_SmallDrawReach(const GfxMatrix &v, const GfxVertex *vertices, DWORD count)

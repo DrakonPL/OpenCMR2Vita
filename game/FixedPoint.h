@@ -25,8 +25,40 @@ inline int FixMulShift32(int a, int b)
     return FixMulBits(a, b) >> 16;
 }
 
+// PORT: num / den by a division of doubles, for a processor without a
+// divide instruction. On the PS Vita a division of 64 bits is a call into
+// the compiler's library of some hundred cycles, and the game makes
+// hundreds in a frame (FixDiv, the length of each vector it normalises).
+// num is a whole number below 2^52 in size. The quotient of the doubles is
+// then never a whole number unless the exact quotient is one, and never on
+// the other side of one: its error is below 1 / den, the least distance of
+// an inexact quotient to a whole number. So its whole part is the quotient
+// of the integers. Gives false for a quotient outside an int, and for
+// den = 0 (an infinity, or not a number): the caller then divides the
+// integers, as before. tests/fixed_quotient.cpp compares the two.
+inline bool FixQuotientByDouble(double num, int den, int *pOut)
+{
+    const double q = num / (double)den;
+    if (!(q > -2147483648.0 && q < 2147483648.0))
+        return false;
+    *pOut = (int)q;
+    return true;
+}
+
+// 32-bit ARM: no divide instruction in the processors of the port.
+#if defined(__arm__) && !defined(__aarch64__)
+#define FIX_DIVIDE_BY_DOUBLE 1
+#else
+#define FIX_DIVIDE_BY_DOUBLE 0
+#endif
+
 inline int FixDiv(int a, int b)
 {
+#if FIX_DIVIDE_BY_DOUBLE
+    int q;
+    if (FixQuotientByDouble((double)a * 65536.0, b, &q))
+        return q;
+#endif
     return (int)((long long)a * 65536 / b);
 }
 
@@ -198,7 +230,7 @@ inline short FixAtan2(int y, int x)
         num = y;
         den = x;
     }
-    index = (unsigned int)(int)((long long)num * 65536 / den) >> 7;
+    index = (unsigned int)FixDiv(num, den) >> 7;
     // |y| == |x| reads one entry past g_atanTable, the low word of
     // g_tanTable[0] in the original's memory layout.
     angle = index < 512 ? g_atanTable[index] : (unsigned short)g_tanTable[0];
@@ -212,7 +244,11 @@ inline short FixAtan2(int y, int x)
 // out = in * (1 / len)
 inline void FixVecScaleRecip(FixVector *out, FixVector *src, int len)
 {
-    int recip = (int)((1LL << 32) / len);
+    int recip;
+#if FIX_DIVIDE_BY_DOUBLE
+    if (!FixQuotientByDouble(4294967296.0, len, &recip))
+#endif
+        recip = (int)((1LL << 32) / len);
 
     out->x = FixMulBits(src->x, recip);
     out->y = FixMulBits(src->y, recip);

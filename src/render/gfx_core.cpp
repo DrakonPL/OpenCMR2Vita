@@ -532,6 +532,7 @@ bool RangeLocksWanted()
 struct ClipTransform {
     GfxMatrix world, view, projection;
     float m[16];
+    float planes[24];   // the planes of the view (Gfx_ViewPlanesOf)
     bool valid = false;
 };
 ClipTransform s_clip[2];
@@ -547,8 +548,16 @@ const float *ClipMatrix(const GfxMatrix &world, int slot)
     t.view = s_state.view;
     t.projection = s_state.projection;
     Gfx_ClipMatrixOf(world, s_state.view, s_state.projection, t.m);
+    Gfx_ViewPlanesOf(t.m, t.planes);
     t.valid = true;
     return t.m;
+}
+
+// The planes of the view for the same matrices.
+const float *ClipPlanes(const GfxMatrix &world, int slot)
+{
+    ClipMatrix(world, slot);
+    return s_clip[slot].planes;
 }
 
 // The view test of points and of a box (gfx_small_draw.h).
@@ -557,13 +566,9 @@ inline bool PointsOutsideView(const float *m, const GfxVertex *vertices, DWORD c
     return Gfx_PointsOutsideView(m, vertices, count);
 }
 
-bool BoxOutsideView(const float *m, const GfxBox &b)
+bool BoxOutsideView(const float *planes, const GfxBox &b)
 {
-    unsigned all = 63;
-    for (int i = 0; i < 8 && all != 0; i++)
-        all &= Gfx_OutsidePlanes(m, (i & 1) ? b.high[0] : b.low[0], (i & 2) ? b.high[1] : b.low[1],
-                                 (i & 4) ? b.high[2] : b.low[2]);
-    return all != 0;
+    return Gfx_BoxOutsidePlanes(planes, b.low, b.high);
 }
 
 // A hash of the positions of a buffer: the boxes of its ranges stay while
@@ -948,7 +953,7 @@ void RecordDrawNow(int primitive, bool transformed, const void *vertices, DWORD 
             box = BufferRangeBox(buffer, firstVertex, vertexCount);
         else
             VertexBox((const GfxVertex *)vertices, vertexCount, box.low, box.high);
-        if (BoxOutsideView(ClipMatrix(s_state.world, 0), box)) {
+        if (BoxOutsideView(ClipPlanes(s_state.world, 0), box)) {
             s_counts.culled++;
             return;
         }
@@ -1981,7 +1986,7 @@ extern "C" BOOL Gfx_IsRangeVisible(GfxVertexBuffer *buffer, DWORD firstVertex, D
         return FALSE;
     if (s_executor == NULL || !CullWanted())
         return TRUE;
-    return BoxOutsideView(ClipMatrix(s_state.world, 0), BufferRangeBox(buffer, firstVertex, vertexCount)) ? FALSE : TRUE;
+    return BoxOutsideView(ClipPlanes(s_state.world, 0), BufferRangeBox(buffer, firstVertex, vertexCount)) ? FALSE : TRUE;
 }
 
 extern "C" BOOL Gfx_MergesGroundDraws(void)
@@ -2237,7 +2242,7 @@ void RecordDrawInFrame(int primitive, uint32_t offset, DWORD vertexCount)
         GfxBox box;
         memcpy(box.low, cmd.boxLow, sizeof(box.low));
         memcpy(box.high, cmd.boxHigh, sizeof(box.high));
-        if (BoxOutsideView(ClipMatrix(s_state.world, 0), box)) {
+        if (BoxOutsideView(ClipPlanes(s_state.world, 0), box)) {
             s_counts.culled++;
             s_frame.vertices.resize(offset);
             return;
