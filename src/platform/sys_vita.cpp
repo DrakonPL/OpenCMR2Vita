@@ -48,11 +48,14 @@ const char kUserDir[] = "ux0:data/OpenCMR2/user/";
 // Vita at the first stage load of every start, that of the menu icons 4 s
 // and that of an arcade map 11 s. 0 draws the original's bitmaps.
 // movie_workers: the Bink decode uses the two other cores.
+// relight_budget: when the light of the scene changes, the sectors in view
+// are lit again over some frames, not in one of 50 ms (RelightBudget.h).
 const char kVitaDefaults[] =
     "[video]\n"
     "outline_fonts = 0\n"
     "vector_icons = 0\n"
-    "movie_workers = 2\n";
+    "movie_workers = 2\n"
+    "relight_budget = 10000\n";
 
 SysSettings::Values s_settings;
 SysEventRing s_events;

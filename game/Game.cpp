@@ -2954,6 +2954,7 @@ void Billboard_Draw(SceneNode *pCamera);
 void Particle_DrawAll(SceneNode *pCamera, BYTE view);
 void Scene_DrawShadowBatches(unsigned int view);
 void Scene_RelightSector(int sector);
+void Scene_RelightVisibleSectors(const unsigned short *pIndices, unsigned count);
 BYTE Flare_SampleVisibility(short *pRect, BYTE *pColour, BYTE tolerance);
 void Sector_CullGridAroundViewNode(SceneNode *pNode, void *pRect);
 void Graphics_UpdateFrameStatistics(void);
@@ -3061,8 +3062,9 @@ int Game_DrawSceneViewport(SceneNode *pRoot, SceneNode *pCamera, void *pRect, in
 #ifdef OPENCMR2_DEV
                 Diagnostics::ScenePartNest relightPart(Diagnostics::SCENE_PART_RELIGHT);
 #endif
-                for (i = 0; i < (unsigned int)g_sectorCullEnabled; i++)
-                    Scene_RelightSector(((unsigned short *)g_visibleSectorIndices)[i]);
+                // PORT: within a budget of vertices in a frame (RelightBudget.h).
+                Scene_RelightVisibleSectors((const unsigned short *)g_visibleSectorIndices,
+                                            (unsigned)g_sectorCullEnabled);
             }
         }
         CGraphics::SetCullMode(CGame::GetSectorDrawState());
