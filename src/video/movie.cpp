@@ -5,6 +5,7 @@
 #include "port/sys.h"
 #include "video/bink_decoder.h"
 #include "video/yuv_convert.h"
+#include "video/hw_movie_handle.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -221,8 +222,9 @@ static Movie *HwOpen(const char *path, int audioTrack)
     init.basePriority = 0xA0;
     init.numOutputVideoFrameBuffers = 2;
     init.autoStart = SCE_TRUE;
+    // The handle is an address: below zero as an int (hw_movie_handle.h).
     const SceAvPlayerHandle handle = sceAvPlayerInit(&init);
-    if (handle <= 0) {
+    if (!HwMovie_HandleIsPlayer(handle)) {
         Sys_Log("movie %s: sceAvPlayerInit: 0x%08x", host, (unsigned)handle);
         return nullptr;
     }
