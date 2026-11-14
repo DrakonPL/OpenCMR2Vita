@@ -3024,16 +3024,10 @@ int Graphics_GetGeometryStateValue(void);
 // lighting mode that is set, as in Graphics_DrawMeshLOD. pMerged: for each
 // visible sector, whether its mesh was drawn here. The PC GL renderer gives
 // the same frames with the merge.
-struct GroundGroup {
-    int buffer, texture, cull, lighting;    // lighting: -1 for the mode that is set
-    int first, end;             // vertices of the buffer
-    unsigned indexStart, indexCount;
-};
-struct GroundPart {
-    Mesh *pMesh;
-    MeshPart *pPart;
-    unsigned group;
-};
+// The groups and their indices stay from frame to frame while the parts in
+// view are the same (GroundMerge.h). The lighting of a group: -1 for the
+// mode that is set.
+#include "GroundMerge.h"
 
 static bool Game_GroundMeshMerges(const Mesh *pMesh)
 {
@@ -3047,37 +3041,32 @@ static bool Game_GroundMeshMerges(const Mesh *pMesh)
     return true;
 }
 
-// The groups, the parts and the indices of a frame. A frame with more of
-// them than these hold draws its ground as the original did.
-enum { kGroundGroups = 1024, kGroundParts = 8192, kGroundIndices = 1 << 18 };
-static GroundGroup s_groundGroups[kGroundGroups];
-static GroundPart s_groundParts[kGroundParts];
-static unsigned short s_groundIndices[kGroundIndices];
+// The merge of the ground, and the parts in view of the frame. A frame with
+// more parts, groups or indices than the merge holds draws its ground as
+// the original did.
+static GroundMerge s_groundMerge;
+static GroundMergePart s_groundParts[kGroundMergeParts];
+#ifdef OPENCMR2_DEV
+static unsigned int s_groundFrames;
+#endif
+
+// The stage goes or comes: its meshes are not those of the merge.
+void Game_ForgetGroundMerge(void)
+{
+    GroundMerge_Forget(&s_groundMerge);
+}
 
 void Game_DrawMergedGroundParts(bool *pMerged)
 {
-    GroundGroup *groups = s_groundGroups;
-    GroundPart *parts = s_groundParts;
-    unsigned short *indices = s_groundIndices;
-    unsigned int groupCount = 0, partCount = 0, indexCount = 0;
+    GroundMergePart *parts = s_groundParts;
+    unsigned int partCount = 0;
     unsigned int count = (unsigned int)g_sectorCullEnabled;
     unsigned int i;
     int k;
 
-    // The sizes first: all parts of the meshes that merge, in the view or not.
-    for (i = 0; i + 1 < count; i++) {
-        Mesh *pMesh = (Mesh *)g_sectors[g_visibleSectorIndices[i]]->pMesh;
-        if (pMesh == NULL || !Game_GroundMeshMerges(pMesh))
-            continue;
-        partCount += (unsigned int)pMesh->partCount;
-        for (k = 0; k < pMesh->partCount; k++)
-            indexCount += pMesh->pParts[k]->indexCount > 0 ? (unsigned int)pMesh->pParts[k]->indexCount : 0;
-    }
     for (i = 0; i < count; i++)
         pMerged[i] = false;
-    if (partCount > kGroundParts || indexCount > kGroundIndices)
-        return;
-    partCount = 0;
+    // The parts in view of the meshes that merge, in their order.
     for (i = 0; i + 1 < count; i++) {
         Mesh *pMesh = (Mesh *)g_sectors[g_visibleSectorIndices[i]]->pMesh;
         if (pMesh == NULL || !Game_GroundMeshMerges(pMesh))
@@ -3092,53 +3081,41 @@ void Game_DrawMergedGroundParts(bool *pMerged)
             const int end = pMesh->vertexOffset + pPart->maxIndex + 1;
             if (pPart->indexCount <= 0 || end <= first || !Gfx_IsRangeVisible(pBuffer, first, end - first))
                 continue;
-            unsigned g;
-            for (g = 0; g < groupCount; g++) {
-                const GroundGroup &group = groups[g];
-                if (group.buffer == pMesh->vertexBufferIndex && group.texture == pPart->texture &&
-                    group.cull == cull && group.lighting == lighting)
-                    break;
+            if (partCount == kGroundMergeParts) {
+                // No room: the original walk draws all meshes.
+                for (i = 0; i < count; i++)
+                    pMerged[i] = false;
+                return;
             }
-            if (g == groupCount) {
-                if (groupCount == kGroundGroups) {
-                    // No room: the original walk draws all meshes.
-                    for (i = 0; i < count; i++)
-                        pMerged[i] = false;
-                    return;
-                }
-                GroundGroup group = { pMesh->vertexBufferIndex, pPart->texture, cull, lighting, first, end, 0, 0 };
-                groups[groupCount++] = group;
-            }
-            GroundGroup &group = groups[g];
-            group.first = first < group.first ? first : group.first;
-            group.end = end > group.end ? end : group.end;
-            group.indexCount += pPart->indexCount;
-            GroundPart part = { pMesh, pPart, g };
+            const GroundMergePart part = { pMesh, pPart, pPart->pData, pPart->indexCount, first, end,
+                                           pMesh->vertexBufferIndex, pPart->texture, cull, lighting };
             parts[partCount++] = part;
         }
     }
-    if (groupCount == 0)
+    if (partCount == 0)
         return;
-    unsigned start = 0;
-    for (unsigned g = 0; g < groupCount; g++) {
-        groups[g].indexStart = start;
-        start += groups[g].indexCount;
-        groups[g].indexCount = 0;
+    // The groups of the frame before, where its parts were these.
+    if (!GroundMerge_Update(&s_groundMerge, parts, partCount)) {
+        for (i = 0; i < count; i++)
+            pMerged[i] = false;
+        return;
     }
-    for (unsigned p = 0; p < partCount; p++) {
-        const GroundPart &part = parts[p];
-        GroundGroup &group = groups[part.group];
-        const int base = part.pMesh->vertexOffset + part.pPart->minIndex - group.first;
-        unsigned short *pOut = &indices[group.indexStart + group.indexCount];
-        for (k = 0; k < part.pPart->indexCount; k++)
-            pOut[k] = (unsigned short)(part.pPart->pData[k] + base);
-        group.indexCount += part.pPart->indexCount;
+#ifdef OPENCMR2_DEV
+    if (++s_groundFrames == 600) {
+        Sys_Log("ground: the merge was made in %u of 600 frames and kept in %u (%u parts, %u groups in the last)",
+                s_groundMerge.made, s_groundMerge.kept, partCount, s_groundMerge.groupCount);
+        s_groundFrames = 0;
+        s_groundMerge.made = s_groundMerge.kept = 0;
     }
+#endif
+    const GroundMergeGroup *groups = s_groundMerge.groups;
+    const unsigned short *indices = s_groundMerge.indices;
+    const unsigned int groupCount = s_groundMerge.groupCount;
     const int lightingMode = Graphics_GetGeometryStateValue();
     bool lightingChanged = false;
     Graphics_SwitchAlphaBlendAndTest(0);
     for (unsigned g = 0; g < groupCount; g++) {
-        const GroundGroup &group = groups[g];
+        const GroundMergeGroup &group = groups[g];
         CGraphics::SetCullMode(group.cull);
         if (group.lighting >= 0) {
             Graphics_SetLightingMode(group.lighting);
