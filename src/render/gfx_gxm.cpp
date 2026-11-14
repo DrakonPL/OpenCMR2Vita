@@ -272,7 +272,8 @@ enum ProbeMode {
     PROBE_FADE_ALWAYS, PROBE_DEPTH_PASS_ALWAYS, PROBE_LOOKUP_ONLY, PROBE_PROFILE, PROBE_UNIFORMS_ALWAYS,
     PROBE_SINGLE_PASS, PROBE_TWO_PASSES, PROBE_NO_BLENDED_3D, PROBE_NO_2D, PROBE_NO_QUADS, PROBE_NO_LAYERS,
     PROBE_NO_BILLBOARDS, PROBE_NO_PARTICLES, PROBE_NO_BLENDED_SKY, PROBE_NO_BLENDED_GROUND,
-    PROBE_NO_BLENDED_OBJECTS, PROBE_NO_BLENDED_NODES, PROBE_END
+    PROBE_NO_BLENDED_OBJECTS, PROBE_NO_BLENDED_NODES, PROBE_SKY_WHITE, PROBE_SKY_OPAQUE, PROBE_TREES_WHITE,
+    PROBE_END
 };
 const char *const kProbeNames[PROBE_END] = { "off",         "normal",        "quarter", "tile",
                                              "no 3D",       "no depth pass", "general", "fade always",
@@ -280,7 +281,7 @@ const char *const kProbeNames[PROBE_END] = { "off",         "normal",        "qu
                                              "single pass", "two passes", "no blended 3D", "no 2D",
                                              "no 3D quads", "no layers", "no billboards", "no particles",
                                              "no blended sky", "no blended ground", "no blended objects",
-                                             "no blended nodes" };
+                                             "no blended nodes", "sky white", "sky opaque", "trees white" };
 
 // The steps the profile mode times: an Execute before its draws, then the
 // steps of a 3D draw in Draw's order.
@@ -303,12 +304,18 @@ enum ProfileSection {
 // and the spray, the lines, the glow), the sorted stage objects (the trees),
 // the particles. The blended 3D draws of the sky, of the ground, of the
 // stage objects that are not sorted, and of the nodes (the cars). The modes
-// no 2D, no 3D quads, no layers and no particles are not in the cycle: in a
-// wet stage each saved less than 1 ms. The normal mode also counts the
-// blended 3D draws of each part, for a line of the log.
-const int kProbeCycle[] = { PROBE_NORMAL,           PROBE_NO_3D,           PROBE_TILE,
-                            PROBE_NO_BLENDED_3D,    PROBE_NO_BILLBOARDS,   PROBE_NO_BLENDED_SKY,
-                            PROBE_NO_BLENDED_GROUND, PROBE_NO_BLENDED_OBJECTS, PROBE_NO_BLENDED_NODES };
+// no 2D, no 3D quads, no layers, no particles, no blended ground, no blended
+// objects and no blended nodes are not in the cycle: in a wet stage each
+// saved less than 1 ms. The sky and the trees (the sorted stage objects)
+// cost 7 ms each. Three modes find why: "sky white" and "trees white" draw
+// them with a white texture of 8 x 8 texels (the cost of the texture
+// reads), "sky opaque" draws the sky without blending (the cost of the
+// blending). The normal mode also counts the blended 3D draws of each part,
+// and in its last turn the log gets a line for each draw of the sky and of
+// the trees.
+const int kProbeCycle[] = { PROBE_NORMAL,         PROBE_NO_3D,       PROBE_TILE,
+                            PROBE_NO_BLENDED_3D,  PROBE_NO_BLENDED_SKY, PROBE_SKY_WHITE,
+                            PROBE_SKY_OPAQUE,     PROBE_NO_BILLBOARDS, PROBE_TREES_WHITE };
 
 // The part whose blended 3D draws a mode leaves out, or -1.
 int ProbeBlendedPart(int mode)
@@ -354,6 +361,11 @@ struct Probe {
     ProbeSums sums[PROBE_END];
     // The blended 3D draws of each part in the frames of the normal mode.
     unsigned blended[Diagnostics::SCENE_PART_COUNT] = {};
+    // The frame whose draws of the sky and the trees go to the log, and the
+    // lines written. A draw of the sky or the trees binds the white texture.
+    bool describe = false;
+    unsigned described = 0;
+    bool white = false;
     bool touchStarted = false, touchDown = false;
     // The check of the single pass: the frame of the check that is drawn now
     // (1 to kProbeCheckFrames, 0: no check), and the samples that differ
@@ -1042,7 +1054,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     // change or a move to other memory sets it again.
     void BindTexture(int unit, GxmTexture *g)
     {
-        if (g == nullptr)
+        if (g == nullptr || (probe.white && g != &whiteCube && g->target == nullptr))
             g = &white;
         g->lastDrawn = presented;
         if (bound.textures[unit] == g && bound.samplers[unit] == g->sampler && bound.generations[unit] == g->generation)
@@ -1052,6 +1064,39 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         bound.samplers[unit] = g->sampler;
         bound.generations[unit] = g->generation;
         stats.textureBinds++;
+    }
+
+    // A line of the log for a draw of the probe: its vertices, the blending,
+    // the depth and alpha tests, and the textures of its stages (size, format,
+    // the levels on the GPU, the filters).
+    void DescribeDraw(const GfxCommand &c, const GfxDrawState &s)
+    {
+#ifdef OPENCMR2_DEV
+        char textures[2][96];
+        for (int i = 0; i < 2; i++) {
+            GfxTexture *t = Gfx_DrawnTexture(c.textures[i]);
+            const GxmTexture *g = t != nullptr ? (const GxmTexture *)t->gpu : nullptr;
+            const GfxStageState &stage = s.stages[i];
+            if (t == nullptr)
+                snprintf(textures[i], sizeof(textures[i]), "none");
+            else
+                snprintf(textures[i], sizeof(textures[i]), "%dx%d format %d levels %d (GPU %d%s), filter %d/%d/%d",
+                         t->width, t->height, t->format, t->mipLevels, g != nullptr ? g->layout.levels : 0,
+                         g != nullptr && g->madeMips ? " made" : "", stage.minFilter, stage.magFilter,
+                         stage.mipFilter);
+        }
+        Sys_Log("gxm probe: draw of %s: primitive %d, %u vertices, %u indices%s; blend %d %d/%d, alpha test %d "
+                "func %d ref %u, depth test %d write %d, fog %d, cull %d, fade %.0f..%.0f; texture 0 %s; "
+                "texture 1 %s",
+                Diagnostics::kScenePartNames[c.part < Diagnostics::SCENE_PART_COUNT ? c.part : 0], c.primitive,
+                c.vertexCount, c.firstIndex != ~0u ? c.indexCount : 0, c.buffer != nullptr ? " (buffer)" : "",
+                (int)s.alphaBlend, s.srcBlend, s.destBlend, (int)s.alphaTest, s.alphaFunc, (unsigned)s.alphaRef,
+                (int)s.depthTest, (int)s.depthWrite, (int)s.fog, s.cull, s.fadeStart, s.fadeEnd, textures[0],
+                textures[1]);
+#else
+        (void)c;
+        (void)s;
+#endif
     }
 
     // The textures of a draw, by the variant's units, with the sampler state
@@ -1439,6 +1484,26 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         if (blended3d && probe.mode == PROBE_NORMAL && probe.blockFrame >= kProbeSkipFrames &&
             c.part < Diagnostics::SCENE_PART_COUNT)
             probe.blended[c.part]++;
+        const bool sky = !c.transformed && c.part == Diagnostics::SCENE_PART_SKY;
+        const bool trees = !c.transformed && c.part == Diagnostics::SCENE_PART_BILLBOARDS;
+        if (probe.describe && (sky || trees) && probe.described < 24) {
+            probe.described++;
+            DescribeDraw(c, frame.states[c.state]);
+        }
+        probe.white = (sky && probe.mode == PROBE_SKY_WHITE) || (trees && probe.mode == PROBE_TREES_WHITE);
+        // The sky without blending: the state comes back after the draw.
+        struct BlendBack {
+            GfxDrawState *state = nullptr;
+            ~BlendBack()
+            {
+                if (state != nullptr)
+                    state->alphaBlend = true;
+            }
+        } blendBack;
+        if (sky && blended3d && probe.mode == PROBE_SKY_OPAQUE) {
+            blendBack.state = &frame.states[c.state];
+            blendBack.state->alphaBlend = false;
+        }
         if ((probe.mode == PROBE_NO_QUADS && c.part == Diagnostics::SCENE_PART_QUADS) ||
             (probe.mode == PROBE_NO_LAYERS && c.part == Diagnostics::SCENE_PART_LAYERS) ||
             (probe.mode == PROBE_NO_BILLBOARDS && c.part == Diagnostics::SCENE_PART_BILLBOARDS) ||
@@ -2087,6 +2152,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     {
 #ifdef OPENCMR2_DEV
         const uint64_t now = sceKernelGetProcessTimeWide();
+        probe.white = false;
         if (probe.mode == PROBE_OFF) {
             if (!probe.touchStarted) {
                 sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
@@ -2142,7 +2208,10 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         probe.submitMicros = 0;
         probe.draws = probe.draws3d = 0;
         memset(probe.section, 0, sizeof(probe.section));
-        if (++probe.blockFrame < kProbeBlockFrames)
+        ++probe.blockFrame;
+        probe.describe =
+            probe.mode == PROBE_NORMAL && probe.cycle == kProbeCycles - 1 && probe.blockFrame == kProbeSkipFrames;
+        if (probe.blockFrame < kProbeBlockFrames)
             return;
         probe.blockFrame = 0;
         if (++probe.slot == kProbeCycleModes) {
