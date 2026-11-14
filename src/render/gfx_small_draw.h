@@ -89,20 +89,40 @@ inline bool Gfx_BoxOutsidePlane(float a, float b, float c, float d, const float 
            c * (c >= 0.0f ? high[2] : low[2]) + d < 0.0f;
 }
 
+// The six planes of the view from the clip matrix, four numbers (a, b, c,
+// d) each. They come from the columns of the matrix: z, x + w, w - x,
+// y + w, w - y and w - z are each zero or more inside the view.
+inline void Gfx_ViewPlanesOf(const float *m, float planes[24])
+{
+    for (int i = 0; i < 4; i++) {
+        const float x = m[i * 4], y = m[i * 4 + 1], z = m[i * 4 + 2], w = m[i * 4 + 3];
+        planes[i] = z;
+        planes[4 + i] = w + x;
+        planes[8 + i] = w - x;
+        planes[12 + i] = w + y;
+        planes[16 + i] = w - y;
+        planes[20 + i] = w - z;
+    }
+}
+
 // Whether a box draws nothing: it is outside one plane of the view, as
-// Gfx_OutsidePlanes tells it of each corner. The planes come from the
-// columns of the matrix: x + w, w - x, y + w, w - y, z and w - z are each
-// zero or more inside the view. One corner for each plane, not six planes
-// for each of the eight corners: the recorder tests each draw and each
-// stage object of a frame.
+// Gfx_OutsidePlanes tells it of each corner. One corner for each plane, not
+// six planes for each of the eight corners: the recorder tests each draw
+// and each stage object of a frame.
+inline bool Gfx_BoxOutsidePlanes(const float *planes, const float low[3], const float high[3])
+{
+    for (int p = 0; p < 24; p += 4)
+        if (Gfx_BoxOutsidePlane(planes[p], planes[p + 1], planes[p + 2], planes[p + 3], low, high))
+            return true;
+    return false;
+}
+
+// The same from the clip matrix.
 inline bool Gfx_BoxOutsideView(const float *m, const float low[3], const float high[3])
 {
-    return Gfx_BoxOutsidePlane(m[2], m[6], m[10], m[14], low, high) ||
-           Gfx_BoxOutsidePlane(m[3] + m[0], m[7] + m[4], m[11] + m[8], m[15] + m[12], low, high) ||
-           Gfx_BoxOutsidePlane(m[3] - m[0], m[7] - m[4], m[11] - m[8], m[15] - m[12], low, high) ||
-           Gfx_BoxOutsidePlane(m[3] + m[1], m[7] + m[5], m[11] + m[9], m[15] + m[13], low, high) ||
-           Gfx_BoxOutsidePlane(m[3] - m[1], m[7] - m[5], m[11] - m[9], m[15] - m[13], low, high) ||
-           Gfx_BoxOutsidePlane(m[3] - m[2], m[7] - m[6], m[11] - m[10], m[15] - m[14], low, high);
+    float planes[24];
+    Gfx_ViewPlanesOf(m, planes);
+    return Gfx_BoxOutsidePlanes(planes, low, high);
 }
 
 // The eye distance of the farthest vertex of a small draw in world space
