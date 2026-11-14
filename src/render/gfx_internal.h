@@ -117,6 +117,13 @@ struct GfxVertexBuffer {
     // The recordings whose small batches refer to its vertices
     // (GfxSmallItem::buffer).
     GfxBlockStamps batchBlocks;
+    // The least alpha of the diffuse and of the specular colours of the
+    // vertices, as of the last scan: it only goes down. The vertices from
+    // unscannedFirst to unscannedEnd may have changed since (a lock). The
+    // recorder scans them before an executor gets a draw that needs the
+    // least alpha (GfxCommand::vertexAlpha): the executor reads no GPU copy.
+    uint8_t leastAlpha[2] = { 255, 255 };
+    uint32_t unscannedFirst = 0, unscannedEnd = 0;
 };
 
 // Bytes of one level, given its size, for a format.
@@ -237,6 +244,11 @@ struct GfxCommand {
     // with the state (in world space) and textures[1]. cull: they are tested
     // against the view.
     uint32_t firstItem, itemCount;
+    // A 3D draw of a buffer without blending and with the alpha test: the
+    // least alpha of the buffer's diffuse and specular colours, as of the
+    // frame's submit (GfxVertexBuffer::leastAlpha), and whether it is known.
+    uint8_t vertexAlpha[2];
+    bool vertexAlphaKnown;
     // sky: the draws of the sky start here (else they end), and how the
     // settings ask to draw them (GFX_SKY_*), read on the game's thread.
     bool skyBegin;

@@ -201,6 +201,7 @@ const char *const kFlushNames[FLUSH_COUNT] = { "atlas", "buffer gone", "buffer l
 
 struct RecorderCounts {
     uint32_t states, small, joined, atlas, culled, snapshots, batched;
+    uint32_t alphaScanned;      // vertices read for their least alpha (StampVertexAlpha)
     uint32_t noJoin[NO_JOIN_COUNT], noAtlas[NO_ATLAS_COUNT], changed[CHANGED_COUNT], flushes[FLUSH_COUNT];
 };
 RecorderCounts s_counts;
@@ -1383,10 +1384,64 @@ extern "C" void Gfx_EndScene(void)
 // batches go in their place first: here, or on the worker of the threaded
 // executor. That one takes the frame's contents; the caller resets what it
 // leaves.
+// The vertices from first to end of a buffer may have changed: the next
+// scan reads them.
+static void MarkUnscanned(GfxVertexBuffer *buffer, uint32_t first, uint32_t end)
+{
+    if (buffer->unscannedEnd <= buffer->unscannedFirst) {
+        buffer->unscannedFirst = first;
+        buffer->unscannedEnd = end;
+        return;
+    }
+    buffer->unscannedFirst = std::min(buffer->unscannedFirst, first);
+    buffer->unscannedEnd = std::max(buffer->unscannedEnd, end);
+}
+
+// The least alpha of the vertices into leastAlpha (diffuse, specular).
+static void ScanAlpha(const GfxVertex *vertices, size_t count, uint8_t leastAlpha[2])
+{
+    uint8_t diffuse = leastAlpha[0], specular = leastAlpha[1];
+    for (size_t i = 0; i < count; i++) {
+        diffuse = std::min(diffuse, (uint8_t)(vertices[i].diffuse >> 24));
+        specular = std::min(specular, (uint8_t)(vertices[i].specular >> 24));
+    }
+    leastAlpha[0] = diffuse;
+    leastAlpha[1] = specular;
+}
+
+// Each 3D draw of a buffer without blending and with the alpha test gets
+// the least alpha of the buffer's colours (GfxCommand::vertexAlpha). The
+// parts of the buffer that changed since the last scan are read here, on
+// the game's thread, from the CPU copy, which is as the GPU copy will be.
+static void StampVertexAlpha(GfxFrame &frame)
+{
+    for (GfxCommand &c : frame.commands) {
+        c.vertexAlphaKnown = false;
+        if (c.type != GFX_CMD_DRAW || c.buffer == NULL || c.transformed)
+            continue;
+        const GfxDrawState &s = frame.states[c.state];
+        if (!s.alphaTest || s.alphaBlend)
+            continue;
+        GfxVertexBuffer *b = c.buffer;
+        if (b->unscannedEnd > b->unscannedFirst) {
+            const uint32_t end = std::min<uint32_t>(b->unscannedEnd, (uint32_t)b->vertices.size());
+            if (end > b->unscannedFirst) {
+                ScanAlpha(&b->vertices[b->unscannedFirst], end - b->unscannedFirst, b->leastAlpha);
+                s_counts.alphaScanned += end - b->unscannedFirst;
+            }
+            b->unscannedFirst = b->unscannedEnd = 0;
+        }
+        c.vertexAlpha[0] = b->leastAlpha[0];
+        c.vertexAlpha[1] = b->leastAlpha[1];
+        c.vertexAlphaKnown = true;
+    }
+}
+
 static void Submit(bool present, int vsync, bool stretch)
 {
     if (s_executor == NULL)
         return;
+    StampVertexAlpha(s_frame);
     AddPendingBatchJob();
     s_frame.batchSequence = Gfx_BatchJobsAdded();
     if (!s_threaded) {
@@ -1472,6 +1527,7 @@ void Gfx_RecorderCountsText(char *text, size_t size)
     add(", culled %u%s", n.culled, "");
     add(", snapshot draws %u%s", n.snapshots, "");
     add(", batched %u%s", n.batched, "");
+    add(", alpha scanned %u vertices%s", n.alphaScanned, "");
     list("no join", n.noJoin, kNoJoinNames, NO_JOIN_COUNT);
     list("state parts", n.changed, kChangedNames, CHANGED_COUNT);
     list("no atlas", n.noAtlas, kNoAtlasNames, NO_ATLAS_COUNT);
@@ -1759,6 +1815,8 @@ extern "C" GfxVertexBuffer *Gfx_CreateVertexBuffer(DWORD vertexCount)
     GfxVertexBuffer *buffer = new GfxVertexBuffer;
     buffer->vertices.resize(vertexCount);
     memset(buffer->vertices.data(), 0, vertexCount * sizeof(GfxVertex));
+    // A vertex that the game never writes keeps alpha 0.
+    MarkUnscanned(buffer, 0, vertexCount);
     TraceVertexBuffer(buffer, 1);
     return buffer;
 }
@@ -1809,6 +1867,7 @@ extern "C" GfxVertex *Gfx_LockVertexBuffer(GfxVertexBuffer *buffer)
     buffer->version++;
     buffer->lastLockFrame = s_presentedFrames;
     buffer->positionsUnknown = true;
+    MarkUnscanned(buffer, 0, (uint32_t)buffer->vertices.size());
     return buffer->vertices.data();
 }
 
@@ -1862,6 +1921,7 @@ extern "C" GfxVertex *Gfx_LockVertexBufferRange(GfxVertexBuffer *buffer, DWORD f
     // The caller can write any position: the boxes of these vertices are
     // measured again.
     buffer->lockStamps.Mark(firstVertex, vertexCount, ++buffer->lockSerial);
+    MarkUnscanned(buffer, firstVertex, firstVertex + vertexCount);
     return buffer->vertices.data();
 }
 
@@ -1882,6 +1942,8 @@ extern "C" void Gfx_WriteVertexBufferRange(GfxVertexBuffer *buffer, DWORD firstV
     if (memcmp(target, vertices, bytes) == 0)
         return;
     BeginRangeWrite(buffer, firstVertex, vertexCount);
+    // The least alpha of the buffer, from the vertices that come in.
+    ScanAlpha(vertices, vertexCount, buffer->leastAlpha);
     // The boxes of these vertices stay while their positions stay (the
     // stage lighting writes colours: a box measured again for each draw of
     // each mesh in the view took 1 to 2 ms of a frame of a wood).
