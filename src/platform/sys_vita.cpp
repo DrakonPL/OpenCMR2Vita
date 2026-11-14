@@ -32,6 +32,7 @@
 #include <string.h>
 #include <time.h>
 
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -55,6 +56,9 @@ const char kVitaDefaults[] =
 
 SysSettings::Values s_settings;
 SysEventRing s_events;
+// The file work of all threads, for the line of a long frame (dev builds):
+// opens, reads, bytes read, and the time in them.
+std::atomic<unsigned> s_fileOpens, s_fileReads, s_fileReadBytes, s_fileMicros;
 bool s_resumed;
 std::string s_lastMissingFile;  // game path of the last file that could not be read
 int s_openFiles;
@@ -468,6 +472,67 @@ struct FrameParts : Diagnostics::Observer {
 };
 FrameParts s_frameParts;
 
+// The counts of the frame parts and of the file work at the end of the last
+// frame: a long frame's line gives its own share.
+struct FrameSnapshot {
+    uint64_t tick = 0, recorder = 0;
+    unsigned ticks = 0;
+    uint64_t parts[Diagnostics::SCENE_PART_COUNT] = {};
+    unsigned fileOpens = 0, fileReads = 0, fileBytes = 0, fileMicros = 0;
+};
+
+FrameSnapshot SnapshotOf(const FrameParts &p)
+{
+    FrameSnapshot s;
+    s.tick = p.tickMicros;
+    s.recorder = p.recorderMicros;
+    s.ticks = p.ticks;
+    memcpy(s.parts, p.partMicros, sizeof(s.parts));
+    s.fileOpens = s_fileOpens.load(std::memory_order_relaxed);
+    s.fileReads = s_fileReads.load(std::memory_order_relaxed);
+    s.fileBytes = s_fileReadBytes.load(std::memory_order_relaxed);
+    s.fileMicros = s_fileMicros.load(std::memory_order_relaxed);
+    return s;
+}
+
+// A frame longer than this gives a line of its own parts, at most
+// kLongFramesPerPeriod in a heartbeat period: the hitches of a race.
+constexpr double kLongFrameMs = 50.0;
+constexpr unsigned kLongFramesPerPeriod = 4;
+
+void LogLongFrame(double ms, const FrameSnapshot &before, const FrameParts &p, uint64_t presentMicros)
+{
+    const FrameSnapshot after = SnapshotOf(p);
+    // The three parts of the scene that took the most of the frame.
+    int top[3] = { -1, -1, -1 };
+    uint64_t partsMicros = 0;
+    for (int i = 1; i < Diagnostics::SCENE_PART_COUNT; i++) {
+        const uint64_t spent = after.parts[i] - before.parts[i];
+        partsMicros += spent;
+        for (int k = 0; k < 3; k++) {
+            if (top[k] < 0 || spent > after.parts[top[k]] - before.parts[top[k]]) {
+                for (int m = 2; m > k; m--)
+                    top[m] = top[m - 1];
+                top[k] = i;
+                break;
+            }
+        }
+    }
+    char parts[160];
+    int used = 0;
+    for (int k = 0; k < 3 && top[k] >= 0; k++)
+        used += snprintf(parts + used, sizeof(parts) - (size_t)used, "%s%s %.1f", k ? ", " : "",
+                         Diagnostics::kScenePartNames[top[k]], (after.parts[top[k]] - before.parts[top[k]]) / 1000.0);
+    const double tick = (after.tick - before.tick) / 1000.0, present = presentMicros / 1000.0;
+    const double scene = partsMicros / 1000.0;
+    Sys_Log("long frame: %.1f ms: ticks %.1f (%u), scene parts %.1f (%s), recorder %.1f, present %.1f, rest %.1f; "
+            "files: %u opens, %u reads of %u KB, %.1f ms (all threads)",
+            ms, tick, after.ticks - before.ticks, scene, used > 0 ? parts : "none",
+            (after.recorder - before.recorder) / 1000.0, present, ms - tick - scene - present,
+            after.fileOpens - before.fileOpens, after.fileReads - before.fileReads,
+            (after.fileBytes - before.fileBytes) / 1024, (after.fileMicros - before.fileMicros) / 1000.0);
+}
+
 // The names of the parts, for the heartbeat.
 const char *const *const kPartNames = Diagnostics::kScenePartNames;
 
@@ -530,6 +595,8 @@ void SysVita_FramePresented(bool stats)
     // The parts of the frames are given only for a period with the stats on
     // from its start.
     static bool partsValid = true;
+    static FrameSnapshot lastSnapshot;
+    static unsigned longFrames;
     const uint64_t now = sceKernelGetProcessTimeWide();
     if (!stats) {
         Diagnostics::observer = nullptr;
@@ -548,13 +615,20 @@ void SysVita_FramePresented(bool stats)
         sumMs += ms;
         maxMs = ms > maxMs ? ms : maxMs;
         periodFrames++;
+        if (ms > kLongFrameMs && stats && partsValid && longFrames < kLongFramesPerPeriod) {
+            longFrames++;
+            LogLongFrame(ms, lastSnapshot, s_frameParts, now - s_frameParts.presentStart);
+        }
     } else {
         periodStart = now;
     }
     last = now;
     frames++;
-    if (now - periodStart < kPeriodMicros)
+    if (now - periodStart < kPeriodMicros) {
+        lastSnapshot = SnapshotOf(s_frameParts);
         return;
+    }
+    longFrames = 0;
     if (first)
         Sys_Log("heartbeat: first after %.1f s", (double)now / 1e6);
     first = false;
@@ -613,6 +687,7 @@ void SysVita_FramePresented(bool stats)
             Sys_Log("heartbeat: draws per frame (calls>commands, vertices copied):%s", text);
     }
     s_frameParts.Reset();
+    lastSnapshot = SnapshotOf(s_frameParts);
     partsValid = stats;
     periodStart = now;
     periodFrames = 0;
@@ -972,6 +1047,15 @@ extern "C" const char *Sys_GetLastMissingFile(void)
 
 extern "C" SysFile *Sys_OpenFile(const char *path, int mode)
 {
+    const uint64_t started = sceKernelGetProcessTimeWide();
+    struct Counted {
+        uint64_t started;
+        ~Counted()
+        {
+            s_fileOpens.fetch_add(1, std::memory_order_relaxed);
+            s_fileMicros.fetch_add((unsigned)(sceKernelGetProcessTimeWide() - started), std::memory_order_relaxed);
+        }
+    } counted{ started };
     char host[1024];
     SceUID fd = -1;
     if (Sys_ResolvePath(path, mode == SYS_FILE_WRITE, host, sizeof(host))) {
@@ -1019,15 +1103,21 @@ extern "C" void Sys_SetFileReadAhead(SysFile *file, DWORD blockBytes)
 
 extern "C" DWORD Sys_ReadFile(SysFile *file, void *buffer, DWORD size)
 {
-    if (file->ahead != nullptr)
-        return file->ahead->Read(file->io, buffer, size);
+    const uint64_t started = sceKernelGetProcessTimeWide();
     DWORD done = 0;
-    while (done < size) {
-        int n = sceIoRead(file->fd, (BYTE *)buffer + done, size - done);
-        if (n <= 0)
-            break;
-        done += (DWORD)n;
+    if (file->ahead != nullptr) {
+        done = file->ahead->Read(file->io, buffer, size);
+    } else {
+        while (done < size) {
+            int n = sceIoRead(file->fd, (BYTE *)buffer + done, size - done);
+            if (n <= 0)
+                break;
+            done += (DWORD)n;
+        }
     }
+    s_fileReads.fetch_add(1, std::memory_order_relaxed);
+    s_fileReadBytes.fetch_add(done, std::memory_order_relaxed);
+    s_fileMicros.fetch_add((unsigned)(sceKernelGetProcessTimeWide() - started), std::memory_order_relaxed);
     return done;
 }
 
