@@ -257,6 +257,45 @@ GxmTexture *GxmTextures::Ensure(GfxTexture *t)
     return g;
 }
 
+bool GxmTextures::SetVideoFrame(GfxTexture *t, const void *pixels, bool vFirst, unsigned frame)
+{
+    GxmTexture *g = (GxmTexture *)t->gpu;
+    if (g != nullptr && !g->external) {
+        Destroy(t, frame);
+        g = nullptr;
+    }
+    const bool fresh = g == nullptr;
+    if (fresh) {
+        g = new GxmTexture;
+        g->external = true;
+        g->layout.levels = 1;
+    }
+    // The colours of ITU-R BT.601, as the movies are.
+    const int err = sceGxmTextureInitLinear(&g->texture, pixels,
+                                            vFirst ? SCE_GXM_TEXTURE_FORMAT_YVU420P2_CSC0
+                                                   : SCE_GXM_TEXTURE_FORMAT_YUV420P2_CSC0,
+                                            t->width, t->height, 0);
+    if (err < 0) {
+        if (!loggedVideo)
+            Sys_Log("gxm tex: a video frame of %dx%d: 0x%08x", t->width, t->height, (unsigned)err);
+        loggedVideo = true;
+        if (fresh)
+            delete g;
+        return false;
+    }
+    // The descriptor is new: the sampler state and the context's copy of it
+    // are set again.
+    g->sampler = ~0u;
+    g->generation++;
+    if (fresh) {
+        count[t->format]++;
+        changed = true;
+        t->gpu = g;
+    }
+    t->dirty = false;
+    return true;
+}
+
 bool GxmTextures::CreateTarget(const GfxTexture *t, GxmTexture &g)
 {
     const unsigned stride = g.layout.level[0].rowBytes / 4;
@@ -323,6 +362,9 @@ void GxmTextures::Upload(std::vector<GfxTexture *> &textures, unsigned frame)
         GxmTexture *g = Ensure(t);
         t->dirty = false;
         if (g == nullptr)
+            continue;
+        // The picture is a frame of a video decoder (SetVideoFrame).
+        if (g->external)
             continue;
         // A texture of a linear layout that changed in a part (the dirt
         // stamps of the game on a car): the tiles of the stamps alone.

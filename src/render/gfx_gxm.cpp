@@ -2645,6 +2645,52 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         device.Finish();
         gpuTextures.Read(t);
     }
+
+    // ---- the frames of a hardware video decoder ----
+    //
+    // The decoder writes its frames into video memory, which the CPU reads
+    // very slowly (36 ms for a frame of 640x480). The GPU reads a frame
+    // where it is: the texture is a YUV texture over the frame's memory.
+    // The decoder writes a frame again after the game took the next one,
+    // so the GPU ends its scenes before each change.
+
+    std::vector<void *> videoBlocks;    // the blocks of video frames mapped for the GPU
+
+    void FinishDrawing() override
+    {
+        EndScene();
+        device.Finish();
+    }
+
+    bool SetTextureVideoFrame(GfxTexture *t, const void *pixels, bool vFirst, void *block,
+                              size_t blockBytes) override
+    {
+        FinishDrawing();
+        bool mapped = false;
+        for (void *b : videoBlocks)
+            mapped = mapped || b == block;
+        if (!mapped) {
+            const int err = sceGxmMapMemory(block, blockBytes, SCE_GXM_MEMORY_ATTRIB_READ);
+            if (err < 0) {
+                Sys_Log("gxm: a block of video frames (%u KB) does not map: 0x%08x", (unsigned)(blockBytes / 1024),
+                        (unsigned)err);
+                return false;
+            }
+            videoBlocks.push_back(block);
+        }
+        return gpuTextures.SetVideoFrame(t, pixels, vFirst, presented);
+    }
+
+    void ReleaseVideoMemory(void *block) override
+    {
+        FinishDrawing();
+        for (size_t i = 0; i < videoBlocks.size(); i++)
+            if (videoBlocks[i] == block) {
+                sceGxmUnmapMemory(block);
+                videoBlocks.erase(videoBlocks.begin() + (std::ptrdiff_t)i);
+                return;
+            }
+    }
 };
 
 } // namespace

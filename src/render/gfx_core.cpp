@@ -2609,6 +2609,42 @@ std::vector<uint32_t> ToBGRA(GfxTexture *t)
 
 } // namespace
 
+// The draws recorded so far read the video frame before: they run first.
+static void FlushBeforeVideoFrame()
+{
+    if (!s_frame.commands.empty())
+        Flush(FLUSH_TEXTURE_LOCK);
+}
+
+extern "C" BOOL Gfx_SetTextureVideoFrame(GfxTexture *texture, const void *pixels, BOOL vFirst, void *block,
+                                         DWORD blockBytes)
+{
+    if (texture == NULL || pixels == NULL || block == NULL || texture->cube != NULL || s_executor == NULL)
+        return FALSE;
+    FlushBeforeVideoFrame();
+    if (!s_executor->SetTextureVideoFrame(texture, pixels, vFirst != FALSE, block, blockBytes))
+        return FALSE;
+    // The picture is the decoder's: no upload of the CPU copy.
+    texture->dirty = false;
+    return TRUE;
+}
+
+extern "C" void Gfx_FinishDrawing(void)
+{
+    if (s_executor == NULL)
+        return;
+    FlushBeforeVideoFrame();
+    s_executor->FinishDrawing();
+}
+
+extern "C" void Gfx_ReleaseVideoMemory(void *block)
+{
+    if (s_executor == NULL || block == NULL)
+        return;
+    FlushBeforeVideoFrame();
+    s_executor->ReleaseVideoMemory(block);
+}
+
 extern "C" void Gfx_CopyTexture(GfxTexture *dst, GfxTexture *src)
 {
     dst = Root(dst);

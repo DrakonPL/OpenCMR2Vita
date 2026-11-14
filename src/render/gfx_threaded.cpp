@@ -269,6 +269,22 @@ struct ThreadedExecutor : GfxExecutor {
         Wait();
         inner->ReadTexture(texture);
     }
+    bool SetTextureVideoFrame(GfxTexture *texture, const void *pixels, bool vFirst, void *block,
+                              size_t blockBytes) override
+    {
+        Wait();
+        return inner->SetTextureVideoFrame(texture, pixels, vFirst, block, blockBytes);
+    }
+    void FinishDrawing() override
+    {
+        Wait();
+        inner->FinishDrawing();
+    }
+    void ReleaseVideoMemory(void *block) override
+    {
+        Wait();
+        inner->ReleaseVideoMemory(block);
+    }
     // The readback is taken in Prepare, with the worker idle.
     void CollectReadback(GfxReadback &) override {}
 };

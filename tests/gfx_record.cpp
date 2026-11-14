@@ -52,6 +52,12 @@ namespace {
 
 bool s_joins;
 GfxFrame s_frame;       // the frame of the last present
+// The calls for the frames of a video decoder: whether the executor takes
+// them, how many came, and the commands of the frame that ran last when the
+// last one came.
+bool s_takesVideo;
+int s_videoFrames, s_finishes, s_releases;
+size_t s_commandsBeforeVideo;
 
 struct CaptureExecutor : GfxExecutor {
     bool SetVideoMode(int, int, bool) override { return true; }
@@ -63,6 +69,22 @@ struct CaptureExecutor : GfxExecutor {
     void DestroyTexture(GfxTexture *) override {}
     void ReadTexture(GfxTexture *) override {}
     bool JoinsDraws() const override { return s_joins; }
+    bool SetTextureVideoFrame(GfxTexture *, const void *, bool, void *, size_t) override
+    {
+        s_videoFrames++;
+        s_commandsBeforeVideo = s_frame.commands.size();
+        return s_takesVideo;
+    }
+    void FinishDrawing() override
+    {
+        s_finishes++;
+        s_commandsBeforeVideo = s_frame.commands.size();
+    }
+    void ReleaseVideoMemory(void *) override
+    {
+        s_releases++;
+        s_commandsBeforeVideo = s_frame.commands.size();
+    }
 };
 
 void Sprite(float x)
@@ -1916,6 +1938,61 @@ int main()
         Gfx_DestroyVertexBuffer(lit);
         Gfx_DestroyVertexBuffer(mesh);
         s_joins = false;
+    }
+
+    // The frames of a video decoder as the picture of a texture
+    // (Gfx_SetTextureVideoFrame). The draws recorded so far read the frame
+    // before: they run before the executor gets the new one, and before the
+    // executor ends its drawing or lets a block of frames go.
+    {
+        s_joins = false;
+        GfxTexture *movie = Gfx_CreateTexture(64, 48, GFX_FORMAT_BGRX8, 1, GFX_TEXTURE_DYNAMIC);
+        static uint8_t block[64 * 48 * 2];
+        Gfx_Present(FALSE);
+        GfxLockedRect rect;
+        REQUIRE(Gfx_LockTexture(movie, 0, 0, &rect));
+        Gfx_UnlockTexture(movie, 0, 0);
+        REQUIRE(movie->dirty);
+        // An executor that does not take the frame: the texture keeps the
+        // picture of its CPU copy for the upload.
+        s_takesVideo = false;
+        s_videoFrames = 0;
+        REQUIRE(!Gfx_SetTextureVideoFrame(movie, block, TRUE, block, sizeof(block)));
+        REQUIRE(s_videoFrames == 1 && movie->dirty);
+        // One that takes it: no upload. The two draws recorded before it ran.
+        s_takesVideo = true;
+        Gfx_SetTexture(0, movie);
+        Sprite(0.0f);
+        Line(40.0f);
+        s_frame = GfxFrame();
+        REQUIRE(Gfx_SetTextureVideoFrame(movie, block, TRUE, block, sizeof(block)));
+        REQUIRE(s_videoFrames == 2 && !movie->dirty && s_commandsBeforeVideo == 2);
+        // No frame, no block, no texture: no call of the executor.
+        REQUIRE(!Gfx_SetTextureVideoFrame(movie, NULL, TRUE, block, sizeof(block)));
+        REQUIRE(!Gfx_SetTextureVideoFrame(movie, block, TRUE, NULL, 0));
+        REQUIRE(!Gfx_SetTextureVideoFrame(NULL, block, TRUE, block, sizeof(block)));
+        REQUIRE(s_videoFrames == 2);
+        // The end of the drawing, and a block that goes: after the draw
+        // recorded before each.
+        Sprite(0.0f);
+        s_frame = GfxFrame();
+        s_finishes = 0;
+        Gfx_FinishDrawing();
+        REQUIRE(s_finishes == 1 && s_commandsBeforeVideo == 1);
+        Sprite(0.0f);
+        s_frame = GfxFrame();
+        s_releases = 0;
+        Gfx_ReleaseVideoMemory(block);
+        REQUIRE(s_releases == 1 && s_commandsBeforeVideo == 1);
+        Gfx_ReleaseVideoMemory(NULL);
+        REQUIRE(s_releases == 1);
+        // With nothing recorded: the calls reach the executor as they are.
+        s_frame = GfxFrame();
+        Gfx_FinishDrawing();
+        REQUIRE(s_finishes == 2 && s_commandsBeforeVideo == 0);
+        Gfx_SetTexture(0, NULL);
+        Gfx_Present(FALSE);
+        Gfx_DestroyTexture(movie);
     }
 
     printf("gfx_record: ok\n");
