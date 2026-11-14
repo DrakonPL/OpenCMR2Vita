@@ -271,13 +271,16 @@ enum ProbeMode {
     PROBE_OFF, PROBE_NORMAL, PROBE_QUARTER, PROBE_TILE, PROBE_NO_3D, PROBE_NO_DEPTH_PASS, PROBE_GENERAL,
     PROBE_FADE_ALWAYS, PROBE_DEPTH_PASS_ALWAYS, PROBE_LOOKUP_ONLY, PROBE_PROFILE, PROBE_UNIFORMS_ALWAYS,
     PROBE_SINGLE_PASS, PROBE_TWO_PASSES, PROBE_NO_BLENDED_3D, PROBE_NO_2D, PROBE_NO_QUADS, PROBE_NO_LAYERS,
-    PROBE_NO_BILLBOARDS, PROBE_NO_PARTICLES, PROBE_END
+    PROBE_NO_BILLBOARDS, PROBE_NO_PARTICLES, PROBE_NO_BLENDED_SKY, PROBE_NO_BLENDED_GROUND,
+    PROBE_NO_BLENDED_OBJECTS, PROBE_NO_BLENDED_NODES, PROBE_END
 };
 const char *const kProbeNames[PROBE_END] = { "off",         "normal",        "quarter", "tile",
                                              "no 3D",       "no depth pass", "general", "fade always",
                                              "depth pass always", "lookup only", "profile", "uniforms always",
                                              "single pass", "two passes", "no blended 3D", "no 2D",
-                                             "no 3D quads", "no layers", "no billboards", "no particles" };
+                                             "no 3D quads", "no layers", "no billboards", "no particles",
+                                             "no blended sky", "no blended ground", "no blended objects",
+                                             "no blended nodes" };
 
 // The steps the profile mode times: an Execute before its draws, then the
 // steps of a 3D draw in Draw's order.
@@ -298,10 +301,31 @@ enum ProfileSection {
 // (GfxCommand::part, dev builds): the 3D quad layers (the rain streaks, the
 // tyre marks), the rest of the layers (the billboards of the rain splashes
 // and the spray, the lines, the glow), the sorted stage objects (the trees),
-// the particles.
-const int kProbeCycle[] = { PROBE_NORMAL,        PROBE_NO_3D,    PROBE_TILE,      PROBE_NO_BLENDED_3D,
-                            PROBE_NO_2D,         PROBE_NO_QUADS, PROBE_NO_LAYERS, PROBE_NO_BILLBOARDS,
-                            PROBE_NO_PARTICLES };
+// the particles. The blended 3D draws of the sky, of the ground, of the
+// stage objects that are not sorted, and of the nodes (the cars). The modes
+// no 2D, no 3D quads, no layers and no particles are not in the cycle: in a
+// wet stage each saved less than 1 ms. The normal mode also counts the
+// blended 3D draws of each part, for a line of the log.
+const int kProbeCycle[] = { PROBE_NORMAL,           PROBE_NO_3D,           PROBE_TILE,
+                            PROBE_NO_BLENDED_3D,    PROBE_NO_BILLBOARDS,   PROBE_NO_BLENDED_SKY,
+                            PROBE_NO_BLENDED_GROUND, PROBE_NO_BLENDED_OBJECTS, PROBE_NO_BLENDED_NODES };
+
+// The part whose blended 3D draws a mode leaves out, or -1.
+int ProbeBlendedPart(int mode)
+{
+    switch (mode) {
+    case PROBE_NO_BLENDED_SKY:
+        return Diagnostics::SCENE_PART_SKY;
+    case PROBE_NO_BLENDED_GROUND:
+        return Diagnostics::SCENE_PART_GROUND;
+    case PROBE_NO_BLENDED_OBJECTS:
+        return Diagnostics::SCENE_PART_OBJECTS;
+    case PROBE_NO_BLENDED_NODES:
+        return Diagnostics::SCENE_PART_NODES;
+    default:
+        return -1;
+    }
+}
 constexpr unsigned kProbeCycleModes = sizeof(kProbeCycle) / sizeof(kProbeCycle[0]);
 constexpr unsigned kProbeBlockFrames = 8;   // the frames of a mode's turn
 constexpr unsigned kProbeSkipFrames = 2;    // at the start of a turn: not counted
@@ -328,6 +352,8 @@ struct Probe {
     uint64_t mark = 0;              // the end of the step before
     unsigned draws3d = 0, draws = 0;
     ProbeSums sums[PROBE_END];
+    // The blended 3D draws of each part in the frames of the normal mode.
+    unsigned blended[Diagnostics::SCENE_PART_COUNT] = {};
     bool touchStarted = false, touchDown = false;
     // The check of the single pass: the frame of the check that is drawn now
     // (1 to kProbeCheckFrames, 0: no check), and the samples that differ
@@ -1407,8 +1433,12 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         }
         if ((probe.mode == PROBE_NO_3D && !c.transformed) || (probe.mode == PROBE_NO_2D && c.transformed))
             return;
-        if (probe.mode == PROBE_NO_BLENDED_3D && !c.transformed && frame.states[c.state].alphaBlend)
+        const bool blended3d = !c.transformed && frame.states[c.state].alphaBlend;
+        if (blended3d && (probe.mode == PROBE_NO_BLENDED_3D || ProbeBlendedPart(probe.mode) == (int)c.part))
             return;
+        if (blended3d && probe.mode == PROBE_NORMAL && probe.blockFrame >= kProbeSkipFrames &&
+            c.part < Diagnostics::SCENE_PART_COUNT)
+            probe.blended[c.part]++;
         if ((probe.mode == PROBE_NO_QUADS && c.part == Diagnostics::SCENE_PART_QUADS) ||
             (probe.mode == PROBE_NO_LAYERS && c.part == Diagnostics::SCENE_PART_LAYERS) ||
             (probe.mode == PROBE_NO_BILLBOARDS && c.part == Diagnostics::SCENE_PART_BILLBOARDS) ||
@@ -2145,6 +2175,16 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                     sums.section[PROFILE_VERTICES] / perFrame, sums.section[PROFILE_PASSES] / perFrame,
                     sums.draws3d / frames, (double)(t1 - t0) / 256.0);
         }
+        {
+            const unsigned frames = probe.sums[PROBE_NORMAL].frames > 0 ? probe.sums[PROBE_NORMAL].frames : 1;
+            char line[512];
+            int used = 0;
+            for (int part = 0; part < Diagnostics::SCENE_PART_COUNT; part++)
+                if (probe.blended[part] != 0 && used < (int)sizeof(line))
+                    used += snprintf(line + used, sizeof(line) - (size_t)used, "%s%s %.1f", used > 0 ? ", " : "",
+                                     Diagnostics::kScenePartNames[part], (double)probe.blended[part] / frames);
+            Sys_Log("gxm probe: blended 3D draws per frame of the normal mode: %s", used > 0 ? line : "none");
+        }
         probe.mode = PROBE_OFF;
         Sys_Log("gxm probe: done");
 #endif
@@ -2209,9 +2249,10 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         // The batch thread (core 1): the time of its jobs, and the waits for
         // them: of the game's thread (a lock of vertices that a job reads,
         // a full queue) and of the worker (the jobs of its frame).
-        Sys_Log("gxm: per s texture uploads: %u of a part, %u of all", gpuTextures.partUploads,
-                gpuTextures.wholeUploads);
+        Sys_Log("gxm: per s texture uploads: %u of a part (%u KB of tiles), %u of all", gpuTextures.partUploads,
+                (unsigned)(gpuTextures.tileTexels * 4 / 1024), gpuTextures.wholeUploads);
         gpuTextures.partUploads = gpuTextures.wholeUploads = 0;
+        gpuTextures.tileTexels = 0;
         const GfxBatchTimes batches = Gfx_TakeBatchTimes();
         Sys_Log("gxm: per frame ms: batch thread: jobs %.2f; waited for it: game thread %.2f, worker %.2f",
                 batches.jobs * msPerFrame, batches.waited[0] * msPerFrame, batches.waited[1] * msPerFrame);

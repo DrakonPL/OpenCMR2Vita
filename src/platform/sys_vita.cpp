@@ -469,13 +469,7 @@ struct FrameParts : Diagnostics::Observer {
 FrameParts s_frameParts;
 
 // The names of the parts, for the heartbeat.
-const char *const kPartNames[] = {
-    "other", "setup", "particles", "sky", "ground", "shadows", "objects", "billboards",
-    "nodes", "layers", "view", "prepare", "car shadows", "reflections", "hud", "off road", "tyre marks",
-    "sector cull", "relight", "deferred sort", "glow", "quads", "2d", "car nodes", "wheels", "skid trails"
-};
-static_assert(sizeof(kPartNames) / sizeof(kPartNames[0]) == Diagnostics::SCENE_PART_COUNT,
-              "a name for each scene part");
+const char *const *const kPartNames = Diagnostics::kScenePartNames;
 
 // The parts of a heartbeat line, in the order of the line.
 const int kSceneParts[] = {
