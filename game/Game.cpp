@@ -2238,6 +2238,8 @@ struct DeferredDraw {
     StageObjectDraw *pObject;
 };
 
+#include "DeferredOrder.h"
+
 static int __cdecl Game_CompareDeferredDistance(const void *a, const void *b)
 {
     int distanceA = ((const DeferredDraw *)a)->distance;
@@ -2251,49 +2253,27 @@ extern SceneNode *g_unk0x0059be6c;
 // first, in order[]. The original sorted the objects themselves with qsort
 // and Game_CompareDeferredDistance: for some hundred trees that was a tenth
 // of the game's instructions in a frame. This is a radix sort of the
-// distances in three passes of 11 bits. It keeps the objects of one distance
-// in their order, as the merge sort behind the qsort of glibc does.
+// distances (DeferredOrder.h). It keeps the objects of one distance in their
+// order, as the merge sort behind the qsort of glibc does.
 // sort: 0 keeps the order of the list.
 static void Game_OrderDeferredDraws(const DeferredDraw *items, unsigned int count, int sort, unsigned short *order)
 {
     static unsigned int keys[4096];
     static unsigned short scratch[4096];
-    unsigned int counts[2048];
-    unsigned short *from = order;
-    unsigned short *to = scratch;
     unsigned int i;
-    int shift;
 
     if (count > 4096)
         count = 4096;
-    for (i = 0; i < count; i++) {
-        // The greatest distance has the least key. A distance below zero
-        // (none is) comes last, as with the compare function.
-        keys[i] = 0x7fffffffu - (unsigned int)items[i].distance;
-        order[i] = (unsigned short)i;
-    }
-    if (sort == 0)
+    if (sort == 0) {
+        for (i = 0; i < count; i++)
+            order[i] = (unsigned short)i;
         return;
-    for (shift = 0; shift < 33; shift += 11) {
-        unsigned int start = 0;
-        unsigned short *swap;
-
-        memset(counts, 0, sizeof(counts));
-        for (i = 0; i < count; i++)
-            counts[(keys[from[i]] >> shift) & 2047]++;
-        for (i = 0; i < 2048; i++) {
-            unsigned int n = counts[i];
-            counts[i] = start;
-            start += n;
-        }
-        for (i = 0; i < count; i++)
-            to[counts[(keys[from[i]] >> shift) & 2047]++] = from[i];
-        swap = from;
-        from = to;
-        to = swap;
     }
-    // Three passes: the last one wrote scratch.
-    memcpy(order, scratch, count * sizeof(order[0]));
+    // The greatest distance has the least key. A distance below zero (none
+    // is) comes last, as with the compare function.
+    for (i = 0; i < count; i++)
+        keys[i] = 0x7fffffffu - (unsigned int)items[i].distance;
+    DeferredOrder_Sort(keys, count, order, scratch);
 }
 
 extern int g_depthSortDrawLists;
