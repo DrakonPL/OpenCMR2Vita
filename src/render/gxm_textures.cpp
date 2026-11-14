@@ -35,6 +35,35 @@ bool Check(const char *call, int err)
     return err >= 0;
 }
 
+// The texels x0..x1-1 of the rows y0..y1-1 of a level of a linear layout,
+// from the CPU copy into the GPU layout.
+void CopyLinearPart(int format, const uint8_t *src, const GxmLevelLayout &l, GfxMipRect part, uint8_t *dst)
+{
+    const unsigned sourceTexel = format == GFX_FORMAT_BUMP_DUDVL ? 3 : 4;
+    for (int y = part.y0; y < part.y1 && (unsigned)y < l.rows; y++) {
+        const uint8_t *in = src + (size_t)y * l.sourceRowBytes + (size_t)part.x0 * sourceTexel;
+        uint8_t *out = dst + (size_t)y * l.rowBytes + (size_t)part.x0 * 4;
+        const unsigned texels = (unsigned)(part.x1 - part.x0);
+        if (format == GFX_FORMAT_BGRX8) {
+            for (unsigned x = 0; x < texels; x++) {
+                uint32_t p;
+                memcpy(&p, in + x * 4, 4);
+                p |= 0xff000000u;
+                memcpy(out + x * 4, &p, 4);
+            }
+        } else if (format == GFX_FORMAT_BUMP_DUDVL) {
+            for (unsigned x = 0; x < texels; x++) {
+                out[x * 4] = in[x * 3];
+                out[x * 4 + 1] = in[x * 3 + 1];
+                out[x * 4 + 2] = in[x * 3 + 2];
+                out[x * 4 + 3] = 0xff;
+            }
+        } else {
+            memcpy(out, in, (size_t)texels * 4);
+        }
+    }
+}
+
 // One level of the CPU copy into its GPU layout.
 void CopyLevel(int format, const uint8_t *src, const GxmTextureLayout &layout, const GxmLevelLayout &l, uint8_t *dst)
 {
@@ -46,27 +75,56 @@ void CopyLevel(int format, const uint8_t *src, const GxmTextureLayout &layout, c
                        src + (size_t)y * l.sourceRowBytes + x * layout.blockBytes, layout.blockBytes);
         return;
     }
-    for (unsigned y = 0; y < l.rows; y++) {
-        const uint8_t *in = src + (size_t)y * l.sourceRowBytes;
-        uint8_t *out = dst + (size_t)y * l.rowBytes;
-        if (format == GFX_FORMAT_BGRX8) {
-            for (unsigned x = 0; x < l.sourceRowBytes / 4; x++) {
-                uint32_t p;
-                memcpy(&p, in + x * 4, 4);
-                p |= 0xff000000u;
-                memcpy(out + x * 4, &p, 4);
+    GfxMipRect all;
+    all.x1 = (int)(l.sourceRowBytes / (format == GFX_FORMAT_BUMP_DUDVL ? 3 : 4));
+    all.y1 = (int)l.rows;
+    CopyLinearPart(format, src, l, all, dst);
+}
+
+// Whether the texture's change is a part of level 0 that can go to the GPU
+// alone (GfxTexture::changedRect): a linear layout of one face whose levels
+// are those of the CPU copy, that is in memory.
+bool PartUploadFits(const GfxTexture *t, const GxmTexture *g)
+{
+    return g->uploaded && !g->layout.swizzled && g->layout.faceBytes == 0 && !g->madeMips && g->target == nullptr &&
+           !t->changedRect.Empty() && !t->levels[0][0].empty();
+}
+
+// Writes all levels of the CPU copy into memory in the layout of g.
+// Returns the least alpha of them (0: not known).
+int CopyAllLevels(const GfxTexture *t, const GxmTexture *g, const std::vector<uint8_t> *mips, uint8_t *memory)
+{
+    const int faces = g->layout.faceBytes != 0 ? 6 : 1;
+    int minAlpha = g->target == nullptr ? 255 : 0;
+    for (int face = 0; face < faces; face++)
+        for (int m = 0; m < g->layout.levels; m++) {
+            const GxmLevelLayout &l = g->layout.level[m];
+            const size_t bytes = (size_t)l.sourceRowBytes * l.sourceRows;
+            const std::vector<uint8_t> &source = m < t->mipLevels || mips == nullptr ? t->levels[face][m] : mips[m];
+            if (source.size() < bytes) {
+                minAlpha = 0;
+                continue;
             }
-        } else if (format == GFX_FORMAT_BUMP_DUDVL) {
-            for (unsigned x = 0; x < l.sourceRowBytes / 3; x++) {
-                out[x * 4] = in[x * 3];
-                out[x * 4 + 1] = in[x * 3 + 1];
-                out[x * 4 + 2] = in[x * 3 + 2];
-                out[x * 4 + 3] = 0xff;
+            CopyLevel(t->format, source.data(), g->layout, l, memory + (size_t)face * g->layout.faceBytes + l.offset);
+            if (minAlpha > 0) {
+                const int a = Gxm_MinAlpha(t->format, source.data(), bytes);
+                minAlpha = a < minAlpha ? a : minAlpha;
             }
-        } else {
-            memcpy(out, in, l.sourceRowBytes);
         }
+    return minAlpha;
+}
+
+// The least alpha of a part of level 0 of the CPU copy (255 for a format
+// without alpha).
+int MinAlphaOfPart(const GfxTexture *t, const GxmLevelLayout &l, GfxMipRect part)
+{
+    int least = 255;
+    for (int y = part.y0; y < part.y1 && least > 0; y++) {
+        const uint8_t *row = t->levels[0][0].data() + (size_t)y * l.sourceRowBytes + (size_t)part.x0 * 4;
+        const int a = Gxm_MinAlpha(t->format, row, (size_t)(part.x1 - part.x0) * 4);
+        least = a < least ? a : least;
     }
+    return least;
 }
 
 // The blocks x0, y0 .. x1 - 1, y1 - 1 of a level of a swizzled texture of
@@ -259,6 +317,10 @@ void GxmTextures::Upload(std::vector<GfxTexture *> &textures, unsigned frame)
         t->dirty = false;
         if (g == nullptr)
             continue;
+        // A texture of a linear layout that changed in a part (the dirt
+        // stamps of the game on a car): the rows of the part alone.
+        if (PartUploadFits(t, g) && UploadPart(t, g, frame))
+            continue;
         // A texture that keeps its levels and changed in a part (a texture
         // that is new in the atlas): only the blocks of that part go to the
         // GPU, into the memory that is there. The whole atlas of 2,048
@@ -292,8 +354,11 @@ void GxmTextures::Upload(std::vector<GfxTexture *> &textures, unsigned frame)
                 minAlpha = a < minAlpha ? a : minAlpha;
             }
             g->minAlpha = (uint8_t)minAlpha;
+            partUploads++;
             continue;
         }
+        wholeUploads++;
+        g->copies.ChangedWhole();
         if (g->lastDrawn != ~0u && frame - g->lastDrawn < (unsigned)kGxmFrameSlots && g->target == nullptr) {
             void *fresh = memory.Textures().Alloc(g->layout.bytes);
             if (fresh != nullptr) {
@@ -319,28 +384,55 @@ void GxmTextures::Upload(std::vector<GfxTexture *> &textures, unsigned frame)
         // The least alpha of the levels goes with the upload: the executor
         // leaves out work where no texel can fail the alpha test. A render
         // target's is not known.
-        const int faces = g->layout.faceBytes != 0 ? 6 : 1;
-        int minAlpha = g->target == nullptr ? 255 : 0;
-        for (int face = 0; face < faces; face++)
-            for (int m = 0; m < g->layout.levels; m++) {
-                const GxmLevelLayout &l = g->layout.level[m];
-                const size_t bytes = (size_t)l.sourceRowBytes * l.sourceRows;
-                const std::vector<uint8_t> &source =
-                    m < t->mipLevels || mips == nullptr ? t->levels[face][m] : mips[m];
-                if (source.size() < bytes) {
-                    minAlpha = 0;
-                    continue;
-                }
-                CopyLevel(t->format, source.data(), g->layout, l,
-                          (uint8_t *)g->memory + (size_t)face * g->layout.faceBytes + l.offset);
-                if (minAlpha > 0) {
-                    const int a = Gxm_MinAlpha(t->format, source.data(), bytes);
-                    minAlpha = a < minAlpha ? a : minAlpha;
-                }
-            }
-        g->minAlpha = (uint8_t)minAlpha;
+        g->minAlpha = (uint8_t)CopyAllLevels(t, g, mips, (uint8_t *)g->memory);
         g->uploaded = true;
     }
+}
+
+bool GxmTextures::UploadPart(GfxTexture *t, GxmTexture *g, unsigned frame)
+{
+    const GfxMipRect part = t->changedRect;
+    const GxmLevelLayout &l0 = g->layout.level[0];
+    // The memory that is drawn, when no frame on the GPU reads it: the part
+    // goes there. The spares miss it.
+    uint8_t *target = nullptr;
+    if (g->lastDrawn == GxmTextureCopies::kNotDrawn || frame - g->lastDrawn >= (unsigned)kGxmFrameSlots) {
+        target = (uint8_t *)g->memory;
+        CopyLinearPart(t->format, t->levels[0][0].data(), l0, part, target + l0.offset);
+        g->copies.Changed(part);
+    } else {
+        // Else a spare that no frame reads, with what it misses.
+        int spare = g->copies.Free(frame);
+        if (spare < 0) {
+            void *fresh = memory.Textures().Alloc(g->layout.bytes);
+            if (fresh == nullptr)
+                return false;
+            if (!g->copies.Add(fresh)) {
+                memory.Textures().Free(fresh);
+                return false;
+            }
+            spare = (int)g->copies.spares.size() - 1;
+        }
+        g->copies.Changed(part);
+        GxmTextureCopies::Spare &s = g->copies.spares[(size_t)spare];
+        target = (uint8_t *)s.memory;
+        if (s.whole)
+            CopyAllLevels(t, g, nullptr, target);
+        else
+            CopyLinearPart(t->format, t->levels[0][0].data(), l0, s.stale, target + l0.offset);
+        g->memory = g->copies.Swap(spare, g->memory, g->lastDrawn, part);
+        sceGxmTextureSetData(&g->texture, g->memory);
+        g->generation++;
+        g->lastDrawn = GxmTextureCopies::kNotDrawn;
+    }
+    // The least alpha stays a lower bound: that of the part, and that of the rest.
+    if (g->minAlpha > 0) {
+        const int a = MinAlphaOfPart(t, l0, part);
+        g->minAlpha = (uint8_t)(a < g->minAlpha ? a : g->minAlpha);
+    }
+    t->changedRect = GfxMipRect();
+    partUploads++;
+    return true;
 }
 
 void GxmTextures::Destroy(GfxTexture *t, unsigned frame)
@@ -371,6 +463,8 @@ void GxmTextures::Release(GxmTexture *g)
         sceGxmDestroyRenderTarget(g->target);
     memory.Textures().Free(g->depthMemory);
     memory.Textures().Free(g->memory);
+    for (const GxmTextureCopies::Spare &s : g->copies.spares)
+        memory.Textures().Free(s.memory);
     delete g;
 }
 

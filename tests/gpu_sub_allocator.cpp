@@ -6,6 +6,7 @@
 #include "render/gpu_pool.h"
 #include "render/gxm_frame_ring.h"
 #include "render/gxm_snapshot_stage.h"
+#include "render/gxm_texture_copies.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -198,11 +199,81 @@ int SnapshotStage()
     return 0;
 }
 
+// A texture that changes in a part in each frame and is drawn in each frame:
+// no copy that a frame on the GPU reads is written, three copies do, and
+// each copy gets each part that it missed.
+int TextureCopies()
+{
+    GxmTextureCopies copies;
+    char memory[4];     // the copies' memory: 0 drawn, 1 to 3 new
+    const auto rect = [](int x0, int y0, int x1, int y1) {
+        GfxMipRect r;
+        r.x0 = x0;
+        r.y0 = y0;
+        r.x1 = x1;
+        r.y1 = y1;
+        return r;
+    };
+    void *drawn = &memory[0];
+    unsigned lastDrawn = GxmTextureCopies::kNotDrawn;
+    // Which frame last drew each memory, and the parts each copy has.
+    unsigned drawnAt[4] = { 0, 0, 0, 0 };
+    std::vector<GfxMipRect> has[4];
+    std::vector<GfxMipRect> all;
+    int added = 1;
+    for (unsigned frame = 10; frame < 40; frame++) {
+        const GfxMipRect part = rect((int)frame, 2, (int)frame + 16, 18);
+        all.push_back(part);
+        if (lastDrawn == GxmTextureCopies::kNotDrawn || frame - lastDrawn >= (unsigned)kGxmFrameSlots) {
+            has[(char *)drawn - memory].push_back(part);
+            copies.Changed(part);
+        } else {
+            int spare = copies.Free(frame);
+            if (spare < 0) {
+                REQUIRE(copies.Add(&memory[added++]));
+                spare = (int)copies.spares.size() - 1;
+            }
+            copies.Changed(part);
+            GxmTextureCopies::Spare &s = copies.spares[(size_t)spare];
+            const int index = (int)((char *)s.memory - memory);
+            // A frame that the GPU draws does not read the spare.
+            REQUIRE(drawnAt[index] == 0 || frame - drawnAt[index] >= (unsigned)kGxmFrameSlots);
+            if (s.whole) {
+                has[index] = all;
+            } else {
+                // The stale part of the spare holds each part that it misses.
+                for (const GfxMipRect &p : all) {
+                    bool in = false;
+                    for (const GfxMipRect &h : has[index])
+                        in = in || (h.x0 == p.x0 && h.y0 == p.y0);
+                    if (!in)
+                        REQUIRE(s.stale.x0 <= p.x0 && s.stale.y0 <= p.y0 && s.stale.x1 >= p.x1 && s.stale.y1 >= p.y1);
+                }
+                has[index] = all;
+            }
+            drawn = copies.Swap(spare, drawn, lastDrawn, part);
+            lastDrawn = GxmTextureCopies::kNotDrawn;
+        }
+        // The frame draws with the copy that is drawn.
+        lastDrawn = frame;
+        drawnAt[(char *)drawn - memory] = frame;
+        REQUIRE(has[(char *)drawn - memory].size() == all.size());
+    }
+    // Three copies with the one that is drawn, and no more.
+    REQUIRE(added == 3 && copies.spares.size() == 2);
+    REQUIRE(!copies.Add(&memory[3]));
+    // A whole change: each spare is written whole.
+    copies.ChangedWhole();
+    for (const GxmTextureCopies::Spare &s : copies.spares)
+        REQUIRE(s.whole);
+    return 0;
+}
+
 } // namespace
 
 int main()
 {
-    if (SubAllocator() || Pool() || FrameRing() || SnapshotStage())
+    if (SubAllocator() || Pool() || FrameRing() || SnapshotStage() || TextureCopies())
         return 1;
     printf("gpu_sub_allocator: ok\n");
     return 0;

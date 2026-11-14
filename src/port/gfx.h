@@ -455,6 +455,10 @@ typedef struct GfxLockedRect {
    updated on the GPU when it is unlocked. */
 BOOL Gfx_LockTexture(GfxTexture *texture, int face, int mip, GfxLockedRect *out);
 void Gfx_UnlockTexture(GfxTexture *texture, int face, int mip);
+/* As Gfx_UnlockTexture, for a caller that changed only the pixels x0..x1-1,
+   y0..y1-1 of level 0 of face 0 (the dirt stamps of the game on a car): the
+   renderer can update that part alone. */
+void Gfx_UnlockTextureRect(GfxTexture *texture, int x0, int y0, int x1, int y1);
 
 /* Draws replacement wherever texture is drawn (NULL: texture itself), with
    the same texture coordinates; it is destroyed with texture. */

@@ -2209,6 +2209,9 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         // The batch thread (core 1): the time of its jobs, and the waits for
         // them: of the game's thread (a lock of vertices that a job reads,
         // a full queue) and of the worker (the jobs of its frame).
+        Sys_Log("gxm: per s texture uploads: %u of a part, %u of all", gpuTextures.partUploads,
+                gpuTextures.wholeUploads);
+        gpuTextures.partUploads = gpuTextures.wholeUploads = 0;
         const GfxBatchTimes batches = Gfx_TakeBatchTimes();
         Sys_Log("gxm: per frame ms: batch thread: jobs %.2f; waited for it: game thread %.2f, worker %.2f",
                 batches.jobs * msPerFrame, batches.waited[0] * msPerFrame, batches.waited[1] * msPerFrame);
