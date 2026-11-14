@@ -6,12 +6,16 @@
 // Two changes keep the picture of the frame:
 // - The backdrop of the distance fade is a copy of the back buffer after the
 //   sky. The executor can draw the sky into the backdrop itself, at its
-//   size: no copy and no split of the back buffer's scene. That needs a back
-//   buffer with only the colour of its clear under the sky, and no draw
-//   between the sky and the copy.
+//   size: no copy and no split of the back buffer's scene. That needs no
+//   draw in the back buffer before the sky (after its last clear of the
+//   colour), and no draw between the sky and the copy. In a race the game
+//   clears only the depth: the back buffer holds an older frame, which the
+//   dome of the sky covers. The backdrop then starts black.
 // - The draws that come first after the sky and write the depth without
-//   blending and without the alpha test (the ground) cover their pixels for
-//   good: no later draw shows the sky through them. Their stencil, drawn
+//   blending and without an alpha test that can fail (the ground: the game
+//   leaves the test on, and the executor knows the least alpha of the
+//   textures and the vertices) cover their pixels for good: no later draw
+//   shows the sky through them. Their stencil, drawn
 //   before the sky, keeps the sky out of those pixels. A draw that blends
 //   with the pixel and writes the depth (a tree) ends the list: before it a
 //   pixel can still show the sky. A draw that fades into the backdrop reads
@@ -33,7 +37,7 @@ enum GfxSkyPlanResult {
     GFX_SKY_PLAN_OK,
     GFX_SKY_NONE,           // no sky in the back buffer
     GFX_SKY_MANY,           // more than one (two views): drawn as recorded
-    GFX_SKY_NO_CLEAR,       // no clear of the colour over the sky's rectangle before it
+    GFX_SKY_NO_CLEAR,       // a clear of the colour of only a part of the sky's rectangle
     GFX_SKY_DRAWN_UNDER,    // a draw between the clear and the sky
     GFX_SKY_OTHER_DRAW,     // a draw of the sky that writes the depth, or of 2D vertices
     GFX_SKY_RESULT_COUNT
@@ -42,7 +46,9 @@ enum GfxSkyPlanResult {
 struct GfxSkyPlan {
     int result = GFX_SKY_NONE;
     size_t begin = 0, end = 0;      // the commands of the markers
-    DWORD clearColor = 0;           // the colour under the sky
+    // The colour under the sky: that of the last clear of the colour, or
+    // black without one.
+    DWORD clearColor = 0;
     GfxViewport rect = {};          // the sky's rectangle, in back buffer pixels
     // The back buffer copy of the backdrop comes right after the sky: the
     // backdrop can be the sky alone.
@@ -66,7 +72,10 @@ inline bool Contains(const GfxViewport &outer, const GfxViewport &inner)
 } // namespace GfxSkyPlanDetail
 
 // The plan of a frame whose back buffer is backW x backH pixels.
-inline GfxSkyPlan Gfx_PlanSky(const GfxFrame &frame, int backW, int backH)
+// alphaTestPasses(i): whether the alpha test of the draw commands[i] passes
+// for each of its pixels.
+template <typename AlphaTestPasses>
+GfxSkyPlan Gfx_PlanSky(const GfxFrame &frame, int backW, int backH, AlphaTestPasses alphaTestPasses)
 {
     using GfxSkyPlanDetail::Contains;
     GfxSkyPlan plan;
@@ -120,10 +129,11 @@ inline GfxSkyPlan Gfx_PlanSky(const GfxFrame &frame, int backW, int backH)
         plan.result = GFX_SKY_NONE;
         return plan;
     }
-    // Under the sky: the colour of the last clear of the back buffer, with
-    // no draw after it. Its depth: cleared to the far plane, for the stencil.
+    // Under the sky: the colour of the last clear of the colour, or black
+    // without one, and no draw after it (or since the start of the frame).
+    // Its depth: cleared to the far plane, for the stencil.
     backBuffer = true;
-    bool colourCleared = false, depthCleared = false, drawnUnder = false;
+    bool colourCleared = false, colourCovers = false, depthCleared = false, drawnUnder = false;
     for (size_t i = 0; i < plan.begin; i++) {
         const GfxCommand &c = commands[i];
         if (c.type == GFX_CMD_TARGET) {
@@ -137,7 +147,8 @@ inline GfxSkyPlan Gfx_PlanSky(const GfxFrame &frame, int backW, int backH)
                 GfxShared::ToTarget(c.clearViewport, c.clearScreenW, c.clearScreenH, true, backW, backH);
             const bool covers = Contains(rect, plan.rect);
             if ((c.clearFlags & GFX_CLEAR_TARGET) != 0) {
-                colourCleared = covers;
+                colourCleared = true;
+                colourCovers = covers;
                 plan.clearColor = c.clearColor;
                 drawnUnder = false;
             }
@@ -147,10 +158,12 @@ inline GfxSkyPlan Gfx_PlanSky(const GfxFrame &frame, int backW, int backH)
             drawnUnder = true;
         }
     }
-    if (!colourCleared) {
+    if (colourCleared && !colourCovers) {
         plan.result = GFX_SKY_NO_CLEAR;
         return plan;
     }
+    if (!colourCleared)
+        plan.clearColor = 0xff000000;
     if (drawnUnder) {
         plan.result = GFX_SKY_DRAWN_UNDER;
         return plan;
@@ -193,8 +206,9 @@ inline GfxSkyPlan Gfx_PlanSky(const GfxFrame &frame, int backW, int backH)
         const GfxDrawState &s = frame.states[c.state];
         if (!listing || !(s.depthTest && s.depthWrite))
             continue;
-        const bool covers = !c.transformed && !s.alphaBlend && !s.alphaTest &&
-                            (s.depthFunc == GFX_CMP_LESSEQUAL || s.depthFunc == GFX_CMP_ALWAYS);
+        const bool covers = !c.transformed && !s.alphaBlend &&
+                            (s.depthFunc == GFX_CMP_LESSEQUAL || s.depthFunc == GFX_CMP_ALWAYS) &&
+                            (!s.alphaTest || alphaTestPasses(i));
         if (!covers) {
             listing = false;
             continue;
@@ -207,6 +221,12 @@ inline GfxSkyPlan Gfx_PlanSky(const GfxFrame &frame, int backW, int backH)
         plan.occluders.clear();
     plan.result = GFX_SKY_PLAN_OK;
     return plan;
+}
+
+// The plan with no alpha test known to pass.
+inline GfxSkyPlan Gfx_PlanSky(const GfxFrame &frame, int backW, int backH)
+{
+    return Gfx_PlanSky(frame, backW, backH, [](size_t) { return false; });
 }
 
 #endif

@@ -1894,10 +1894,21 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     // whether the backdrop is stretched over the back buffer in their place,
     // and whether the stencil of the near ground comes first. The flags of
     // the marker are the settings. The probe can change them.
-    void PlanSky(const GfxFrame &frame)
+    void PlanSky(GfxFrame &frame)
     {
         skyUsed = skyStretched = skyStenciled = false;
-        skyPlan = Gfx_PlanSky(frame, device.Width(), device.Height());
+        // The alpha test of a draw passes for each pixel where the least
+        // alpha of its textures and vertices is at its threshold (the
+        // ground: the game leaves the test on).
+        skyPlan = Gfx_PlanSky(frame, device.Width(), device.Height(), [&](size_t i) {
+            const GfxCommand &c = frame.commands[i];
+            GfxDrawState &s = frame.states[c.state];
+            s.stages[0].texture = c.textures[0];
+            s.stages[1].texture = c.textures[1];
+            DrawRange scratch;
+            const DrawRange *range = RangeOf(c, frame, false, true, scratch);
+            return range != nullptr && AlphaTestAlwaysPasses(s, *range);
+        });
         stats.skyPlans[skyPlan.result]++;
         // A back buffer scene of an Execute before this one in the frame: a
         // scene on the backdrop would split it.
