@@ -94,6 +94,24 @@ struct SlowExecutor : GfxExecutor {
     void DestroyVertexBuffer(GfxVertexBuffer *) override { Check(); }
     bool JoinsDraws() const override { return true; }
     void ReadTexture(GfxTexture *) override { Check(); }
+    // The frames of a video decoder: each call must meet no running frame.
+    std::atomic<int> videoCalls{ 0 };
+    bool SetTextureVideoFrame(GfxTexture *, const void *, bool, void *, size_t) override
+    {
+        Check();
+        videoCalls++;
+        return true;
+    }
+    void FinishDrawing() override
+    {
+        Check();
+        videoCalls++;
+    }
+    void ReleaseVideoMemory(void *) override
+    {
+        Check();
+        videoCalls++;
+    }
 };
 
 // Waits until the worker runs a frame (at most a second): a call after it
@@ -220,6 +238,22 @@ int main()
     frame = FrameOf(1);
     threaded->Execute(frame, textures, readback, false, false, false);
     REQUIRE(slow->noted.otherWait - otherBefore >= 20000);
+
+    // The calls for the frames of a video decoder wait for the frame that
+    // runs, and reach the inner executor.
+    frame = FrameOf(1);
+    threaded->Execute(frame, textures, readback, false, false, false);
+    UntilRunning(*slow);
+    REQUIRE(threaded->SetTextureVideoFrame(nullptr, nullptr, true, nullptr, 0));
+    frame = FrameOf(1);
+    threaded->Execute(frame, textures, readback, false, false, false);
+    UntilRunning(*slow);
+    threaded->FinishDrawing();
+    frame = FrameOf(1);
+    threaded->Execute(frame, textures, readback, false, false, false);
+    UntilRunning(*slow);
+    threaded->ReleaseVideoMemory(nullptr);
+    REQUIRE(slow->videoCalls == 3);
 
     // Each Execute called the wait of its own worker, which returned (else
     // the first frame would never have ended). A frame that runs when the

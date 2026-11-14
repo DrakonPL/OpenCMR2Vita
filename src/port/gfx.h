@@ -494,6 +494,22 @@ void Gfx_GenerateMipmaps(GfxTexture *texture);
    sources are decoded) and stretching to dst's size like a DirectDraw Blt. */
 void Gfx_CopyTexture(GfxTexture *dst, GfxTexture *src);
 
+/* The frames of a hardware video decoder as the picture of a texture, with
+   no copy (the PS Vita). pixels: a frame of the decoder, the size of the
+   texture: the luma plane, then the two chroma samples of each block of 2x2
+   pixels together (V first when vFirst). block, blockBytes: the memory
+   block that holds the frame. The renderer makes it readable for the GPU
+   the first time. The texture then draws that memory. The renderer first
+   draws each frame that it has. FALSE: the renderer cannot (the caller
+   writes the picture into the texture). */
+BOOL Gfx_SetTextureVideoFrame(GfxTexture *texture, const void *pixels, BOOL vFirst, void *block, DWORD blockBytes);
+/* Returns when the renderer has drawn each frame given to it. The memory of
+   a video frame that they drew can change then. */
+void Gfx_FinishDrawing(void);
+/* The renderer reads a memory block of video frames no longer. It draws
+   each frame that it has first. */
+void Gfx_ReleaseVideoMemory(void *block);
+
 /* Cube maps: a texture for one face, usable as a render target. Face 0 is
    the cube itself; destroying a face does nothing. */
 GfxTexture *Gfx_GetCubeFace(GfxTexture *cube, int face);

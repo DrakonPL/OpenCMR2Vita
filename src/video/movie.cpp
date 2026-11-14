@@ -81,6 +81,15 @@ static void LogDecodeTime(Movie *movie, double ms)
 // it for the next frame. [video] movie_hw = 0 plays the Bink files.
 // [video] movie_chroma_vu: the order of the chroma bytes of the decoder's
 // frames (1: V first).
+//
+// The decoder's frames are in video memory, and the CPU reads that very
+// slowly: the conversion of a frame of 640x480 took 36 ms. The renderer
+// draws a frame where it is (Gfx_SetTextureVideoFrame): no conversion and no
+// upload. The decoder writes a frame again when the game has taken the next
+// one, so the renderer ends its drawing before the game asks for a frame
+// (Gfx_FinishDrawing). [video] movie_gpu = 0 converts on the CPU. A movie
+// whose size is not a multiple of 16 is converted on the CPU too: its rows
+// in the frame are longer than its width.
 
 struct HwMovie {
     SceAvPlayerHandle handle = 0;
@@ -88,6 +97,8 @@ struct HwMovie {
     bool frameReady = false;    // a frame that Movie_Wait or the open took
     bool ended = false;
     bool vFirst = true;
+    bool gpu = false;           // the renderer draws the frames where they are
+    bool gpuDrew = false;       // a frame given to the renderer since its last end of drawing
     unsigned width = 0, height = 0;
 };
 
@@ -107,6 +118,8 @@ static void HwFree(void *, void *p)
 struct HwFrameBlock {
     void *base;
     SceUID uid;
+    size_t bytes;
+    bool onGpu;     // the renderer reads it (Gfx_SetTextureVideoFrame)
 };
 static HwFrameBlock s_hwFrameBlocks[8];
 
@@ -115,11 +128,13 @@ static void *HwAllocFrame(void *, uint32_t, uint32_t size)
     for (HwFrameBlock &b : s_hwFrameBlocks) {
         if (b.base != nullptr)
             continue;
-        SceUID uid = sceKernelAllocMemBlock("movie frame", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW,
-                                            (size + 0x3ffff) & ~0x3ffffu, nullptr);
-        if (uid < 0)
-            uid = sceKernelAllocMemBlock("movie frame", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW,
-                                         (size + 0xfffff) & ~0xfffffu, nullptr);
+        size_t bytes = (size + 0x3ffff) & ~0x3ffffu;
+        SceUID uid = sceKernelAllocMemBlock("movie frame", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, bytes, nullptr);
+        if (uid < 0) {
+            bytes = (size + 0xfffff) & ~0xfffffu;
+            uid = sceKernelAllocMemBlock("movie frame", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW, bytes,
+                                         nullptr);
+        }
         if (uid < 0 || sceKernelGetMemBlockBase(uid, &b.base) < 0) {
             if (uid >= 0)
                 sceKernelFreeMemBlock(uid);
@@ -127,6 +142,8 @@ static void *HwAllocFrame(void *, uint32_t, uint32_t size)
             return nullptr;
         }
         b.uid = uid;
+        b.bytes = bytes;
+        b.onGpu = false;
         return b.base;
     }
     return nullptr;
@@ -191,6 +208,12 @@ static bool HwTakeFrame(Movie *movie)
     HwMovie *hw = movie->hw;
     if (hw->frameReady)
         return true;
+    // The decoder can write the frame before again from here on: the
+    // renderer ends the drawing that reads it.
+    if (hw->gpuDrew) {
+        Gfx_FinishDrawing();
+        hw->gpuDrew = false;
+    }
     if (sceAvPlayerGetVideoData(hw->handle, &hw->frame)) {
         hw->frameReady = true;
         return true;
@@ -238,6 +261,7 @@ static Movie *HwOpen(const char *path, int audioTrack)
     movie->hw = hw;
     hw->handle = handle;
     hw->vFirst = Sys_GetOption("video.movie_chroma_vu", 1) != 0;
+    hw->gpu = Sys_GetOption("video.movie_gpu", 1) != 0;
     const int added = sceAvPlayerAddSource(handle, host);
     // The size of the frames comes with the first one.
     const DWORD start = Sys_GetTicks();
@@ -258,9 +282,21 @@ static Movie *HwOpen(const char *path, int audioTrack)
         Movie_Close(movie);
         return nullptr;
     }
+    if ((hw->width & 15) != 0 || (hw->height & 15) != 0)
+        hw->gpu = false;
     Sys_Log("movie %s: hardware decoder, %ux%u, chroma %s first", host, hw->width, hw->height,
             hw->vFirst ? "V" : "U");
     return movie;
+}
+
+// The memory block of a frame of the decoder.
+static HwFrameBlock *HwBlockOf(const void *frame)
+{
+    for (HwFrameBlock &b : s_hwFrameBlocks)
+        if (b.base != nullptr && (const uint8_t *)frame >= (const uint8_t *)b.base &&
+            (const uint8_t *)frame < (const uint8_t *)b.base + b.bytes)
+            return &b;
+    return nullptr;
 }
 
 // The kept frame into the texture: the luma plane, then the chroma at half
@@ -269,6 +305,23 @@ static Movie *HwOpen(const char *path, int audioTrack)
 static void HwConvertFrame(Movie *movie)
 {
     HwMovie *hw = movie->hw;
+    // The renderer draws the frame where it is.
+    if (hw->gpu && hw->frame.pData != nullptr) {
+        HwFrameBlock *block = HwBlockOf(hw->frame.pData);
+        if (block != nullptr && Gfx_SetTextureVideoFrame(movie->texture, hw->frame.pData, hw->vFirst, block->base,
+                                                         (DWORD)block->bytes)) {
+            if (!block->onGpu)
+                Sys_Log("movie: the renderer draws the frames of the hardware decoder (a block of %u KB)",
+                        (unsigned)(block->bytes / 1024));
+            block->onGpu = true;
+            hw->gpuDrew = true;
+            hw->frameReady = false;
+            movie->decodedCurrent = true;
+            return;
+        }
+        Sys_Log("movie: the renderer does not draw the frames of the hardware decoder: the CPU converts them");
+        hw->gpu = false;
+    }
     const size_t stride = (hw->width + 15) & ~15u;
     const size_t rows = (hw->height + 15) & ~15u;
     const uint8_t *luma = hw->frame.pData;
@@ -350,9 +403,20 @@ extern "C" void Movie_Close(Movie *movie)
     if (!movie)
         return;
     Audio_ReleaseStream(movie->audio);
+#ifdef __vita__
+    // The renderer ends the drawing of the decoder's frames, and reads
+    // their memory no longer, before the decoder frees it.
+    if (movie->hw != nullptr)
+        Gfx_FinishDrawing();
+#endif
     Gfx_DestroyTexture(movie->texture);
 #ifdef __vita__
     if (movie->hw != nullptr) {
+        for (HwFrameBlock &b : s_hwFrameBlocks)
+            if (b.base != nullptr && b.onGpu) {
+                Gfx_ReleaseVideoMemory(b.base);
+                b.onGpu = false;
+            }
         sceAvPlayerStop(movie->hw->handle);
         sceAvPlayerClose(movie->hw->handle);
         delete movie->hw;

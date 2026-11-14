@@ -446,6 +446,12 @@ struct GfxExecutor {
     virtual bool DrawsHalfSky() const { return false; }
     // Brings a render target's pixels back into its CPU copy (for locks).
     virtual void ReadTexture(GfxTexture *texture) = 0;
+    // The frames of a hardware video decoder (Gfx_SetTextureVideoFrame,
+    // Gfx_FinishDrawing, Gfx_ReleaseVideoMemory), with no Execute running.
+    // Each first lets the GPU end the scenes that it has.
+    virtual bool SetTextureVideoFrame(GfxTexture *, const void *, bool, void *, size_t) { return false; }
+    virtual void FinishDrawing() {}
+    virtual void ReleaseVideoMemory(void *) {}
     // Completes the back buffer read the last presented frame started, when
     // the game asks for its pixels (Gfx_ReadBackBuffer).
     virtual void CollectReadback(GfxReadback &) {}

@@ -25,6 +25,9 @@ struct GxmTexture {
     uint8_t minAlpha = 0;           // the least alpha of the levels uploaded (0: not known, or 0)
     unsigned lastDrawn = ~0u;       // the last frame that drew with it (~0u: none)
     bool failed = false;            // GXM refused it: never drawn, never tried again
+    // The memory is a frame of a video decoder (GxmTextures::SetVideoFrame):
+    // not from the pool, and the CPU copy is not uploaded.
+    bool external = false;
     // A render target: its colour surface is the texture's memory.
     SceGxmRenderTarget *target = nullptr;
     SceGxmColorSurface color;
@@ -71,6 +74,13 @@ public:
     void Collect(unsigned frame);
     // A render target's pixels into its CPU copy. The GPU must be done.
     void Read(GfxTexture *t);
+    // The texture of t over a frame of a video decoder: the luma plane, then
+    // the chroma samples of each 2x2 block together (V first when vFirst),
+    // in memory that is mapped for the GPU. The GPU must be done. A texture
+    // that has memory of its own (made for an upload before its first
+    // frame) gives it back. False when GXM refuses the frame. frame: the
+    // number of the frame being recorded.
+    bool SetVideoFrame(GfxTexture *t, const void *pixels, bool vFirst, unsigned frame);
     // GFX_FILTER_*, GFX_MIPFILTER_*, GFX_ADDRESS_*: set on the texture when
     // they differ from the last set.
     void SetSampler(GxmTexture &g, int minFilter, int magFilter, int mipFilter, int address);
@@ -102,7 +112,7 @@ private:
     bool makeMips = false;
     uint64_t mipMicros = 0;         // making mip levels, since the last Log
     unsigned mipTextures = 0;
-    bool loggedCube = false, loggedFull = false;
+    bool loggedCube = false, loggedFull = false, loggedVideo = false;
 };
 
 #endif
