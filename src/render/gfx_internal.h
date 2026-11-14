@@ -179,11 +179,17 @@ struct GfxDrawState {
     uint32_t vertexVersion = 0;
 };
 
+// GfxCommand::skyFlags. HALF: the sky at the size of the backdrop, stretched
+// over the back buffer (video.sky_half). STENCIL: the near ground keeps the
+// sky out of its pixels (video.sky_stencil).
+enum { GFX_SKY_HALF = 1, GFX_SKY_STENCIL = 2 };
+
 enum GfxCommandType {
     GFX_CMD_DRAW,
     GFX_CMD_CLEAR,
     GFX_CMD_TARGET,
     GFX_CMD_BACKDROP,           // copy the back buffer for the distance fade
+    GFX_CMD_SKY,                // the draws of the sky start (skyBegin) or end (Gfx_MarkSky)
     // Small 3D draws of a batch (Gfx_DrawBatch), as the game made them:
     // batch jobs make them draws, and Gfx_SpliceSmallBatches puts those in
     // the place of this command before an executor runs the frame. An
@@ -231,6 +237,10 @@ struct GfxCommand {
     // with the state (in world space) and textures[1]. cull: they are tested
     // against the view.
     uint32_t firstItem, itemCount;
+    // sky: the draws of the sky start here (else they end), and how the
+    // settings ask to draw them (GFX_SKY_*), read on the game's thread.
+    bool skyBegin;
+    uint8_t skyFlags;
     bool cull;
     // clear
     DWORD clearFlags;
@@ -401,9 +411,11 @@ struct GfxExecutor {
     // and reads only the frame.
     virtual void Prepare(GfxFrame &, std::vector<GfxTexture *> &, GfxReadback &, bool) {}
     // Runs the recorded commands; with present, shows the back buffer and
-    // ends the frame (otherwise the next commands continue it).
+    // ends the frame (otherwise the next commands continue it). vsync: the
+    // refreshes of the display for each frame (0: at once, 1: the next, 2:
+    // every second one, 30 frames a second at 60 Hz).
     virtual void Execute(GfxFrame &frame, std::vector<GfxTexture *> &textures, GfxReadback &readback, bool present,
-                         bool vsync, bool stretch = false) = 0;
+                         int vsync, bool stretch = false) = 0;
     // Returns when no Execute runs (the threaded executor's worker is idle).
     virtual void Wait() {}
     // For the logs, from the threaded executor before each Prepare: what
@@ -417,6 +429,9 @@ struct GfxExecutor {
     // texture alone (GfxCommand::textures), and draws small quads from an
     // atlas of their textures.
     virtual bool JoinsDraws() const { return false; }
+    // Whether it can draw the sky at the size of the backdrop and stretch it
+    // (GFX_SKY_HALF): the screen options offer it then.
+    virtual bool DrawsHalfSky() const { return false; }
     // Brings a render target's pixels back into its CPU copy (for locks).
     virtual void ReadTexture(GfxTexture *texture) = 0;
     // Completes the back buffer read the last presented frame started, when

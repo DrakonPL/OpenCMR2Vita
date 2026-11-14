@@ -71,7 +71,7 @@ struct SlowExecutor : GfxExecutor {
         noted.otherWait += times.otherWait;
         notes++;
     }
-    void Execute(GfxFrame &frame, std::vector<GfxTexture *> &, GfxReadback &, bool, bool, bool) override
+    void Execute(GfxFrame &frame, std::vector<GfxTexture *> &, GfxReadback &, bool, int, bool) override
     {
         Check();
         running = true;

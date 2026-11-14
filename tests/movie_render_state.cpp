@@ -34,7 +34,7 @@ extern "C" void Audio_ReleaseStream(AudioStream *) {}
 struct CaptureExecutor : GfxExecutor {
     bool SetVideoMode(int, int, bool) override { return true; }
     void SetFullscreen(bool) override {}
-    void Execute(GfxFrame &frame, std::vector<GfxTexture *> &, GfxReadback &, bool, bool, bool stretch) override {
+    void Execute(GfxFrame &frame, std::vector<GfxTexture *> &, GfxReadback &, bool, int, bool stretch) override {
         stretched = stretch;
         for (const auto &command : frame.commands)
             if (command.type == GFX_CMD_DRAW)

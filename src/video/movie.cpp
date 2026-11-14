@@ -77,10 +77,6 @@ extern "C" Movie *Movie_Open(const char *path, int audioTrack)
         return nullptr;
     }
     movie->info = movie->decoder.GetInfo();
-    // video.skip_movies: every movie ends after its first frame (for test
-    // runs, and on a device with no input to skip one yet).
-    if (Sys_GetOption("video.skip_movies", 0))
-        movie->info.frames = 1;
     movie->texture = Gfx_CreateTexture(movie->info.width, movie->info.height, GFX_FORMAT_BGRX8, 1,
                                        GFX_TEXTURE_DYNAMIC);
     if (!movie->texture) {

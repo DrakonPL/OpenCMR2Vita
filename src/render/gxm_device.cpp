@@ -1,6 +1,7 @@
 // The GXM device of the renderer on the PS Vita (gxm_device.h).
 
 #include "render/gxm_device.h"
+#include "render/frame_pacing.h"
 
 #include "port/sys.h"
 #include "render/gxm_dialog.h"
@@ -33,9 +34,13 @@ const SceGxmMemoryAttribFlags kReadWrite = (SceGxmMemoryAttribFlags)(SCE_GXM_MEM
 // What the display queue hands the callback for a flip.
 struct FlipData {
     void *address;
-    int vsync;
+    int vsync;              // the blanks after the frame before (0: at once)
     int width, height;      // the frame buffer size the display gets
 };
+
+// The blank count at which the last frame showed (the display queue's
+// thread).
+unsigned s_shownBlank;
 
 // Runs on the display queue's thread: no log here.
 void Flip(const void *callbackData)
@@ -49,8 +54,12 @@ void Flip(const void *callbackData)
     frame.width = flip->width;
     frame.height = flip->height;
     if (flip->vsync) {
+        // Two blanks for each frame: the frame before stays until then.
+        while (Gfx_BlanksBeforeFlip((unsigned)sceDisplayGetVcount(), s_shownBlank, flip->vsync) > 0)
+            sceDisplayWaitVblankStart();
         sceDisplaySetFrameBuf(&frame, SCE_DISPLAY_SETBUF_NEXTFRAME);
         sceDisplayWaitVblankStart();
+        s_shownBlank = (unsigned)sceDisplayGetVcount();
     } else if (sceDisplaySetFrameBuf(&frame, SCE_DISPLAY_SETBUF_IMMEDIATE) < 0) {
         // The display refuses the line timing until it had a vsync flip.
         sceDisplaySetFrameBuf(&frame, SCE_DISPLAY_SETBUF_NEXTFRAME);
@@ -209,6 +218,9 @@ bool GxmDevice::SetMode(int w, int h)
                                              SCE_GXM_DEPTH_STENCIL_SURFACE_TILED, Align(w, SCE_GXM_TILE_SIZEX),
                                              depthMemory.data, nullptr)))
         return false;
+    // A scene that does not load the depth starts with stencil 0: the
+    // stencil of the near ground before the sky (gfx_sky_plan.h) needs it.
+    sceGxmDepthStencilSurfaceSetBackgroundStencil(&depth, 0);
     width = w;
     height = h;
     displayWidth = scaled ? w : kDisplayWidth;
@@ -254,14 +266,14 @@ void GxmDevice::ReadPixels(int buffer, int x, int y, int w, int h, uint32_t *pix
                             pixels + (size_t)row * w, w);
 }
 
-void GxmDevice::Present(bool vsync)
+void GxmDevice::Present(int vsync)
 {
     QueueFlip(vsync, displayWidth, displayHeight);
 }
 
-void GxmDevice::QueueFlip(bool vsync, int w, int h)
+void GxmDevice::QueueFlip(int vsync, int w, int h)
 {
-    FlipData flip = { display[back].memory.data, vsync ? 1 : 0, w, h };
+    FlipData flip = { display[back].memory.data, vsync, w, h };
     Check("sceGxmDisplayQueueAddEntry", sceGxmDisplayQueueAddEntry(display[front].sync, display[back].sync, &flip));
     front = back;
     back = (back + 1) % kFrameSlots;

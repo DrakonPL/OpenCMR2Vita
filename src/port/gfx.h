@@ -238,6 +238,8 @@ void Gfx_GetDefaultDisplayMode(int *width, int *height);
 /* A frame is BeginScene...EndScene blocks (any number) and one Present. */
 void Gfx_BeginScene(void);
 void Gfx_EndScene(void);
+/* vsync: the refreshes of the display for each frame: 0 at once, 1 the
+   next refresh, 2 every second refresh (30 frames a second at 60 Hz). */
 void Gfx_Present(BOOL vsync);
 /* Movie presentation: stretch the back buffer to the entire drawable area. */
 void Gfx_PresentStretched(BOOL vsync);
@@ -271,6 +273,15 @@ void Gfx_SetRenderTarget(GfxTexture *target);
    the fade off. */
 void Gfx_CaptureBackdrop(void);
 void Gfx_SetDistanceFade(float start, float end);
+
+/* The draws of the sky: begin TRUE before them, FALSE after them. An
+   executor can draw them in another way (the GXM executor draws them into
+   the backdrop, and leaves out the pixels that the near ground covers).
+   Into a render target: nothing. */
+void Gfx_MarkSky(BOOL begin);
+/* Whether the renderer can draw the sky at a smaller size and stretch it
+   (video.sky_half). */
+BOOL Gfx_SupportsHalfSky(void);
 
 /* ---- fixed-function state -------------------------------------------------- */
 

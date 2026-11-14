@@ -2345,7 +2345,8 @@ char g_str0x005207fc[] = "gamegauge";
 // FUNCTION: CMR2 0x0049de40
 // PORT: one present for both window modes; the original waited for the
 // vertical blank unless the command line had the no-wait argument, which
-// now combines with the video.vsync option.
+// now combines with the video.vsync option: 1 waits for each refresh, 2 for
+// every second one (30 frames a second at 60 Hz), 0 for none.
 void Graphics_PresentFrameAndResetCounters(void)
 {
     CMain::UpdateFrameTime();
@@ -2355,7 +2356,7 @@ void Graphics_PresentFrameAndResetCounters(void)
     g_sceneStatHidden = 0;
     g_fixMatrixMultiplyCount = 0;
     CGraphics::m_unk0x0065fa24 = 0;
-    Gfx_Present(Args_Has(g_str0x005207fc) == 0 && Sys_GetOption("video.vsync", 1) != 0);
+    Gfx_Present(Args_Has(g_str0x005207fc) == 0 ? Sys_GetOption("video.vsync", 1) : 0);
 }
 
 // Drawing view of a sector's static stage objects (StageObject in Sector.h):

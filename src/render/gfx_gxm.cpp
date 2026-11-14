@@ -9,6 +9,7 @@
 #include "render/gfx_batch_worker.h"
 #include "render/gfx_executor_shared.h"
 #include "render/gfx_internal.h"
+#include "render/gfx_sky_plan.h"
 #include "render/gxm_device.h"
 #include "render/gxm_alpha.h"
 #include "render/gxm_bounds.h"
@@ -182,6 +183,7 @@ struct Bound {
     float viewport[6] = {};
     int region[4] = {};
     int depthFunc = -1, depthWrite = -1, cull = -1;
+    int stencil = -1;       // StencilMode
     const GxmTexture *textures[GXM_TEXTURE_UNITS] = {};
     uint32_t samplers[GXM_TEXTURE_UNITS] = {};
     unsigned generations[GXM_TEXTURE_UNITS] = {};
@@ -205,6 +207,10 @@ struct Stats {
     unsigned snapshotBytes = 0;                         // vertices of buffers copied into the ring
     unsigned patchBytes = 0;                            // vertices written into the GPU copies of buffers
     unsigned ownDraws = 0, ownVertices = 0;             // draws of the frame's vertices that were walked for the fade
+    // The skies (gfx_sky_plan.h): drawn into the backdrop, stretched from
+    // it, the stencil draws of the near ground, and the plans by result.
+    unsigned skyBackdrop = 0, skyHalf = 0, stencilDraws = 0;
+    unsigned skyPlans[GFX_SKY_RESULT_COUNT] = {};
     // The time of Prepare (the game's thread) and of Execute without the
     // wait of its present (the worker with the threaded executor), and the
     // frames presented.
@@ -273,7 +279,7 @@ enum ProbeMode {
     PROBE_SINGLE_PASS, PROBE_TWO_PASSES, PROBE_NO_BLENDED_3D, PROBE_NO_2D, PROBE_NO_QUADS, PROBE_NO_LAYERS,
     PROBE_NO_BILLBOARDS, PROBE_NO_PARTICLES, PROBE_NO_BLENDED_SKY, PROBE_NO_BLENDED_GROUND,
     PROBE_NO_BLENDED_OBJECTS, PROBE_NO_BLENDED_NODES, PROBE_SKY_WHITE, PROBE_SKY_OPAQUE, PROBE_TREES_WHITE,
-    PROBE_END
+    PROBE_SKY_AS_RECORDED, PROBE_SKY_FULL, PROBE_SKY_HALF, PROBE_SKY_NO_STENCIL, PROBE_END
 };
 const char *const kProbeNames[PROBE_END] = { "off",         "normal",        "quarter", "tile",
                                              "no 3D",       "no depth pass", "general", "fade always",
@@ -281,7 +287,8 @@ const char *const kProbeNames[PROBE_END] = { "off",         "normal",        "qu
                                              "single pass", "two passes", "no blended 3D", "no 2D",
                                              "no 3D quads", "no layers", "no billboards", "no particles",
                                              "no blended sky", "no blended ground", "no blended objects",
-                                             "no blended nodes", "sky white", "sky opaque", "trees white" };
+                                             "no blended nodes", "sky white", "sky opaque", "trees white",
+                                             "sky as recorded", "sky full", "sky half", "sky no stencil" };
 
 // The steps the profile mode times: an Execute before its draws, then the
 // steps of a 3D draw in Draw's order.
@@ -312,10 +319,16 @@ enum ProfileSection {
 // reads), "sky opaque" draws the sky without blending (the cost of the
 // blending). The normal mode also counts the blended 3D draws of each part,
 // and in its last turn the log gets a line for each draw of the sky and of
-// the trees.
-const int kProbeCycle[] = { PROBE_NORMAL,         PROBE_NO_3D,       PROBE_TILE,
-                            PROBE_NO_BLENDED_3D,  PROBE_NO_BLENDED_SKY, PROBE_SKY_WHITE,
-                            PROBE_SKY_OPAQUE,     PROBE_NO_BILLBOARDS, PROBE_TREES_WHITE };
+// the trees. The texture reads and the blending cost nothing: those modes
+// left the cycle. The sky's own modes compare the ways to draw it
+// (gfx_sky_plan.h): "sky as recorded" draws its draws in the back buffer
+// as the game recorded them, "sky full" and "sky half" draw it at the size
+// of the back buffer or stretch the backdrop, "sky no stencil" draws it
+// without the stencil of the near ground. "normal" draws it as the settings
+// ask.
+const int kProbeCycle[] = { PROBE_NORMAL,          PROBE_NO_3D,    PROBE_TILE,
+                            PROBE_NO_BLENDED_3D,   PROBE_NO_BLENDED_SKY, PROBE_SKY_AS_RECORDED,
+                            PROBE_SKY_FULL,        PROBE_SKY_HALF, PROBE_SKY_NO_STENCIL };
 
 // The part whose blended 3D draws a mode leaves out, or -1.
 int ProbeBlendedPart(int mode)
@@ -395,6 +408,8 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                           vertex3dId = nullptr, vertexTLId = nullptr;
     SceGxmVertexProgram *clearVertex = nullptr, *vertex3d = nullptr, *vertexTL = nullptr;
     SceGxmFragmentProgram *clearColor = nullptr, *clearDepthOnly = nullptr, *copyProgram = nullptr;
+    // clear_f without colour over the 3D vertex program: the stencil of a draw.
+    SceGxmFragmentProgram *stencilProgram = nullptr;
     const SceGxmProgramParameter *clearDepthParam = nullptr, *clearColorParam = nullptr, *copyInvSizeParam = nullptr;
     const SceGxmProgramParameter *vertexUniformsParam = nullptr, *targetParam = nullptr;
     unsigned vertexUniformRows = 0;
@@ -418,6 +433,12 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     // fades shows a backdrop of half the size, filtered, behind it.
     int backdropScale = 2;
     unsigned nextBackdropTiming = 0;
+    // The sky of the Execute (gfx_sky_plan.h). drawStencil: Draw writes the
+    // stencil of a draw, not its colour. intoBackdrop: Draw draws into the
+    // backdrop, its viewport scaled to the backdrop's size.
+    GfxSkyPlan skyPlan;
+    bool skyUsed = false, skyStretched = false, skyStenciled = false;
+    bool drawStencil = false, intoBackdrop = false;
     // The readback: the notification word the GPU writes after a frame that
     // has one, the last value asked for, and the read not collected yet.
     volatile unsigned int *notificationWord = nullptr;
@@ -526,7 +547,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         for (auto &p : fragmentPrograms)
             if (p.second != nullptr)
                 sceGxmShaderPatcherReleaseFragmentProgram(patcher, p.second);
-        for (SceGxmFragmentProgram *p : { clearColor, clearDepthOnly, copyProgram })
+        for (SceGxmFragmentProgram *p : { clearColor, clearDepthOnly, copyProgram, stencilProgram })
             if (p != nullptr)
                 sceGxmShaderPatcherReleaseFragmentProgram(patcher, p);
         for (SceGxmVertexProgram *p : { clearVertex, vertex3d, vertexTL })
@@ -629,6 +650,11 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                                                             SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
                                                             SCE_GXM_MULTISAMPLE_NONE, &noColor, &clear_v_gxp_start,
                                                             &clearDepthOnly)) ||
+            !Check("CreateFragmentProgram(clear_f, stencil)",
+                   sceGxmShaderPatcherCreateFragmentProgram(patcher, clearFragmentId,
+                                                            SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
+                                                            SCE_GXM_MULTISAMPLE_NONE, &noColor, &fixed3d_v_gxp_start,
+                                                            &stencilProgram)) ||
             !Check("CreateFragmentProgram(copy_f)",
                    sceGxmShaderPatcherCreateFragmentProgram(patcher, copyFragmentId,
                                                             SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
@@ -1256,6 +1282,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     // Each draw costs CPU time here: a run of the game's sprites or lines
     // comes as one draw.
     bool JoinsDraws() const override { return true; }
+    bool DrawsHalfSky() const override { return true; }
 
     void DestroyVertexBuffer(GfxVertexBuffer *b) override
     {
@@ -1530,6 +1557,18 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         const GfxDrawState &s = drawState;
         if (viewportState != &s || viewportW != targetW || viewportH != targetH || viewportBackBuffer != backBuffer) {
             viewportOfState = ToTarget(s.viewport, s.screenW, s.screenH, backBuffer, targetW, targetH);
+            // The sky into the backdrop: the same part of a smaller target.
+            if (intoBackdrop) {
+                const float kx = (float)backdropW / targetW, ky = (float)backdropH / targetH;
+                GfxViewport &v = viewportOfState;
+                const int x0 = (int)lroundf(v.x * kx), y0 = (int)lroundf(v.y * ky);
+                const int x1 = std::max(x0, (int)lroundf((v.x + v.width) * kx));
+                const int y1 = std::max(y0, (int)lroundf((v.y + v.height) * ky));
+                v.x = (DWORD)x0;
+                v.y = (DWORD)y0;
+                v.width = (DWORD)(x1 - x0);
+                v.height = (DWORD)(y1 - y0);
+            }
             viewportState = &s;
             viewportW = targetW;
             viewportH = targetH;
@@ -1702,8 +1741,13 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
 
         // One pass of the draw with a variant's program.
         auto pass = [&](int index, SceGxmFragmentProgram *program, SceGxmDepthFunc func, bool depthWrite) {
-            SetPrograms(c.transformed ? vertexTL : vertex3d, program);
-            SetDepthAndCull(func, depthWrite, CullMode(s.cull));
+            // The stencil of the draw: no colour, the depth neither tested
+            // nor written (gfx_sky_plan.h).
+            SetPrograms(c.transformed ? vertexTL : vertex3d, drawStencil ? stencilProgram : program);
+            if (drawStencil)
+                SetDepthAndCull(SCE_GXM_DEPTH_FUNC_ALWAYS, false, CullMode(s.cull));
+            else
+                SetDepthAndCull(func, depthWrite, CullMode(s.cull));
             // A default uniform buffer stays reserved and filled for the
             // draws that follow, while its program is set. Thus a pass
             // reserves and fills a buffer only when the program or a row is
@@ -1736,6 +1780,18 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                     bound.vertexRows = rows;
                     stats.vertexUploads++;
                 }
+            }
+            if (drawStencil) {
+                if (always || !bound.fragmentUniforms) {
+                    const float none[4] = {};
+                    sceGxmReserveFragmentDefaultUniformBuffer(context, &buffer);
+                    sceGxmSetUniformDataF(buffer, clearColorParam, 0, 4, none);
+                    bound.fragmentUniforms = true;
+                }
+                sceGxmSetVertexStream(context, 0, vertices + c.firstVertexByte);
+                Check("sceGxmDraw(stencil)", sceGxmDraw(context, primitive, SCE_GXM_INDEX_FORMAT_U16, indices, count));
+                stats.stencilDraws++;
+                return;
             }
             const Variant &v = variants[index];
             if (v.uniforms != nullptr) {
@@ -1776,7 +1832,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         };
         SceGxmDepthFunc func = s.depthTest ? DepthFunc(s.depthFunc) : SCE_GXM_DEPTH_FUNC_ALWAYS;
         bool depthWrite = s.depthTest && s.depthWrite;
-        if (depthProgram != nullptr) {
+        if (depthProgram != nullptr && !drawStencil) {
             pass(depthVariant, depthProgram, func, true);
             stats.depthPasses++;
             // The blended pass meets the depth its depth pass wrote.
@@ -1801,6 +1857,142 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     void DialogFrame() override
     {
         device.DialogFrame();
+    }
+
+    // ---- the sky (gfx_sky_plan.h) ----
+
+    enum StencilMode { STENCIL_OFF, STENCIL_WRITE, STENCIL_OUTSIDE };
+
+    // Off: each draw as before. Write: a draw sets the stencil of its pixels
+    // to 1. Outside: a draw draws only where the stencil is 0.
+    void SetStencil(int mode)
+    {
+        if (mode == bound.stencil)
+            return;
+        SceGxmContext *context = device.Context();
+        const SceGxmStencilFunc func = mode == STENCIL_OUTSIDE ? SCE_GXM_STENCIL_FUNC_EQUAL : SCE_GXM_STENCIL_FUNC_ALWAYS;
+        const SceGxmStencilOp pass = mode == STENCIL_WRITE ? SCE_GXM_STENCIL_OP_REPLACE : SCE_GXM_STENCIL_OP_KEEP;
+        const unsigned char writeMask = mode == STENCIL_WRITE ? 0xff : 0x00;
+        sceGxmSetFrontStencilFunc(context, func, SCE_GXM_STENCIL_OP_KEEP, SCE_GXM_STENCIL_OP_KEEP, pass, 0xff, writeMask);
+        sceGxmSetBackStencilFunc(context, func, SCE_GXM_STENCIL_OP_KEEP, SCE_GXM_STENCIL_OP_KEEP, pass, 0xff, writeMask);
+        const unsigned ref = mode == STENCIL_WRITE ? 1 : 0;
+        sceGxmSetFrontStencilRef(context, ref);
+        sceGxmSetBackStencilRef(context, ref);
+        bound.stencil = mode;
+    }
+
+    // The draws of the Execute keep their cached viewport, vertex uniforms
+    // and fragment rows for one target: none after a change of target size.
+    void ForgetDrawCaches()
+    {
+        viewportState = nullptr;
+        vertexUniformState = nullptr;
+        fragmentRowsState = nullptr;
+    }
+
+    // The plan of the Execute's sky: whether its draws go into the backdrop,
+    // whether the backdrop is stretched over the back buffer in their place,
+    // and whether the stencil of the near ground comes first. The flags of
+    // the marker are the settings. The probe can change them.
+    void PlanSky(const GfxFrame &frame)
+    {
+        skyUsed = skyStretched = skyStenciled = false;
+        skyPlan = Gfx_PlanSky(frame, device.Width(), device.Height());
+        stats.skyPlans[skyPlan.result]++;
+        // A back buffer scene of an Execute before this one in the frame: a
+        // scene on the backdrop would split it.
+        if (skyPlan.result != GFX_SKY_PLAN_OK || backdrop.target == nullptr || backBufferBegun ||
+            probe.mode == PROBE_SKY_AS_RECORDED)
+            return;
+        const uint8_t flags = frame.commands[skyPlan.begin].skyFlags;
+        bool half = (flags & GFX_SKY_HALF) != 0, stencil = (flags & GFX_SKY_STENCIL) != 0;
+        if (probe.mode == PROBE_SKY_FULL)
+            half = false;
+        else if (probe.mode == PROBE_SKY_HALF)
+            half = true;
+        if (probe.mode == PROBE_SKY_NO_STENCIL)
+            stencil = false;
+        skyUsed = half || skyPlan.backdropAfter;
+        skyStretched = half;
+        // The list of the plan stands only with the sky in the backdrop
+        // when the frame copies the backdrop.
+        skyStenciled = stencil && !skyPlan.occluders.empty() && (skyUsed || !skyPlan.backdropAfter);
+    }
+
+    // Before the back buffer's scene: a scene on the backdrop with the
+    // colour of the back buffer's clear and the draws of the sky.
+    void DrawSkyIntoBackdrop(GfxFrame &frame, unsigned vertexOffset, unsigned indexOffset)
+    {
+        EndScene();
+        SceGxmContext *context = device.Context();
+        if (!Check("sceGxmBeginScene(sky)",
+                   sceGxmBeginScene(context, 0, backdrop.target, nullptr, nullptr, nullptr, &backdrop.color, nullptr))) {
+            skyUsed = skyStretched = skyStenciled = false;
+            return;
+        }
+        bound = Bound();
+        GfxCommand clear = {};
+        clear.type = GFX_CMD_CLEAR;
+        clear.clearFlags = GFX_CLEAR_TARGET;
+        clear.clearColor = skyPlan.clearColor;
+        clear.clearViewport.width = (DWORD)backdropW;
+        clear.clearViewport.height = (DWORD)backdropH;
+        clear.clearViewport.maxZ = 1.0f;
+        Clear(clear, false, backdropW, backdropH);
+        ForgetDrawCaches();
+        intoBackdrop = true;
+        for (size_t i = skyPlan.begin + 1; i < skyPlan.end; i++)
+            if (frame.commands[i].type == GFX_CMD_DRAW)
+                Draw(frame.commands[i], frame, vertexOffset, indexOffset, true, device.Width(), device.Height());
+        intoBackdrop = false;
+        ForgetDrawCaches();
+        Check("sceGxmEndScene(sky)", sceGxmEndScene(context, nullptr, nullptr));
+        bound = Bound();
+        // The frame's copy of the backdrop is this.
+        if (skyPlan.backdropAfter)
+            backdropCopied = true;
+        stats.skyBackdrop++;
+    }
+
+    // In the back buffer at the start of the sky: the stencil of the near
+    // ground, then the sky only outside it.
+    void DrawSkyStencil(GfxFrame &frame, unsigned vertexOffset, unsigned indexOffset)
+    {
+        SetStencil(STENCIL_WRITE);
+        drawStencil = true;
+        for (uint32_t i : skyPlan.occluders)
+            Draw(frame.commands[i], frame, vertexOffset, indexOffset, true, device.Width(), device.Height());
+        drawStencil = false;
+        SetStencil(STENCIL_OUTSIDE);
+    }
+
+    // The backdrop stretched over the sky's rectangle of the back buffer, in
+    // place of the draws of the sky.
+    void DrawSkyFromBackdrop()
+    {
+        const GfxViewport &r = skyPlan.rect;
+        if (r.width == 0 || r.height == 0)
+            return;
+        SceGxmContext *context = device.Context();
+        SetPrograms(clearVertex, copyProgram);
+        SetViewport((float)r.x, (float)r.y, (float)r.width, (float)r.height, 0.0f, 1.0f, r);
+        SetDepthAndCull(SCE_GXM_DEPTH_FUNC_ALWAYS, false, SCE_GXM_CULL_NONE);
+        void *buffer;
+        const float z[4] = {};
+        sceGxmReserveVertexDefaultUniformBuffer(context, &buffer);
+        sceGxmSetUniformDataF(buffer, clearDepthParam, 0, 4, z);
+        // copy_f reads the texel under the pixel's centre in the back
+        // buffer's coordinates: the linear filter of the backdrop blends
+        // its texels.
+        const float invSize[4] = { 1.0f / device.Width(), 1.0f / device.Height(), 0.0f, 0.0f };
+        sceGxmReserveFragmentDefaultUniformBuffer(context, &buffer);
+        sceGxmSetUniformDataF(buffer, copyInvSizeParam, 0, 4, invSize);
+        bound.vertexUniforms = bound.fragmentUniforms = false;
+        probe.white = false;
+        BindTexture(0, &backdrop);
+        Check("sceGxmDraw(sky)", sceGxmDraw(context, SCE_GXM_PRIMITIVE_TRIANGLE_STRIP, SCE_GXM_INDEX_FORMAT_U16,
+                                            identityIndices, 4));
+        stats.skyHalf++;
     }
 
     // ---- the backdrop and the readback ----
@@ -1989,7 +2181,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
 
     // The frame's commands, and with present the frame on the display. Reads
     // only the frame and the executor's own objects (see Prepare).
-    void Execute(GfxFrame &frame, std::vector<GfxTexture *> &, GfxReadback &, bool present, bool vsync,
+    void Execute(GfxFrame &frame, std::vector<GfxTexture *> &, GfxReadback &, bool present, int vsync,
                  bool) override
     {
         if (!ready)
@@ -2023,13 +2215,18 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         // The drawing into textures runs first, then the back buffer's, as in
         // gfx_gpu.cpp: no scene on another target splits the back buffer's.
         backdropAhead = HasBackdrop(frame);
+        PlanSky(frame);
         if (probe.mode == PROBE_PROFILE)
             probe.section[PROFILE_SETUP] += sceKernelGetProcessTimeWide() - entered;
         for (int phase = 0; phase < 2; phase++) {
             GfxTexture *target = nullptr;
             const GxmTexture *targetTexture = nullptr;
             int targetFace = 0;
-            for (const GfxCommand &c : frame.commands) {
+            // The sky into the backdrop, before the back buffer's scene.
+            if (phase == 1 && skyUsed)
+                DrawSkyIntoBackdrop(frame, vertexOffset, indexOffset);
+            for (size_t i = 0; i < frame.commands.size(); i++) {
+                const GfxCommand &c = frame.commands[i];
                 if (c.type == GFX_CMD_TARGET) {
                     target = c.target;
                     targetTexture = nullptr;
@@ -2045,6 +2242,24 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                         CopyBackdrop();
                     continue;
                 }
+                if (c.type == GFX_CMD_SKY) {
+                    if (target != nullptr || (i != skyPlan.begin && i != skyPlan.end) ||
+                        !(skyUsed || skyStenciled) || !BeginScene(nullptr))
+                        continue;
+                    if (i == skyPlan.begin) {
+                        if (skyStenciled)
+                            DrawSkyStencil(frame, vertexOffset, indexOffset);
+                        if (skyStretched)
+                            DrawSkyFromBackdrop();
+                    } else {
+                        SetStencil(STENCIL_OFF);
+                    }
+                    continue;
+                }
+                // The draws of a sky that the backdrop stretched over the
+                // back buffer.
+                if (skyStretched && target == nullptr && i > skyPlan.begin && i < skyPlan.end)
+                    continue;
                 // A target with no GPU surface is not drawn.
                 if (target != nullptr && (targetTexture == nullptr || targetTexture->target == nullptr))
                     continue;
@@ -2071,7 +2286,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         }
         const GxmReadbackRect read = nextRead;
         if (!loggedInit) {
-            Sys_Log("gxm: init ok %dx%d vsync %d, %d memblocks", device.Width(), device.Height(), vsync ? 1 : 0,
+            Sys_Log("gxm: init ok %dx%d vsync %d, %d memblocks", device.Width(), device.Height(), vsync,
                     Gxm_LiveBlocks());
             loggedInit = true;
         }
@@ -2096,7 +2311,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         const uint64_t presentStart = sceKernelGetProcessTimeWide();
         stats.executeMicros += (unsigned)(presentStart - entered);
         stats.frames++;
-        device.Present(vsync && probe.mode == PROBE_OFF);
+        device.Present(probe.mode == PROBE_OFF ? vsync : 0);
         stats.presentWaitMicros += (unsigned)(sceKernelGetProcessTimeWide() - presentStart);
         ProbeTick();
         presented++;
@@ -2322,6 +2537,13 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                 (unsigned)(gpuTextures.tileTexels * 4 / 1024), gpuTextures.wholeUploads);
         gpuTextures.partUploads = gpuTextures.wholeUploads = 0;
         gpuTextures.tileTexels = 0;
+        // The skies: into the backdrop, stretched, the stencil draws of the
+        // near ground, and the plans that drew the sky as recorded.
+        Sys_Log("gxm: per s sky: %u into the backdrop, %u stretched, %u stencil draws; plans: %u ok, %u none, "
+                "%u many, %u no clear, %u drawn under, %u other draw",
+                stats.skyBackdrop, stats.skyHalf, stats.stencilDraws, stats.skyPlans[GFX_SKY_PLAN_OK],
+                stats.skyPlans[GFX_SKY_NONE], stats.skyPlans[GFX_SKY_MANY], stats.skyPlans[GFX_SKY_NO_CLEAR],
+                stats.skyPlans[GFX_SKY_DRAWN_UNDER], stats.skyPlans[GFX_SKY_OTHER_DRAW]);
         const GfxBatchTimes batches = Gfx_TakeBatchTimes();
         Sys_Log("gxm: per frame ms: batch thread: jobs %.2f; waited for it: game thread %.2f, worker %.2f",
                 batches.jobs * msPerFrame, batches.waited[0] * msPerFrame, batches.waited[1] * msPerFrame);

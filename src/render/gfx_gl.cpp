@@ -11,6 +11,7 @@
 #include "platform/platform.h"
 #include "port/sys.h"
 #include "render/presentation.h"
+#include "render/sdl_frame_pacing.h"
 #include "render/gfx_executor_shared.h"
 #include "render/gfx_internal.h"
 #include "render/shader_key.h"
@@ -187,6 +188,9 @@ struct Executor : GfxExecutor {
     float maxAnisotropy = 0.0f;     // 0: no anisotropic filtering
     int anisotropy = 1, smoothScaling = 1;
     int swapInterval = -2;          // as last set
+    // A swap interval of 2 that the driver refused: the pacer waits first.
+    int pacedInterval = 0;
+    GfxFramePacer pacer;
     int presentWidth = 0, presentHeight = 0;
     // Back buffer reads of recently presented frames (the lens flare test),
     // into pixel buffers. The game gets the newest one the GPU has finished,
@@ -1026,7 +1030,7 @@ struct Executor : GfxExecutor {
     // ---- frame execution ----
 
     void Execute(GfxFrame &frame, std::vector<GfxTexture *> &textures, GfxReadback &readback, bool present,
-                 bool vsync, bool stretch) override
+                 int vsync, bool stretch) override
     {
         if (context == nullptr)
             return;
@@ -1067,6 +1071,8 @@ struct Executor : GfxExecutor {
                 Clear(c, target == NULL, targetW, targetH);
                 continue;
             }
+            if (c.type == GFX_CMD_SKY)
+                continue;
             if (c.type == GFX_CMD_BACKDROP) {
                 if (target != NULL)
                     continue;
@@ -1113,7 +1119,7 @@ struct Executor : GfxExecutor {
             Present(readback, vsync, stretch);
     }
 
-    void Present(GfxReadback &readback, bool vsync, bool stretch)
+    void Present(GfxReadback &readback, int vsync, bool stretch)
     {
         // Read back before the frame is shown (the lens flare test), into a
         // pixel buffer collected when the game reads it.
@@ -1143,11 +1149,22 @@ struct Executor : GfxExecutor {
             SDL_Delay(16);
             return;
         }
-        int interval = vsync ? 1 : 0;
+        // A frame at every second refresh: the driver's swap interval of
+        // 2, else the pacer before a swap at each refresh.
+        int interval = vsync;
         if (swapInterval != interval) {
-            SDL_GL_SetSwapInterval(interval);
-            swapInterval = interval;
+            if (!SDL_GL_SetSwapInterval(interval) && interval > 1) {
+                SDL_GL_SetSwapInterval(1);
+                Sys_Log("gfx: no swap interval %d: the frames are paced", interval);
+                swapInterval = interval;
+                pacedInterval = interval;
+            } else {
+                swapInterval = interval;
+                pacedInterval = 0;
+            }
         }
+        if (pacedInterval > 1)
+            Gfx_PaceFrame(pacer, pacedInterval, window);
         int sw = 0, sh = 0;
         SDL_GetWindowSizeInPixels(window, &sw, &sh);
         if (sw != presentWidth || sh != presentHeight) {
@@ -1165,6 +1182,7 @@ struct Executor : GfxExecutor {
         gl.BlitFramebuffer(0, 0, backWidth, backHeight, rect.x, sh - rect.y, rect.x + rect.width,
                            sh - rect.y - rect.height, GL_COLOR_BUFFER_BIT, smoothScaling ? GL_LINEAR : GL_NEAREST);
         SDL_GL_SwapWindow(window);
+        pacer.Presented(SDL_GetTicksNS() / 1000);
         gl.Enable(GL_SCISSOR_TEST);
         bound.framebuffer = ~0u;
     }

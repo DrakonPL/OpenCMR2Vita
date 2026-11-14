@@ -466,6 +466,9 @@ int s_alphaBlendSetting = 1, s_alphaTestSetting = 1;
 // heartbeat keeps its frame time line. The screen options of the graphics
 // menu set it.
 int s_perfStatsSetting = 1;
+// video.sky_half and video.sky_stencil (GfxCommand::skyFlags). The screen
+// options of the graphics menu set the first.
+int s_skyHalfSetting = 1, s_skyStencilSetting = 1;
 
 // What the recorded state of the draw that is recorded now leaves out:
 // OVERRIDE_BLEND, OVERRIDE_TEST. A 3D draw and a 2D draw with one state of
@@ -482,6 +485,8 @@ void ReadDrawSettings()
     s_alphaBlendSetting = Platform_GetSettingInt("video.alpha_blend", 1);
     s_alphaTestSetting = Platform_GetSettingInt("video.alpha_test", 1);
     s_perfStatsSetting = Platform_GetSettingInt("video.perf_stats", 1);
+    s_skyHalfSetting = Platform_GetSettingInt("video.sky_half", 1);
+    s_skyStencilSetting = Platform_GetSettingInt("video.sky_stencil", 1);
     // A log asks for the counts again after the stats are on again.
     if (s_perfStatsSetting == 0)
         s_countsWanted = false;
@@ -1378,7 +1383,7 @@ extern "C" void Gfx_EndScene(void)
 // batches go in their place first: here, or on the worker of the threaded
 // executor. That one takes the frame's contents; the caller resets what it
 // leaves.
-static void Submit(bool present, bool vsync, bool stretch)
+static void Submit(bool present, int vsync, bool stretch)
 {
     if (s_executor == NULL)
         return;
@@ -1421,7 +1426,7 @@ static void Present(BOOL vsync, bool stretch)
     }
     if (Diagnostics::observer)
         Diagnostics::observer->BeginPresent();
-    Submit(true, vsync != 0, stretch);
+    Submit(true, vsync < 0 ? 0 : vsync > 2 ? 2 : (int)vsync, stretch);
     s_frame.Reset();
     s_record++;
     s_presentedFrames++;
@@ -1563,6 +1568,24 @@ extern "C" void Gfx_CaptureBackdrop(void)
         return;
     GfxCommand cmd = {};
     cmd.type = GFX_CMD_BACKDROP;
+    s_frame.commands.push_back(cmd);
+}
+
+extern "C" BOOL Gfx_SupportsHalfSky(void)
+{
+    return s_executor != NULL && s_executor->DrawsHalfSky() ? TRUE : FALSE;
+}
+
+extern "C" void Gfx_MarkSky(BOOL begin)
+{
+    if (s_target != NULL)
+        return;
+    GfxCommand cmd = {};
+    cmd.type = GFX_CMD_SKY;
+    cmd.skyBegin = begin != FALSE;
+    if (s_cullSetting == -2)
+        ReadDrawSettings();
+    cmd.skyFlags = (uint8_t)((s_skyHalfSetting != 0 ? GFX_SKY_HALF : 0) | (s_skyStencilSetting != 0 ? GFX_SKY_STENCIL : 0));
     s_frame.commands.push_back(cmd);
 }
 
@@ -2640,7 +2663,7 @@ namespace {
 struct NullExecutor : GfxExecutor {
     bool SetVideoMode(int, int, bool) override { return true; }
     void SetFullscreen(bool) override {}
-    void Execute(GfxFrame &, std::vector<GfxTexture *> &textures, GfxReadback &readback, bool present, bool,
+    void Execute(GfxFrame &, std::vector<GfxTexture *> &textures, GfxReadback &readback, bool present, int,
                  bool) override
     {
         for (GfxTexture *t : textures)
