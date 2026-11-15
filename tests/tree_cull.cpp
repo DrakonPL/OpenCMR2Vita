@@ -68,6 +68,34 @@ int main()
     REQUIRE(!TreeCull_Outside(view, 0.0f, 0.0f, 304.0f, 6.0f));
     REQUIRE(TreeCull_Outside(view, 0.0f, 120.0f, 50.0f, 6.0f));     // above
 
+    // The box test: what the view test of the renderer tells for the box.
+    {
+        int outside = 0, inside = 0;
+        for (int round = 0; round < 40000; round++) {
+            if (round % 50 == 0) {
+                ClipMatrix((Next() - 0.5f) * 600.0f, Next() * 20.0f, (Next() - 0.5f) * 600.0f, Next() * 6.2831853f,
+                           0.6f + Next(), 0.8f + Next() * 1.5f, 0.1f + Next(), 100.0f + Next() * 400.0f, clip);
+                Gfx_ViewPlanesOf(clip, planes);
+                TreeCull_SetView(&view, planes);
+            }
+            float low[3], high[3];
+            for (int k = 0; k < 3; k++) {
+                const float centre = (Next() - 0.5f) * (k == 1 ? 60.0f : 1200.0f);
+                const float half = Next() * Next() * 40.0f;
+                low[k] = centre - half;
+                high[k] = centre + half;
+            }
+            const bool expected = Gfx_BoxOutsidePlanes(planes, low, high);
+            REQUIRE(TreeCull_BoxOutside(view, low, high) == expected);
+            outside += expected;
+            inside += !expected;
+        }
+        REQUIRE(outside > 5000 && inside > 2000);
+        ClipMatrix(0, 0, 0, 0, 1.0f, 1.3f, 1.0f, 300.0f, clip);
+        Gfx_ViewPlanesOf(clip, planes);
+        TreeCull_SetView(&view, planes);
+    }
+
     // Trees as the game makes them: a mesh of some vertices near its origin,
     // turned around +y, with a scale for each axis, at a place. Against the
     // view test of the renderer.

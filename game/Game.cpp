@@ -2706,6 +2706,69 @@ void Game_SettleTreesLeftOut(void)
 #endif
 }
 
+// PORT: the view test of the parts of the ground and of the static objects
+// (Game_DrawMergedGroundParts, Game_DrawObjectRunMerged). Gfx_IsRangeVisible
+// looked up the box of the part, compared the matrices of the state with
+// those of its planes and tested the box: 350 instructions, for some 170
+// parts in a frame of the stage probe. The planes are those of the walk for
+// each part, and the box of a part stays while the positions of its vertex
+// buffer stay (Gfx_GetPositionSerial): the box is kept here, and the test is
+// that of the renderer for a draw (TreeCull_BoxOutside). The parts are in
+// world space: the world matrix is the identity.
+struct PartBounds {
+    MeshPart *pPart;
+    GfxVertexBuffer *pBuffer;
+    int first, count;
+    DWORD serial;
+    float low[3], high[3];
+};
+enum { kPartBoundsBits = 13 };
+static PartBounds s_partBounds[1 << kPartBoundsBits];
+
+struct StageView {
+    bool known;                 // else each part is in the view, as Gfx_IsRangeVisible tells it
+    TreeCullView view;
+    GfxVertexBuffer *pBuffer;   // the buffer of the last part, and its number
+    DWORD serial;
+
+    void Set(void)
+    {
+        float planes[24];
+        known = Gfx_GetViewPlanes(planes) != FALSE;
+        if (known)
+            TreeCull_SetView(&view, planes);
+        pBuffer = NULL;
+        serial = 0;
+    }
+
+    // Whether count vertices of a buffer from first, the vertices of a
+    // part, can be in the view.
+    bool Shows(MeshPart *pPart, GfxVertexBuffer *pPartBuffer, int first, int count)
+    {
+        if (!known)
+            return true;
+        if (pPartBuffer != pBuffer) {
+            pBuffer = pPartBuffer;
+            serial = Gfx_GetPositionSerial(pPartBuffer);
+        }
+        PartBounds &b = s_partBounds[((unsigned int)((UINT_PTR)pPart >> 2) * 2654435761u) >> (32 - kPartBoundsBits)];
+        if (b.pPart != pPart || b.pBuffer != pPartBuffer || b.first != first || b.count != count ||
+            b.serial != serial) {
+            b.pPart = NULL;
+            if (!Gfx_GetRangeBox(pPartBuffer, (DWORD)first, (DWORD)count, b.low, b.high))
+                return false;
+            // The number after the box: the box reads no lock.
+            serial = Gfx_GetPositionSerial(pPartBuffer);
+            b.pPart = pPart;
+            b.pBuffer = pPartBuffer;
+            b.first = first;
+            b.count = count;
+            b.serial = serial;
+        }
+        return !TreeCull_BoxOutside(view, b.low, b.high);
+    }
+};
+
 // PORT: the state flags of a mesh for the tree batch (TREE_STATE_FLAGS).
 static unsigned int Game_TreeBatchState(Mesh *pMesh)
 {
@@ -2762,6 +2825,8 @@ bool Game_DrawObjectRunMerged(GfxMatrix *pWorld)
     Gfx_GetTransform(GFX_TRANSFORM_WORLD, pWorld);
     if (memcmp(pWorld, &g_identityWorldMatrix, sizeof(GfxMatrix)) != 0)
         return false;
+    StageView view;
+    view.Set();
     for (i = 0; i < s_objectRunCount; i++) {
         Mesh *pMesh = s_objectRunMeshes[i];
         Mesh *pLod = (Mesh *)((BYTE *)pMesh + pMesh->lodIndex * offsetof(Mesh, field_0x108));
@@ -2774,7 +2839,7 @@ bool Game_DrawObjectRunMerged(GfxMatrix *pWorld)
         for (k = 0; k < pLod->partCount; k++) {
             MeshPart *pPart = pLod->pParts[k];
             const int first = pLod->vertexOffset + pPart->minIndex;
-            if (pPart->indexCount <= 0 || end <= first || !Gfx_IsRangeVisible(pBuffer, first, end - first))
+            if (pPart->indexCount <= 0 || end <= first || !view.Shows(pPart, pBuffer, first, end - first))
                 continue;
             if (partCount == kGroundMergeParts)
                 return false;
@@ -3183,6 +3248,10 @@ void Game_DrawMergedGroundParts(bool *pMerged)
 
     for (i = 0; i < count; i++)
         pMerged[i] = false;
+    // The view test of each part (StageView): the world matrix is the
+    // identity here (Game_DrawCulledSectorMeshes).
+    StageView view;
+    view.Set();
     // The parts in view of the meshes that merge, in their order.
     for (i = 0; i + 1 < count; i++) {
         Mesh *pMesh = (Mesh *)g_sectors[g_visibleSectorIndices[i]]->pMesh;
@@ -3196,7 +3265,7 @@ void Game_DrawMergedGroundParts(bool *pMerged)
             MeshPart *pPart = pMesh->pParts[k];
             const int first = pMesh->vertexOffset + pPart->minIndex;
             const int end = pMesh->vertexOffset + pPart->maxIndex + 1;
-            if (pPart->indexCount <= 0 || end <= first || !Gfx_IsRangeVisible(pBuffer, first, end - first))
+            if (pPart->indexCount <= 0 || end <= first || !view.Shows(pPart, pBuffer, first, end - first))
                 continue;
             if (partCount == kGroundMergeParts) {
                 // No room: the original walk draws all meshes.

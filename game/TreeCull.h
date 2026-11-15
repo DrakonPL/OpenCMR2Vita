@@ -44,6 +44,20 @@ inline bool TreeCull_Outside(const TreeCullView &view, float x, float y, float z
     return false;
 }
 
+// Whether a box is wholly on the outer side of one plane: for each plane,
+// the corner of the box that is the farthest to its inner side, as the view
+// test of the renderer for the box of a draw (Gfx_BoxOutsidePlanes).
+inline bool TreeCull_BoxOutside(const TreeCullView &view, const float low[3], const float high[3])
+{
+    for (int i = 0; i < 6; i++) {
+        const float *p = view.plane[i];
+        if (p[0] * (p[0] >= 0.0f ? high[0] : low[0]) + p[1] * (p[1] >= 0.0f ? high[1] : low[1]) +
+            p[2] * (p[2] >= 0.0f ? high[2] : low[2]) + p[3] < 0.0f)
+            return true;
+    }
+    return false;
+}
+
 // The distance of the farthest corner of a box from the origin.
 inline float TreeCull_BoxRadius(const float low[3], const float high[3])
 {
