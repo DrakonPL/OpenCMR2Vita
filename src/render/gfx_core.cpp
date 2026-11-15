@@ -165,9 +165,11 @@ enum {
     NO_JOIN_TEXTURE,        // another texture
     NO_JOIN_SIZE,           // too many vertices together
     NO_JOIN_DATA,           // the draw before does not end the frame's data
+    NO_JOIN_FADE,           // the other side of the start of the distance fade
     NO_JOIN_COUNT
 };
-const char *const kNoJoinNames[NO_JOIN_COUNT] = { "state", "primitive", "command", "texture", "size", "data" };
+const char *const kNoJoinNames[NO_JOIN_COUNT] = { "state", "primitive", "command", "texture", "size", "data",
+                                                  "fade" };
 
 // Why a small draw in world space did not draw from the atlas.
 enum {
@@ -470,6 +472,13 @@ int s_perfStatsSetting = 1;
 // video.sky_half and video.sky_stencil (GfxCommand::skyFlags). The screen
 // options of the graphics menu set the first.
 int s_skyHalfSetting = 1, s_skyStencilSetting = 1;
+// video.fade_split: 0 keeps the draws as they were before the split at the
+// start of the distance fade (Gfx_GetFadeView, Gfx_FadeSideJoins): a
+// comparison of the cost on the GPU.
+int s_fadeSplitSetting = 1;
+// The reach of the buffer draw that is recorded now, from its caller
+// (Gfx_DrawIndexedPrimitiveVBReach), else below zero.
+float s_givenReach = -1.0f;
 
 // What the recorded state of the draw that is recorded now leaves out:
 // OVERRIDE_BLEND, OVERRIDE_TEST. A 3D draw and a 2D draw with one state of
@@ -488,6 +497,7 @@ void ReadDrawSettings()
     s_perfStatsSetting = Platform_GetSettingInt("video.perf_stats", 1);
     s_skyHalfSetting = Platform_GetSettingInt("video.sky_half", 1);
     s_skyStencilSetting = Platform_GetSettingInt("video.sky_stencil", 1);
+    s_fadeSplitSetting = Platform_GetSettingInt("video.fade_split", 1);
     // A log asks for the counts again after the stats are on again.
     if (s_perfStatsSetting == 0)
         s_countsWanted = false;
@@ -508,6 +518,19 @@ bool CullWanted()
     if (s_cullSetting == -2)
         ReadDrawSettings();
     return s_cullSetting < 0 ? s_executor->JoinsDraws() : s_cullSetting != 0;
+}
+
+// The start of the distance fade for the split of the draws at it: below
+// zero where no fade is set, where the executor has one program for all
+// distances, and with video.fade_split = 0.
+float FadeSplitStart()
+{
+    if (s_cullSetting == -2)
+        ReadDrawSettings();
+    if (s_executor == NULL || !s_executor->JoinsDraws() || s_fadeSplitSetting == 0 ||
+        !(s_state.fadeEnd > s_state.fadeStart))
+        return -1.0f;
+    return s_state.fadeStart;
 }
 
 bool SnapshotsWanted()
@@ -618,6 +641,9 @@ GfxBox BufferRangeBox(GfxVertexBuffer *b, DWORD first, DWORD count)
     return box;
 }
 
+// The count of Gfx_FadeSideJoins for the run that the last command is.
+unsigned s_joinNearTail;
+
 // Adds a draw of vertices in the frame's data to the draw before, where the
 // executor takes joined draws (GfxExecutor::JoinsDraws) and both are lists of
 // one primitive with one state, one after the other in the frame's data. The
@@ -642,6 +668,10 @@ bool JoinDraw(int primitive, bool transformed, const void *vertices, DWORD verte
         return NoJoin(NO_JOIN_COMMAND);
     if (last.vertexCount + vertexCount > kJoinedVertices)
         return NoJoin(NO_JOIN_SIZE);
+    // A run stays on one side of the start of the distance fade.
+    if (worldSpace && !transformed && last.hasBox &&
+        !Gfx_FadeSideJoins(FadeSplitStart(), last.reach, reach, &s_joinNearTail))
+        return NoJoin(NO_JOIN_FADE);
     // The draw before ends the frame's data, in whole primitives.
     if ((size_t)last.firstVertexByte + (size_t)last.vertexCount * stride != s_frame.vertices.size())
         return NoJoin(NO_JOIN_DATA);
@@ -999,9 +1029,13 @@ void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD 
     GfxCommand cmd = {};
     cmd.part = ScenePartNow();
     cmd.reach = -1.0f;
+    s_joinNearTail = 0;
     // The box of the vertices of a 3D draw that the executor gets in the
     // frame's data (GfxCommand::hasBox).
     const bool box = !transformed && s_executor->JoinsDraws();
+    // The reach of a draw of a buffer, from the caller
+    // (Gfx_DrawIndexedPrimitiveVBReach).
+    const float given = buffer != NULL ? s_givenReach : -1.0f;
     cmd.type = GFX_CMD_DRAW;
     cmd.primitive = primitive;
     cmd.transformed = transformed;
@@ -1021,10 +1055,11 @@ void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD 
                                               buffer->patchRecord = s_record;
                                           });
         }
-        if (box && knownBox != NULL) {
+        if (box && (knownBox != NULL || given >= 0.0f)) {
+            const GfxBox b = knownBox != NULL ? *knownBox : BufferRangeBox(buffer, firstVertex, vertexCount);
             cmd.hasBox = true;
-            memcpy(cmd.boxLow, knownBox->low, sizeof(cmd.boxLow));
-            memcpy(cmd.boxHigh, knownBox->high, sizeof(cmd.boxHigh));
+            memcpy(cmd.boxLow, b.low, sizeof(cmd.boxLow));
+            memcpy(cmd.boxHigh, b.high, sizeof(cmd.boxHigh));
         }
     } else if (buffer != NULL && !buffer->streaming && SnapshotsWanted()) {
         // A buffer locked recently, or a part of it (a block of
@@ -1086,6 +1121,8 @@ void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD 
             memcpy(s_copied.high, cmd.boxHigh, sizeof(s_copied.high));
         }
     }
+    if (cmd.hasBox && given >= 0.0f)
+        cmd.reach = given;
     if (indices != NULL) {
         cmd.firstIndex = (uint32_t)s_frame.indices.size();
         cmd.indexCount = indexCount;
@@ -2025,6 +2062,20 @@ extern "C" DWORD Gfx_GetPositionSerial(GfxVertexBuffer *buffer)
     return buffer != NULL ? buffer->positionSerial : 0;
 }
 
+extern "C" BOOL Gfx_GetFadeView(float worldView[16], float *start)
+{
+    const float fadeStart = FadeSplitStart();
+    if (fadeStart < 0.0f)
+        return FALSE;
+    const float *w = &s_state.world._11, *v = &s_state.view._11;
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 4; c++)
+            worldView[r * 4 + c] = w[r * 4] * v[c] + w[r * 4 + 1] * v[4 + c] + w[r * 4 + 2] * v[8 + c] +
+                                   w[r * 4 + 3] * v[12 + c];
+    *start = fadeStart;
+    return TRUE;
+}
+
 extern "C" BOOL Gfx_MergesGroundDraws(void)
 {
     if (s_executor == NULL)
@@ -2050,6 +2101,18 @@ extern "C" void Gfx_DrawIndexedPrimitiveVB(int primitive, GfxVertexBuffer *buffe
         return;
     RecordDraw(primitive, false, buffer->vertices.data() + firstVertex, vertexCount, indices, indexCount, buffer,
                firstVertex);
+}
+
+extern "C" void Gfx_DrawIndexedPrimitiveVBReach(int primitive, GfxVertexBuffer *buffer, DWORD firstVertex,
+                                                DWORD vertexCount, const WORD *indices, DWORD indexCount, float reach)
+{
+    s_traceCaller = __builtin_return_address(0);
+    if (buffer == NULL || firstVertex + vertexCount > buffer->vertices.size())
+        return;
+    s_givenReach = reach;
+    RecordDraw(primitive, false, buffer->vertices.data() + firstVertex, vertexCount, indices, indexCount, buffer,
+               firstVertex);
+    s_givenReach = -1.0f;
 }
 
 namespace {
@@ -2105,6 +2168,7 @@ static void AddPendingBatchJob()
     job.part = batch.part;
     job.view = state.view;
     job.projection = state.projection;
+    job.fadeStart = s_fadeSplitSetting != 0 && state.fadeEnd > state.fadeStart ? state.fadeStart : -1.0f;
     Gfx_AddBatchJob(job);
 }
 

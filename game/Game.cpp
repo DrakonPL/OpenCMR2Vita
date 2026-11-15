@@ -2242,6 +2242,7 @@ struct DeferredDraw {
 #include "BatchRuns.h"
 #include "TreeCull.h"
 #include "GroundMerge.h"
+#include "FadeReach.h"
 
 static int __cdecl Game_CompareDeferredDistance(const void *a, const void *b)
 {
@@ -2730,21 +2731,39 @@ struct StageView {
     TreeCullView view;
     GfxVertexBuffer *pBuffer;   // the buffer of the last part, and its number
     DWORD serial;
+    // The start of the distance fade and the eye (FadeReach.h), where the
+    // parts go into groups by it (Gfx_GetFadeView), and the box of the part
+    // that Shows found in the view last.
+    bool fade;
+    float fadeStart;
+    FadeEye eye;
+    const PartBounds *pShown;
 
     void Set(void)
     {
-        float planes[24];
+        float planes[24], worldView[16];
         known = Gfx_GetViewPlanes(planes) != FALSE;
         if (known)
             TreeCull_SetView(&view, planes);
         pBuffer = NULL;
         serial = 0;
+        fade = known && Gfx_GetFadeView(worldView, &fadeStart) != FALSE && FadeEye_Set(&eye, worldView);
+        pShown = NULL;
     }
+
+    // How far from the eye the part that Shows found last can be (below
+    // zero: not known), and whether that is before the start of the fade.
+    float Reach(void) const
+    {
+        return fade && pShown != NULL ? FadeEye_BoxReach(eye, pShown->low, pShown->high) : -1.0f;
+    }
+    int BeforeFade(float reach) const { return reach >= 0.0f && reach < fadeStart ? 1 : 0; }
 
     // Whether count vertices of a buffer from first, the vertices of a
     // part, can be in the view.
     bool Shows(MeshPart *pPart, GfxVertexBuffer *pPartBuffer, int first, int count)
     {
+        pShown = NULL;
         if (!known)
             return true;
         if (pPartBuffer != pBuffer) {
@@ -2765,7 +2784,10 @@ struct StageView {
             b.count = count;
             b.serial = serial;
         }
-        return !TreeCull_BoxOutside(view, b.low, b.high);
+        if (TreeCull_BoxOutside(view, b.low, b.high))
+            return false;
+        pShown = &b;
+        return true;
     }
 };
 
@@ -2843,8 +2865,10 @@ bool Game_DrawObjectRunMerged(GfxMatrix *pWorld)
                 continue;
             if (partCount == kGroundMergeParts)
                 return false;
+            const float reach = view.Reach();
             const GroundMergePart part = { pLod, pPart, pPart->pData, pPart->indexCount, first, end,
-                                           pLod->vertexBufferIndex, pPart->texture, cull, lighting };
+                                           pLod->vertexBufferIndex, pPart->texture, cull, lighting,
+                                           view.BeforeFade(reach), reach };
             parts[partCount++] = part;
         }
     }
@@ -2870,9 +2894,9 @@ bool Game_DrawObjectRunMerged(GfxMatrix *pWorld)
             Graphics_SetLightingMode(lightingMode);
             lightingChanged = false;
         }
-        Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, CGraphics::m_pTextureManager->pVertexBuffers[group.buffer],
-                                   group.first, group.end - group.first, &s_objectMerge.indices[group.indexStart],
-                                   group.indexCount);
+        Gfx_DrawIndexedPrimitiveVBReach(GFX_TRIANGLELIST, CGraphics::m_pTextureManager->pVertexBuffers[group.buffer],
+                                        group.first, group.end - group.first,
+                                        &s_objectMerge.indices[group.indexStart], group.indexCount, group.reach);
         CGame::m_unk0x0059ce18 += group.indexCount / 3;
     }
     if (lightingChanged)
@@ -3273,8 +3297,10 @@ void Game_DrawMergedGroundParts(bool *pMerged)
                     pMerged[i] = false;
                 return;
             }
+            const float reach = view.Reach();
             const GroundMergePart part = { pMesh, pPart, pPart->pData, pPart->indexCount, first, end,
-                                           pMesh->vertexBufferIndex, pPart->texture, cull, lighting };
+                                           pMesh->vertexBufferIndex, pPart->texture, cull, lighting,
+                                           view.BeforeFade(reach), reach };
             parts[partCount++] = part;
         }
     }
@@ -3288,8 +3314,12 @@ void Game_DrawMergedGroundParts(bool *pMerged)
     }
 #ifdef OPENCMR2_DEV
     if (++s_groundFrames == 600) {
-        Sys_Log("ground: the merge was made in %u of 600 frames and kept in %u (%u parts, %u groups in the last)",
-                s_groundMerge.made, s_groundMerge.kept, partCount, s_groundMerge.groupCount);
+        unsigned int before = 0;
+        for (unsigned g = 0; g < s_groundMerge.groupCount; g++)
+            before += s_groundMerge.groups[g].beforeFade != 0;
+        Sys_Log("ground: the merge was made in %u of 600 frames and kept in %u (%u parts, %u groups in the last, %u "
+                "of them before the fade)",
+                s_groundMerge.made, s_groundMerge.kept, partCount, s_groundMerge.groupCount, before);
         s_groundFrames = 0;
         s_groundMerge.made = s_groundMerge.kept = 0;
     }
@@ -3311,8 +3341,9 @@ void Game_DrawMergedGroundParts(bool *pMerged)
             lightingChanged = false;
         }
         CGraphics::ApplyTextureStageChange(0, CGraphics::m_pTextureManager->textureBuffer[group.texture]);
-        Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, CGraphics::m_pTextureManager->pVertexBuffers[group.buffer],
-                                   group.first, group.end - group.first, &indices[group.indexStart], group.indexCount);
+        Gfx_DrawIndexedPrimitiveVBReach(GFX_TRIANGLELIST, CGraphics::m_pTextureManager->pVertexBuffers[group.buffer],
+                                        group.first, group.end - group.first, &indices[group.indexStart],
+                                        group.indexCount, group.reach);
         CGame::m_unk0x0059ce18 += group.indexCount / 3;
     }
     if (lightingChanged)

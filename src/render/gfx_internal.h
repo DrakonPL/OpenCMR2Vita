@@ -327,6 +327,7 @@ struct GfxBatchData {
     // draw of the same batch can join (~0: none).
     uint32_t runPlaceholder = ~0u;
     size_t run = ~(size_t)0;
+    unsigned runNearTail = 0;   // Gfx_FadeSideJoins, of the run
     void Reset()
     {
         items.clear();
@@ -336,6 +337,7 @@ struct GfxBatchData {
         drawIndices.clear();
         runPlaceholder = ~0u;
         run = ~(size_t)0;
+        runNearTail = 0;
     }
 };
 
@@ -354,6 +356,9 @@ struct GfxBatchJob {
     bool cull;                      // the draws are tested against the view
     uint8_t part;                   // of the batch (GfxCommand::part)
     GfxMatrix view, projection;     // of the state
+    // The start of the distance fade of the state (Gfx_FadeSideJoins), below
+    // zero for a state without it.
+    float fadeStart;
 };
 
 struct GfxFrame {

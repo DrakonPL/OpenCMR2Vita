@@ -125,6 +125,41 @@ inline bool Gfx_BoxOutsideView(const float *m, const float low[3], const float h
     return Gfx_BoxOutsidePlanes(planes, low, high);
 }
 
+// A run of joined small draws and the start of the distance fade. The
+// executor draws a run whose farthest vertex is nearer than the start with
+// the program without the fade (the fade changes no pixel there, and it is
+// the largest part of the program). A run that joined across the start drew
+// all its quads with the fade: the trees of a stage are one run, and the
+// near ones, the largest on the screen, are most of its pixels. A draw at or
+// past the start joins only a run that reaches the start. A draw nearer than
+// the start joins a run that does not reach it. It also joins a run that
+// does, while fewer than kGfxNearInFadeRun near draws joined that run since
+// its last far draw: where near and far draws take turns (the game sorts the
+// trees by depth, the reach is a distance), the run does not end at each
+// one. Then a near draw starts a run. fadeStart below zero (no fade: each
+// reach is past it) or a reach below zero (not known): the draw joins.
+// nearTail: the count of the run, 0 for a new run.
+constexpr unsigned kGfxNearInFadeRun = 8;
+
+inline bool Gfx_FadeSideJoins(float fadeStart, float runReach, float reach, unsigned *nearTail)
+{
+    if (runReach < 0.0f || reach < 0.0f)
+        return true;
+    const bool runFar = runReach >= fadeStart;
+    if (reach >= fadeStart) {
+        if (!runFar)
+            return false;
+        *nearTail = 0;
+        return true;
+    }
+    if (!runFar)
+        return true;
+    if (*nearTail >= kGfxNearInFadeRun)
+        return false;
+    ++*nearTail;
+    return true;
+}
+
 // The eye distance of the farthest vertex of a small draw in world space
 // (its world matrix is the identity: the view matrix gives the eye space).
 inline float Gfx_SmallDrawReach(const GfxMatrix &v, const GfxVertex *vertices, DWORD count)
