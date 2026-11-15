@@ -556,6 +556,9 @@ const int kInnerParts[] = {
     Diagnostics::SCENE_PART_GLOW, Diagnostics::SCENE_PART_QUADS, Diagnostics::SCENE_PART_2D,
     Diagnostics::SCENE_PART_VERTEX_WRITES,
 };
+const int kUpdateParts[] = {
+    Diagnostics::SCENE_PART_FRAME_EFFECTS, Diagnostics::SCENE_PART_CAR_UPDATE,
+};
 
 // A heartbeat line of the ms of parts in a frame.
 template <size_t N>
@@ -673,6 +676,11 @@ void SysVita_FramePresented(bool stats)
             LogParts("scene parts", kSceneParts, p, perFrame);
             LogParts("view parts", kViewParts, p, perFrame);
             LogParts("inner parts", kInnerParts, p, perFrame);
+            LogParts("update parts", kUpdateParts, p, perFrame);
+            // The scene less all its named parts: what no part measures yet.
+            const uint64_t scene = p.frameMicros > known ? p.frameMicros - known : 0;
+            Sys_Log("heartbeat: unnamed ms: %.2f of the scene %.2f",
+                    (scene > parts ? scene - parts : 0) / perFrame, scene / perFrame);
         }
         // The draws of each part in a frame: the calls of the game, the
         // commands they became, and the vertices copied into the frame.

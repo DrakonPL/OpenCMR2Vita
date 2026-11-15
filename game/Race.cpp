@@ -5505,14 +5505,21 @@ void Race_UpdatePlayerViewAndDrivenCars(BYTE param1, int param2)
     g_unk0x00537f28 = Race_ReadState37F60();
     if (first != 0)
         g_unk0x00537f28 = 0x10000;
-    Race_UpdateFrameEffects(g_unk0x00537f28);
-    for (g_raceUpdatePlayer = 0; g_raceUpdatePlayer < (BYTE)RallyDataState(); g_raceUpdatePlayer++) {
-        View_BlendCameraStates((BYTE)g_raceUpdatePlayer,
-                     Car_Get((BYTE)View_GetActiveCameraFlags((BYTE)g_raceUpdatePlayer))->simulationInterpolation);
+    {
+        // PORT: the parts of the frame timing of dev builds (no observer: no cost).
+        Diagnostics::ScenePartNest effectsPart(Diagnostics::SCENE_PART_FRAME_EFFECTS);
+        Race_UpdateFrameEffects(g_unk0x00537f28);
+        for (g_raceUpdatePlayer = 0; g_raceUpdatePlayer < (BYTE)RallyDataState(); g_raceUpdatePlayer++) {
+            View_BlendCameraStates((BYTE)g_raceUpdatePlayer,
+                         Car_Get((BYTE)View_GetActiveCameraFlags((BYTE)g_raceUpdatePlayer))->simulationInterpolation);
+        }
     }
     g_unk0x00537fd0 = Car_GetOrder();
     g_unk0x00537fc4 = Car_GetOrderCount();
-    StageObject_UpdateListedCarPhysicsAndWeather(g_unk0x00537fd0, g_unk0x00537fc4);
+    {
+        Diagnostics::ScenePartNest carPart(Diagnostics::SCENE_PART_CAR_UPDATE);
+        StageObject_UpdateListedCarPhysicsAndWeather(g_unk0x00537fd0, g_unk0x00537fc4);
+    }
     for (g_raceUpdatePlayer = 0; g_raceUpdatePlayer < Car_GetOrderCount(); g_raceUpdatePlayer++)
         NetRace_SetPlayerFlashIntensity(g_raceUpdatePlayer, g_unk0x00537f28, 0);
     if (first == 0 || second != 0) {
