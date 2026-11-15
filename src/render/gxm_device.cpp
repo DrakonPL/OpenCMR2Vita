@@ -207,7 +207,9 @@ bool GxmDevice::SetMode(int w, int h)
     // pixel and fills the screen.
     const bool scaled = DisplayScales(w, h);
     const int x = scaled ? 0 : (kDisplayWidth - w) / 2, y = scaled ? 0 : (kDisplayHeight - h) / 2;
-    for (DisplayBuffer &d : display) {
+    // The buffers in use only: the others of the array have no memory.
+    for (int i = 0; i < g_gxmFrameSlots; i++) {
+        DisplayBuffer &d = display[i];
         memset(d.memory.data, 0, kDisplayBytes);
         unsigned char *origin = (unsigned char *)d.memory.data + ((size_t)y * kDisplayStride + x) * 4;
         d.origin = origin;
