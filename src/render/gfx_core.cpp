@@ -480,6 +480,7 @@ int s_skyHalfSetting = 1, s_skyStencilSetting = 1;
 // start of the distance fade (Gfx_GetFadeView, Gfx_FadeSideJoins): a
 // comparison of the cost on the GPU.
 int s_fadeSplitSetting = 1;
+int s_bufferRestSetting = 1;       // [video] buffer_rest: a buffer that rested streams no more
 // The reach of the buffer draw that is recorded now, from its caller
 // (Gfx_DrawIndexedPrimitiveVBReach), else below zero.
 float s_givenReach = -1.0f;
@@ -502,6 +503,7 @@ void ReadDrawSettings()
     s_skyHalfSetting = Platform_GetSettingInt("video.sky_half", 1);
     s_skyStencilSetting = Platform_GetSettingInt("video.sky_stencil", 1);
     s_fadeSplitSetting = Platform_GetSettingInt("video.fade_split", 1);
+    s_bufferRestSetting = Platform_GetSettingInt("video.buffer_rest", 1);
     // A log asks for the counts again after the stats are on again.
     if (s_perfStatsSetting == 0)
         s_countsWanted = false;
@@ -1052,7 +1054,10 @@ void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD 
         // range locks again, and its boxes are kept. Nothing cleared it
         // before, and a buffer that streamed once (the cars, the relit
         // ground) made a whole lock of each later write.
-        buffer->streaming = false;
+        // [video] buffer_rest = 0: it streams for ever, as before (an A-B
+        // check of the vertex writes of the relight).
+        if (s_bufferRestSetting != 0)
+            buffer->streaming = false;
         cmd.buffer = buffer;
         cmd.firstVertexByte = firstVertex * (uint32_t)sizeof(GfxVertex);
         if (buffer->referencedRecord != s_record) {
