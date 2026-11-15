@@ -57,6 +57,7 @@ inline bool SameVertexUniforms(const GfxDrawState &a, const GfxDrawState &b)
     return a.viewport.width == b.viewport.width && a.viewport.height == b.viewport.height &&
            a.screenW == b.screenW && a.screenH == b.screenH && a.lighting == b.lighting && a.colorVertex == b.colorVertex && a.specular == b.specular &&
            a.localViewer == b.localViewer && a.normalizeNormals == b.normalizeNormals &&
+           a.texGen1 == b.texGen1 && memcmp(a.texGen1Rows, b.texGen1Rows, sizeof(a.texGen1Rows)) == 0 &&
            a.diffuseSource == b.diffuseSource && a.specularSource == b.specularSource &&
            a.ambientSource == b.ambientSource && a.emissiveSource == b.emissiveSource && a.fog == b.fog &&
            a.fogTableMode == b.fogTableMode && a.fogVertexMode == b.fogVertexMode &&

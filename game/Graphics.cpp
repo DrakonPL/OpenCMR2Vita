@@ -1,4 +1,5 @@
 #include "port/sys.h"
+#include "MidpointTexGen.h"
 #include "port/vector_sprite.h"
 #include <stdio.h>
 #include "FloatToInt.h"
@@ -6792,6 +6793,33 @@ void Graphics_ProjectMeshVertexMidpoints(Mesh *pMesh)
                                (DWORD)pMesh->field_0x10);
 }
 
+// PORT: [video] car_reflection_gpu (1 by default): the renderer makes the
+// coordinates of Graphics_ProjectMeshVertexMidpoints from each vertex, so the
+// game writes no vertex of the car in each frame. -1: not read yet.
+static int g_carReflectionOnGpu = -1;
+
+// PORT: the rows of Gfx_SetTexCoord1Generation that give the values of
+// Graphics_ProjectMeshVertexMidpoints, or FALSE where the renderer is not to
+// make them.
+static BOOL Graphics_SetMidpointTexCoordGeneration(void)
+{
+    GfxMatrix transform;
+    GfxMatrix world;
+    GfxMatrix view;
+    float rows[8];
+
+    if (g_carReflectionOnGpu < 0)
+        g_carReflectionOnGpu = Sys_GetOption("video.car_reflection_gpu", 1) != 0;
+    if (g_carReflectionOnGpu == 0)
+        return FALSE;
+    Gfx_GetTransform(GFX_TRANSFORM_VIEW, &view);
+    Gfx_GetTransform(GFX_TRANSFORM_WORLD, &world);
+    FloatMatrix_Multiply(&transform, &view, &world);
+    MidpointTexGen_Rows(&transform, rows);
+    Gfx_SetTexCoord1Generation(rows);
+    return TRUE;
+}
+
 // Draws the triangles of a mesh in contiguous texture runs, setting the
 // reserved cube map as texture and clamping the texture address while the
 // shadow geometry is drawn.
@@ -6805,7 +6833,9 @@ void Graphics_DrawCubeMappedShadowTriangles(Mesh *pMesh)
     int textureIndex;
     int texture;
 
-    Graphics_ProjectMeshVertexMidpoints(pMesh);
+    // PORT: the renderer makes the coordinates where it can.
+    if (Graphics_SetMidpointTexCoordGeneration() == FALSE)
+        Graphics_ProjectMeshVertexMidpoints(pMesh);
     count = 0;
     triangleCount = pMesh->triangleCount;
     currentTexture = -1;
@@ -6864,6 +6894,7 @@ void Graphics_DrawCubeMappedShadowTriangles(Mesh *pMesh)
         Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, CGraphics::m_pTextureManager->pVertexBuffers[pMesh->vertexBufferIndex], pMesh->vertexOffset, pMesh->field_0x10, g_unk0x006dd9bc, count);
     }
 done:
+    Gfx_SetTexCoord1Generation(NULL);
     CGraphics::SetTextureAddressClamp(1);
     CGraphics::ApplyTextureStageChange(1, 0);
     CGraphics::ApplyTextureStageChange(2, 0);

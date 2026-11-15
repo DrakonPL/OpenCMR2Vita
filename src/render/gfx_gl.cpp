@@ -95,6 +95,7 @@ struct VertexUniforms {
     float fogParams[4];
     int32_t texCoordIndex[4];
     float target[4];
+    float texGen1[2][4];
 };
 
 struct FragmentUniforms {
@@ -730,6 +731,8 @@ struct Executor : GfxExecutor {
         u.sources[3] = s.emissiveSource;
         u.fogFlags[0] = (s.fog && s.fogTableMode == GFX_FOG_NONE) ? s.fogVertexMode : 0;
         u.fogFlags[1] = s.normalizeNormals;
+        u.fogFlags[3] = s.texGen1;
+        memcpy(u.texGen1, s.texGen1Rows, sizeof(u.texGen1));
         // Direct3D takes the fog factor from the vertex's specular alpha when
         // fog is on with neither vertex nor table fog: the backdrop of a
         // foggy stage is drawn so, its vertices' alpha 0 filling it with fog.
