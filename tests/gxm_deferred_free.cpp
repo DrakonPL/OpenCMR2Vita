@@ -39,6 +39,16 @@ int main()
     list.Collect(2, release);
     REQUIRE(released.size() == 1 && released[0] == &c);
 
+    // Four slots ([video] frames_in_flight = 3): a frame more.
+    released.clear();
+    g_gxmFrameSlots = kGxmMaxFrameSlots;
+    list.Add(&a, 20);
+    list.Collect(23, release);
+    REQUIRE(released.empty());
+    list.Collect(24, release);
+    REQUIRE(released.size() == 1 && released[0] == &a);
+    g_gxmFrameSlots = kGxmFrameSlots;
+
     printf("gxm_deferred_free: ok\n");
     return 0;
 }

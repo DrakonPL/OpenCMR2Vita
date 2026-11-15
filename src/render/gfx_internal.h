@@ -479,6 +479,9 @@ struct GfxExecutor {
     // executor. The recorder then waits (WaitForSnapshotCopies) before the
     // game writes a buffer of them.
     virtual bool CopiesSnapshotsLate() const { return false; }
+    // The frames that the GPU can still draw when the recorder starts one
+    // (gfx_range_locks.h). Valid after SetVideoMode.
+    virtual unsigned FramesInFlight() const { return 2; }
     virtual void WaitForSnapshotCopies() {}
     // For an inner executor: the threaded executor calls CopySnapshots on its
     // worker, before Execute. Otherwise Prepare copies them.

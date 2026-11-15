@@ -427,7 +427,7 @@ void GxmTextures::Upload(std::vector<GfxTexture *> &textures, unsigned frame)
         }
         wholeUploads++;
         g->copies.ChangedWhole();
-        if (g->lastDrawn != ~0u && frame - g->lastDrawn < (unsigned)kGxmFrameSlots && g->target == nullptr) {
+        if (g->lastDrawn != ~0u && frame - g->lastDrawn < (unsigned)g_gxmFrameSlots && g->target == nullptr) {
             void *fresh = memory.Textures().Alloc(g->layout.bytes);
             if (fresh != nullptr) {
                 deferredMemory.Add(g->memory, frame);
@@ -465,7 +465,7 @@ bool GxmTextures::UploadPart(GfxTexture *t, GxmTexture *g, unsigned frame)
     // The memory that is drawn, when no frame on the GPU reads it: the tiles
     // go there. The spares miss them.
     uint8_t *target = nullptr;
-    if (g->lastDrawn == GxmTextureCopies::kNotDrawn || frame - g->lastDrawn >= (unsigned)kGxmFrameSlots) {
+    if (g->lastDrawn == GxmTextureCopies::kNotDrawn || frame - g->lastDrawn >= (unsigned)g_gxmFrameSlots) {
         target = (uint8_t *)g->memory;
         CopyTiles(t, g, part, target);
         tileTexels += part.Texels();

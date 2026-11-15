@@ -18,7 +18,6 @@ namespace {
 
 constexpr int kDisplayStride = 1024;    // pixels: a multiple of 64, as the display needs
 constexpr unsigned kDisplayBytes = kDisplayStride * GxmDevice::kDisplayHeight * 4;
-constexpr int kPendingFlips = GxmDevice::kFrameSlots - 1;
 // The back buffer is one scene, or two around the backdrop copy, and more
 // when the game reads a render target in the middle of a frame.
 constexpr unsigned kScenesPerFrame = 4;
@@ -97,8 +96,12 @@ GxmDevice::~GxmDevice()
 
 bool GxmDevice::Init()
 {
+    // The frames in flight ([video] frames_in_flight, 2 or 3): the display
+    // buffers, the frame ring's slots and the waits before memory is reused.
+    g_gxmFrameSlots = Sys_GetOption("video.frames_in_flight", 2) >= 3 ? kGxmMaxFrameSlots : kGxmFrameSlots;
+    Sys_Log("gxm: %d frames in flight (%d display buffers)", g_gxmFrameSlots - 1, g_gxmFrameSlots);
     SceGxmInitializeParams params{};
-    params.displayQueueMaxPendingCount = kPendingFlips;
+    params.displayQueueMaxPendingCount = g_gxmFrameSlots - 1;
     params.displayQueueCallback = Flip;
     params.displayQueueCallbackDataSize = sizeof(FlipData);
     params.parameterBufferSize = SCE_GXM_DEFAULT_PARAMETER_BUFFER_SIZE;
@@ -135,7 +138,8 @@ bool GxmDevice::CreateContext()
 
 bool GxmDevice::CreateDisplay()
 {
-    for (DisplayBuffer &d : display) {
+    for (int i = 0; i < g_gxmFrameSlots; i++) {
+        DisplayBuffer &d = display[i];
         if (!Gxm_AllocGpu(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, kDisplayBytes, kReadWrite, d.memory) ||
             !Check("sceGxmSyncObjectCreate", sceGxmSyncObjectCreate(&d.sync)))
             return false;
@@ -278,8 +282,8 @@ void GxmDevice::QueueFlip(int vsync, int w, int h)
     FlipData flip = { display[back].memory.data, vsync, w, h };
     Check("sceGxmDisplayQueueAddEntry", sceGxmDisplayQueueAddEntry(display[front].sync, display[back].sync, &flip));
     front = back;
-    back = (back + 1) % kFrameSlots;
-    frameSlot = (frameSlot + 1) % kFrameSlots;
+    back = (back + 1) % g_gxmFrameSlots;
+    frameSlot = (frameSlot + 1) % g_gxmFrameSlots;
 }
 
 void GxmDevice::Finish()

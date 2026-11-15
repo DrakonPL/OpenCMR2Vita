@@ -6,16 +6,17 @@
 // that changed.
 //
 // The buffer is in blocks of kBlock vertices. A block that a lock touched is
-// recent for kRecentFrames frames: a draw that touches it takes its vertices
+// recent for g_gfxRecentFrames frames: a draw that touches it takes its vertices
 // from the frame's snapshot of the buffer (GfxFrame::snapshots), each other
 // draw refers to the GPU copy. In a wood the stage lighting writes each mesh
 // in the view again in each frame: all of them are recent then, and the
 // frame copies each vertex once, as with a lock of the whole buffer. A block that rested is
 // written into the GPU copy (a patch) before the first draw that refers to
 // it: the frames that the GPU still draws took its vertices from their
-// snapshots, so no frame reads the part of the GPU copy that changes. kRecentFrames is the
-// number of frames that can wait for the GPU when a frame starts (two of the
-// three in flight, gxm_frame_ring.h).
+// snapshots, so no frame reads the part of the GPU copy that changes.
+// g_gfxRecentFrames is the number of frames that can wait for the GPU when a
+// frame starts (GfxExecutor::FramesInFlight): two, or three with the GXM
+// executor's [video] frames_in_flight = 3 (gxm_frame_ring.h).
 #ifndef OPENCMR2_GFX_RANGE_LOCKS_H
 #define OPENCMR2_GFX_RANGE_LOCKS_H
 
@@ -24,9 +25,11 @@
 
 #include <vector>
 
+// Set by the recorder from its executor, before the first frame.
+inline uint32_t g_gfxRecentFrames = 2;
+
 struct GfxRangeLocks {
     static constexpr uint32_t kBlock = 32;          // vertices
-    static constexpr uint32_t kRecentFrames = 2;
 
     // The game locks count vertices from first, in the frame of that number
     // (1 or more).
@@ -51,7 +54,7 @@ struct GfxRangeLocks {
             return false;
         const size_t last = (first + count - 1) / kBlock;
         for (size_t b = first / kBlock; b <= last && b < frames.size(); b++)
-            if (frames[b] != 0 && frame - frames[b] < kRecentFrames)
+            if (frames[b] != 0 && frame - frames[b] < g_gfxRecentFrames)
                 return true;
         return false;
     }
@@ -65,7 +68,7 @@ struct GfxRangeLocks {
             return;
         size_t run = frames.size();     // the first block of the run that is open
         for (size_t b = 0; b <= frames.size(); b++) {
-            const bool rested = b < frames.size() && frames[b] != 0 && frame - frames[b] >= kRecentFrames;
+            const bool rested = b < frames.size() && frames[b] != 0 && frame - frames[b] >= g_gfxRecentFrames;
             if (rested) {
                 frames[b] = 0;
                 marked--;

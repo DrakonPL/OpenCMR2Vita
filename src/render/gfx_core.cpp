@@ -1383,6 +1383,7 @@ extern "C" BOOL Gfx_SetVideoMode(int width, int height, BOOL fullscreen)
         Sys_Log("gfx: could not set %dx%d", width, height);
         return FALSE;
     }
+    g_gfxRecentFrames = s_executor->FramesInFlight();
     ResetState();
     return TRUE;
 }
