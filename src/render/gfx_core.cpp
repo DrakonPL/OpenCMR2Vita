@@ -2015,7 +2015,9 @@ extern "C" void Gfx_WriteVertexBufferRange(GfxVertexBuffer *buffer, DWORD firstV
         moved = moved || memcmp(&target[i].x, &vertices[i].x, 3 * sizeof(float)) != 0;
         diffuse = std::min(diffuse, (uint8_t)(vertices[i].diffuse >> 24));
         specular = std::min(specular, (uint8_t)(vertices[i].specular >> 24));
-        target[i] = vertices[i];
+        // A copy of bytes: the game's vertices are not always on a word, and a
+        // struct copy is a multiple load that faults there on 32-bit ARM.
+        memcpy(&target[i], &vertices[i], sizeof(GfxVertex));
     }
     buffer->leastAlpha[0] = diffuse;
     buffer->leastAlpha[1] = specular;
@@ -2508,6 +2510,9 @@ extern "C" void Gfx_DestroyTexture(GfxTexture *texture)
     for (int i = 0; i < 2; i++)
         if (Root(s_state.stages[i].texture) == texture)
             s_state.stages[i].texture = NULL;
+    const bool wasTarget = s_target != NULL && Root(s_target) == texture;
+    if (wasTarget)
+        s_target = NULL;
     // Draws recorded this frame may still use it: flush them first.
     {
         auto uses = [texture](GfxTexture *t) {
@@ -2518,11 +2523,23 @@ extern "C" void Gfx_DestroyTexture(GfxTexture *texture)
             used = used || uses(state.stages[0].texture) || uses(state.stages[1].texture);
         for (const GfxCommand &command : s_frame.commands)
             used = used || ((command.type == GFX_CMD_DRAW || command.type == GFX_CMD_SMALL_BATCH) &&
-                            (uses(command.textures[0]) || uses(command.textures[1])));
+                            (uses(command.textures[0]) || uses(command.textures[1]))) ||
+                   (command.type == GFX_CMD_TARGET && uses(command.target));
         for (GfxTexture *t : s_frame.smallTextures)
             used = used || uses(t);
         if (used)
             Flush(FLUSH_TEXTURE_LOCK);
+    }
+    // A target that goes: the draws into it run (the flush above, which does
+    // not record it again), then the back buffer is the target.
+    if (wasTarget)
+        Gfx_SetRenderTarget(NULL);
+    for (auto &saved : s_savedStates) {
+        if (Root(saved.second) == texture)
+            saved.second = NULL;
+        for (int i = 0; i < 2; i++)
+            if (Root(saved.first.stages[i].texture) == texture)
+                saved.first.stages[i].texture = NULL;
     }
     // Shutdown may visit a replacement before its owner. Detach it so the
     // owner cannot destroy it a second time (also applies to font fields).
@@ -2550,7 +2567,9 @@ extern "C" void Gfx_SetTextureReplacement(GfxTexture *texture, GfxTexture *repla
     Gfx_WaitForExecutor();
     Gfx_DestroyTexture(texture->replacement);
     texture->replacement = replacement;
-    // A texture with a replacement does not go into the atlas.
+    // A texture with a replacement does not go into the atlas, and the atlas
+    // has the texels of the texture before it.
+    AtlasForget(texture);
     texture->atlasSerial = 0;
 }
 
@@ -2755,9 +2774,12 @@ extern "C" void Gfx_CopyTexture(GfxTexture *dst, GfxTexture *src)
         s_executor->ReadTexture(src);
         src->renderedTo = false;
     }
+    // The atlas has a copy of the texels; the copy changes all of the texture.
+    if (dst != s_atlas)
+        AtlasForget(dst);
     if (dst->format == src->format && dst->width == src->width && dst->height == src->height) {
         dst->levels[0][0] = src->levels[0][0];
-        dst->dirty = true;
+        Gfx_UnlockTexture(dst, 0, 0);
         return;
     }
     if (dst->format == GFX_FORMAT_BC1 || dst->format == GFX_FORMAT_BC3) {
@@ -2781,7 +2803,7 @@ extern "C" void Gfx_CopyTexture(GfxTexture *dst, GfxTexture *src)
             }
         }
     }
-    dst->dirty = true;
+    Gfx_UnlockTexture(dst, 0, 0);
 }
 
 extern "C" void Gfx_GenerateMipmaps(GfxTexture *texture)
@@ -2810,7 +2832,7 @@ extern "C" void Gfx_GenerateMipmaps(GfxTexture *texture)
             }
         }
     }
-    texture->dirty = true;
+    Gfx_UnlockTexture(texture, 0, 0);
 }
 
 extern "C" BOOL Gfx_ReadBackBuffer(int x, int y, int width, int height, DWORD *pixels)

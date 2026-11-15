@@ -328,6 +328,8 @@ bool GxmTextures::CreateTarget(const GfxTexture *t, GxmTexture &g)
                sceGxmDepthStencilSurfaceInit(&g.depth, SCE_GXM_DEPTH_STENCIL_FORMAT_S8D24,
                                              SCE_GXM_DEPTH_STENCIL_SURFACE_TILED, depthWidth, g.depthMemory, nullptr)))
         return false;
+    // The executor leaves out a depth clear to 1 at the start of a scene.
+    sceGxmDepthStencilSurfaceSetBackgroundDepth(&g.depth, 1.0f);
     SceGxmRenderTargetParams params{};
     params.width = t->width;
     params.height = t->height;
@@ -357,6 +359,7 @@ bool GxmTextures::CreateCubeTarget(const GfxTexture *t, GxmTexture &g)
                sceGxmDepthStencilSurfaceInit(&g.depth, SCE_GXM_DEPTH_STENCIL_FORMAT_S8D24,
                                              SCE_GXM_DEPTH_STENCIL_SURFACE_TILED, depthWidth, g.depthMemory, nullptr)))
         return false;
+    sceGxmDepthStencilSurfaceSetBackgroundDepth(&g.depth, 1.0f);
     SceGxmRenderTargetParams params{};
     params.width = t->width;
     params.height = t->height;

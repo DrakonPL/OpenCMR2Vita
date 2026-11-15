@@ -476,6 +476,9 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     unsigned backScenes = 0;        // back buffer scenes begun in this frame
     unsigned lastBackScenes = 0;    // and in the frame before
     bool inScene = false;
+    // The open scene did not load depth and has no draw yet: its depth is
+    // the background depth 1 everywhere, and a clear of it to 1 does nothing.
+    bool sceneDepthUntouched = false;
     const GxmTexture *sceneTarget = nullptr;    // nullptr: the back buffer
     int sceneFace = 0;                          // a cube target: its face
     Bound bound;
@@ -515,7 +518,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         SceGxmFragmentProgram *depthProgram = nullptr;
         SceGxmFragmentProgram *single = nullptr;        // the probe's single pass
     };
-    Resolved resolvedKeys[4];
+    Resolved resolvedKeys[8];   // a forest frame takes turns among more than 4 keys
     unsigned resolvedNext = 0;
 
     // The frame rate over the picture (video.show_fps): the presented frames
@@ -885,7 +888,9 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         SceGxmRenderTargetParams params{};
         params.width = w;
         params.height = h;
-        params.scenesPerFrame = 1;
+        // The sky drawn into it and the copy of the back buffer: two scenes in
+        // a frame. One more than this number makes sceGxmBeginScene wait for the GPU.
+        params.scenesPerFrame = 2;
         params.multisampleMode = SCE_GXM_MULTISAMPLE_NONE;
         params.driverMemBlock = -1;
         if (!Check("sceGxmColorSurfaceInit(backdrop)",
@@ -1235,6 +1240,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             }
             backSceneStoresDepth = (backdropAhead && !backdropCopied) || backScenes + 1 < lastBackScenes;
             ok = device.BeginBackBufferScene(depthStored, backSceneStoresDepth);
+            sceneDepthUntouched = !depthStored;
             depthStored = false;
             backScenes += ok ? 1 : 0;
             backBufferBegun = backBufferBegun || ok;
@@ -1242,6 +1248,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             const SceGxmColorSurface *color = target->faces != nullptr ? &target->faces[face] : &target->color;
             ok = Check("sceGxmBeginScene(target)", sceGxmBeginScene(device.Context(), 0, target->target, nullptr,
                                                                     nullptr, nullptr, color, &target->depth));
+            sceneDepthUntouched = true;
         }
         inScene = ok;
         sceneTarget = target;
@@ -1379,7 +1386,9 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     void Clear(const GfxCommand &c, bool backBuffer, int targetW, int targetH)
     {
         const bool color = (c.clearFlags & GFX_CLEAR_TARGET) != 0;
-        const bool depth = (c.clearFlags & GFX_CLEAR_ZBUFFER) != 0;
+        // A depth clear to the background depth at the start of a scene is a
+        // full-screen pass of fragments that changes nothing (each race frame).
+        const bool depth = (c.clearFlags & GFX_CLEAR_ZBUFFER) != 0 && !(sceneDepthUntouched && c.clearZ == 1.0f);
         const GfxViewport v = ToTarget(c.clearViewport, c.clearScreenW, c.clearScreenH, backBuffer, targetW, targetH);
         if ((!color && !depth) || v.width == 0 || v.height == 0)
             return;
@@ -1552,6 +1561,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     void Draw(const GfxCommand &c, GfxFrame &frame, unsigned vertexOffset, unsigned indexOffset,
               bool backBuffer, int targetW, int targetH)
     {
+        sceneDepthUntouched = false;
         SceGxmPrimitiveType primitive;
         if (!Primitive(c.primitive, &primitive)) {
             if (!loggedPrimitive)

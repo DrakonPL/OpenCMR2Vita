@@ -615,6 +615,14 @@ int main(int argc, char **argv) {
             LightingDigest(&zones, d);
             fprintf(stderr, "probe: lighting %u zones %016llx %016llx %016llx %016llx %016llx\n",
                     zones, d[0], d[1], d[2], d[3], d[4]);
+            // 32-bit ARM faults on a float load that is not on a word (the
+            // shadow map crashed the PS Vita at the race start).
+            unsigned misaligned = 0;
+            for (unsigned z = 0; z < zones; z++) {
+                const LightZoneMesh &mesh = *g_sceneLightZones[z].pMesh;
+                misaligned += ((uintptr_t)mesh.pVertices | (uintptr_t)mesh.pTriangles | (uintptr_t)mesh.pLevels) & 3 ? 1 : 0;
+            }
+            fprintf(stderr, "probe: lighting misaligned zones %u\n", misaligned);
         }
         memset(keys, 0, sizeof(keys));
         // Rally Challenge has a bracket confirmation screen inside race

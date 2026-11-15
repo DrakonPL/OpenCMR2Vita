@@ -38,10 +38,14 @@ def run(probe, data, rally, stage):
                    OPENCMR2_PROBE_CURSORS=f"36:{rally},37:{stage}")
         result = subprocess.run([probe, data, str(Path(user) / "trace.jsonl"), "60", "60"], env=env,
                                 capture_output=True, text=True, timeout=900)
+    digest = "no lighting line (exit %d)" % result.returncode
     for line in result.stderr.splitlines():
-        if line.startswith("probe: lighting "):
-            return line[len("probe: lighting "):].replace(" zones", "")
-    return "no lighting line (exit %d)" % result.returncode
+        if line.startswith("probe: lighting misaligned zones "):
+            if line.split()[-1] != "0":
+                return "%s zones with arrays off a word" % line.split()[-1]
+        elif line.startswith("probe: lighting "):
+            digest = line[len("probe: lighting "):].replace(" zones", "")
+    return digest
 
 
 def main():

@@ -2850,7 +2850,7 @@ FixMatrix *FloatMatrix_ToFix(FixMatrix *pOut, GfxMatrix *pIn);
 GfxMatrix *FixMatrix_ToFloat(GfxMatrix *pOut, FixMatrix *pIn);
 void Frontend_SetObjectField118(struct Texture *pTexture, int value);
 extern unsigned int g_carReflectionCubeMaps[20];
-extern unsigned short g_unk0x006dd9bc[2000];
+extern unsigned short g_unk0x006dd9bc[0x3000];
 
 // Draws the triangles of a mesh in contiguous texture runs, with the reserved
 // cube map of the mesh projected on them: the inverse of the view * world
@@ -5012,7 +5012,9 @@ int g_framesThisSecond;
 // GLOBAL: CMR2 0x006dd9b8
 unsigned int g_lastSecond;
 // GLOBAL: CMR2 0x006dd9bc
-unsigned short g_unk0x006dd9bc[2000];
+// PORT: was 2000 entries (666 triangles of one texture run); a mesh has up to
+// 2000 vertices and about twice as many triangles.
+unsigned short g_unk0x006dd9bc[0x3000];
 extern const float g_netFontInverseScale;
 
 // The four timestamps are guarded function statics in the original; modelled
@@ -6998,7 +7000,8 @@ void Graphics_MarkTexturesAndDrawMeshParts(Mesh *pMesh)
 }
 
 // GLOBAL: CMR2 0x0059be74
-unsigned short g_unk0x0059be74[2000];
+// PORT: was 2000 entries, as g_unk0x006dd9bc.
+unsigned short g_unk0x0059be74[0x3000];
 
 // Draws a mesh's triangles in contiguous texture runs.
 // match 50%: below the 90% bar; kept as FUNCTION on purpose so reccmp measures it (see CONVENCIONES)

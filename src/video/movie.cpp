@@ -35,6 +35,7 @@ struct Movie {
     GfxTexture *texture = nullptr;
     AudioStream *audio = nullptr;
     HwMovie *hw = nullptr;      // the PS Vita's hardware decoder plays it (see HwOpen)
+    std::vector<float> pcm;     // the hardware decoder's sound as floats; grows once
 };
 
 static bool ReadMovie(void *context, uint32_t offset, void *dst, uint32_t bytes)
@@ -211,7 +212,8 @@ static void HwPumpAudio(Movie *movie)
             if (movie->started)
                 Audio_StartStream(movie->audio);
         }
-        std::vector<float> pcm(samples);
+        std::vector<float> &pcm = movie->pcm;
+        pcm.resize(samples);
         const int16_t *in = (const int16_t *)sound.pData;
         for (unsigned i = 0; i < samples; i++)
             pcm[i] = in[i] / 32768.0f;

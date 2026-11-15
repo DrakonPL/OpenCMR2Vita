@@ -1341,6 +1341,8 @@ char g_strShadowMeshName[] = "SHAD%d";
 
 // PORT: native copies of the lighting records (see Scene_LoadLighting).
 static BYTE *g_sceneLightNative;
+// PORT: a word-aligned copy of the zone meshes' vertices, triangles and levels.
+static BYTE *g_sceneLightNativeData;
 
 // Reads the lighting data of a stage: the light direction and basis, then
 // the shadow zones (one per sector with a shadow mesh). Offsets in the data
@@ -1433,6 +1435,19 @@ void Scene_LoadLighting(int *pData)
         }
         for (zone = 0; zone < (int)zoneCount; zone++, pFile += 0x14)
             memcpy(&pMeshes[zone], pFile, offsetof(LightZoneMesh, pVertices));
+        // PORT: the vertices, triangles and levels start 2 bytes off a word
+        // in the file. 32-bit ARM faults on float loads there (the PS Vita
+        // crashed at the race start with the shadow map on): they are copied
+        // to a buffer of their own when they are not on a word.
+        if (((UINT_PTR)pFile & 3) != 0) {
+            size_t dataSize = 0;
+
+            for (zone = 0; zone < (int)zoneCount; zone++)
+                dataSize += (size_t)pMeshes[zone].vertexCount * (0x30 + 4) + (size_t)pMeshes[zone].triangleCount * 0x4c;
+            g_sceneLightNativeData = (BYTE *)CFileBuffer::AllocateLockedBuffer(dataSize + 1);
+            memcpy(g_sceneLightNativeData, pFile, dataSize);
+            pFile = g_sceneLightNativeData;
+        }
         for (zone = 0; zone < (int)zoneCount; zone++) {
             pMeshes[zone].pVertices = (MeshVertexF *)pFile;
             pFile += pMeshes[zone].vertexCount * 0x30;
@@ -1507,7 +1522,8 @@ void Scene_LoadLighting(int *pData)
         for (i = 0; i < pHeader->triangleCount; i++) {
             MeshTriangle *pTri = &pHeader->pTriangles[i];
             LightZoneItem *pOwner = &g_sceneLightZones[zone].pItems[pTri->textures[0]];
-            pTri->textures[0] = pOwner->pOwner->pMesh->pTriangles[0].textures[0];
+            // PORT: an item with no object under it keeps the texture -1.
+            pTri->textures[0] = pOwner->pOwner != NULL ? pOwner->pOwner->pMesh->pTriangles[0].textures[0] : -1;
         }
     }
 
@@ -1609,6 +1625,10 @@ int Scene_FreeLighting(void)
         g_sceneLightNative = NULL;
         g_sceneLightZones = NULL;
     }
+    if (g_sceneLightNativeData != NULL) {
+        CFileBuffer::FreeGenericFileBuffer(g_sceneLightNativeData);
+        g_sceneLightNativeData = NULL;
+    }
     g_triangleVertexHeights = NULL;
     return 1;
 }
@@ -1669,6 +1689,8 @@ int *g_shadowBatch;
 void *g_shadowVertexData;
 // GLOBAL: CMR2 0x006e0b94
 int g_shadowVertexCount;
+// PORT: the vertices of pVertexBuffer2 (Gfx_CreateVertexBuffer(0x7080)).
+static const int kShadowVertexCapacity = 0x7080;
 // GLOBAL: CMR2 0x006e0b98
 BYTE g_shadowBatchCount;
 // GLOBAL: CMR2 0x005210d4
@@ -1847,6 +1869,9 @@ void Scene_ProjectCasterIntoLightZone(LightZoneItem *pItem, ShadowCaster *pCaste
     minW = 10.0f;
     maxW = -10.0f;
     pLand = pItem->pOwner;
+    // PORT: an item with no object under it has no box to project into.
+    if (pLand == NULL)
+        return;
     zoneScaleX = X87S_MUL(X87S_FILD(float, pLand->matrix.right.x), CGraphics::m_oneOver65536);
     zoneScaleY = X87S_MUL(X87S_FILD(float, pLand->matrix.up.y), CGraphics::m_oneOver65536);
     pZone = pLand->pMesh;
@@ -1904,6 +1929,9 @@ void Scene_ProjectCasterIntoLightZone(LightZoneItem *pItem, ShadowCaster *pCaste
         g_shadowLastTexture = tex;
         g_shadowBatchCount++;
     } else if (g_shadowLastTexture != tex || g_shadowLastFlags != param3) {
+        // PORT: the batch table and its byte count end at 255 batches.
+        if (g_shadowBatchCount >= 255)
+            return;
         g_shadowBatch[1] = g_shadowVertexCount - g_shadowBatch[0];
         g_shadowBatch += 4;
         g_shadowBatchCount++;
@@ -1986,7 +2014,8 @@ void Scene_ProjectCasterIntoLightZone(LightZoneItem *pItem, ShadowCaster *pCaste
                                  pv2->textureCoordinates[0][1] <= maxW) &&
                                 (pv0->textureCoordinates[0][1] >= minW ||
                                  pv1->textureCoordinates[0][1] >= minW ||
-                                 pv2->textureCoordinates[0][1] >= minW)) {
+                                 pv2->textureCoordinates[0][1] >= minW) &&
+                                g_shadowVertexCount + 3 <= kShadowVertexCapacity) {
                                 ((MeshVertexF *)g_shadowVertexData)[g_shadowVertexCount] = *pv0;
                                 ((MeshVertexF *)g_shadowVertexData)[g_shadowVertexCount + 1] = *pv1;
                                 ((MeshVertexF *)g_shadowVertexData)[g_shadowVertexCount + 2] = *pv2;
@@ -2428,7 +2457,7 @@ void Scene_DrawShadowBatches(unsigned int view)
     mask = (BYTE)(1u << view);
     pLast = NULL;
     for (i = 0; i < g_shadowBatchCount; i++) {
-        if ((unsigned int)g_shadowBatch[1] > 0 && (*(BYTE *)&g_shadowBatch[3] & mask) != 0) {
+        if ((unsigned int)g_shadowBatch[1] > 0 && (*(BYTE *)&g_shadowBatch[3] & mask) != 0 && g_shadowBatch[2] >= 0) {
             pTexture = CGraphics::m_pTextureManager->textureBuffer[g_shadowBatch[2]];
             if (pTexture != pLast) {
                 pLast = pTexture;
@@ -2705,7 +2734,9 @@ extern const float g_netZero;          // 0x0051131c, 0.0f
 extern const float g_float0_1;    // 0x00511ce8, 0.1f
 // Scratch table of emitted vertex indices of the shadow mesh builder (-1 none).
 // GLOBAL: CMR2 0x006e0354
-unsigned short g_shadowVertexRemap[0x3f0];
+// PORT: was 0x3f0 entries; it is indexed by the vertices of a caster mesh, of
+// up to 2000 vertices.
+unsigned short g_shadowVertexRemap[2000];
 
 // Transforms the light into mesh space and dots it with the source normals.
 // Faces whose three normal/light dots are negative are dropped; accepted

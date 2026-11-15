@@ -218,5 +218,6 @@ extern "C" void Audio_Shutdown(void)
         sceAudioOutReleasePort(s_port);
         s_port = -1;
     }
+    AudioMixer_Stop();
     // Buffers the game did not release keep their data until exit.
 }
