@@ -283,6 +283,21 @@ bool GxmTextures::SetVideoFrame(GfxTexture *t, const void *pixels, bool vFirst, 
             delete g;
         return false;
     }
+    // What GXM tells of the descriptor: a frame that it refuses is not
+    // drawn.
+    const int valid = sceGxmTextureValidate(&g->texture);
+    if (valid < 0) {
+        if (!loggedVideo)
+            Sys_Log("gxm tex: a video frame of %dx%d is not a valid texture: 0x%08x", t->width, t->height,
+                    (unsigned)valid);
+        loggedVideo = true;
+        // The texture has no GPU side then: the caller writes its picture.
+        if (fresh)
+            delete g;
+        else
+            Destroy(t, frame);
+        return false;
+    }
     // The descriptor is new: the sampler state and the context's copy of it
     // are set again.
     g->sampler = ~0u;
@@ -554,6 +569,13 @@ void GxmTextures::SetSampler(GxmTexture &g, int minFilter, int magFilter, int mi
                                                                  : SCE_GXM_TEXTURE_FILTER_POINT);
     sceGxmTextureSetMagFilter(t, magFilter == GFX_FILTER_LINEAR ? SCE_GXM_TEXTURE_FILTER_LINEAR
                                                                  : SCE_GXM_TEXTURE_FILTER_POINT);
+    // A frame of a video decoder (a YUV texture): the two filters and
+    // nothing more, as the players of the system set it. The count of mip
+    // levels, the mip filter and the address mode of such a texture stay as
+    // sceGxmTextureInitLinear made them: with them set, the first draw of a
+    // movie frame stopped the PS Vita.
+    if (g.external)
+        return;
     // GXM: ENABLED blends two levels, DISABLED takes the nearest. No mipmap
     // filter reads the first level only.
     sceGxmTextureSetMipFilter(t, mipFilter == GFX_MIPFILTER_LINEAR ? SCE_GXM_TEXTURE_MIP_FILTER_ENABLED

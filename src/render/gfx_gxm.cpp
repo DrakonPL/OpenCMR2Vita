@@ -2670,7 +2670,11 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         for (void *b : videoBlocks)
             mapped = mapped || b == block;
         if (!mapped) {
-            const int err = sceGxmMapMemory(block, blockBytes, SCE_GXM_MEMORY_ATTRIB_READ);
+            // Read and write, as the players of the system map the frames
+            // of the decoder.
+            const int err = sceGxmMapMemory(block, blockBytes,
+                                            (SceGxmMemoryAttribFlags)(SCE_GXM_MEMORY_ATTRIB_READ |
+                                                                      SCE_GXM_MEMORY_ATTRIB_WRITE));
             if (err < 0) {
                 Sys_Log("gxm: a block of video frames (%u KB) does not map: 0x%08x", (unsigned)(blockBytes / 1024),
                         (unsigned)err);

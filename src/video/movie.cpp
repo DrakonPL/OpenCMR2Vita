@@ -99,6 +99,7 @@ struct HwMovie {
     bool vFirst = true;
     bool gpu = false;           // the renderer draws the frames where they are
     bool gpuDrew = false;       // a frame given to the renderer since its last end of drawing
+    bool gpuLogged = false;     // the log has the end of the drawing of the first frame
     unsigned width = 0, height = 0;
 };
 
@@ -213,6 +214,10 @@ static bool HwTakeFrame(Movie *movie)
     if (hw->gpuDrew) {
         Gfx_FinishDrawing();
         hw->gpuDrew = false;
+        // For a log with [system] log_sync = 1: the first frame is drawn.
+        if (!hw->gpuLogged)
+            Sys_Log("movie: the renderer has drawn the first frame of the hardware decoder");
+        hw->gpuLogged = true;
     }
     if (sceAvPlayerGetVideoData(hw->handle, &hw->frame)) {
         hw->frameReady = true;
