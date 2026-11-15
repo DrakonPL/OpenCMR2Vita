@@ -131,7 +131,9 @@ void Gfx_SpliceSmallBatches(GfxFrame &frame)
     }
     // The draws of each batch in its place: they are in the order of the
     // batches.
-    std::vector<GfxCommand> commands;
+    std::vector<GfxCommand> local;
+    std::vector<GfxCommand> &commands = frame.batch != nullptr ? frame.batch->spliced : local;
+    commands.clear();
     commands.reserve(frame.commands.size() + drawCount);
     size_t next = 0;
     for (size_t i = 0; i < frame.commands.size(); i++) {

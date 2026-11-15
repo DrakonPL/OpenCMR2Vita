@@ -221,6 +221,8 @@ bool GxmDevice::SetMode(int w, int h)
     // A scene that does not load the depth starts with stencil 0: the
     // stencil of the near ground before the sky (gfx_sky_plan.h) needs it.
     sceGxmDepthStencilSurfaceSetBackgroundStencil(&depth, 0);
+    // And depth 1, which the executor counts on to leave out a depth clear.
+    sceGxmDepthStencilSurfaceSetBackgroundDepth(&depth, 1.0f);
     width = w;
     height = h;
     displayWidth = scaled ? w : kDisplayWidth;

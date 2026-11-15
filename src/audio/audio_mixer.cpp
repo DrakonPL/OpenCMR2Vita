@@ -100,14 +100,42 @@ void UpdateGains(AudioBuffer *b)
     b->rightGain = volume * right;
 }
 
-inline float SampleAt(const AudioData *d, DWORD frame, int channel)
+// A sample of a frame and channel as a float, for one format.
+template <int Bits, int Channels> inline float SampleOf(const BYTE *bytes, DWORD frame, int channel)
 {
-    const int ch = channel < d->channels ? channel : 0;
-    if (d->bits == 16) {
-        const int16_t *p = (const int16_t *)d->bytes;
-        return p[frame * d->channels + ch] / 32768.0f;
+    const int ch = channel < Channels ? channel : 0;
+    if (Bits == 16)
+        return ((const int16_t *)bytes)[frame * Channels + ch] / 32768.0f;
+    return (bytes[frame * Channels + ch] - 128) / 128.0f;
+}
+
+// The frames of a buffer of one format: no format branch and no reload of
+// the gains in the loop (out could alias them).
+template <int Bits, int Channels> void MixFrames(AudioBuffer *b, DWORD total, double step, float *out, int frames)
+{
+    const BYTE *bytes = b->data->bytes;
+    const float leftGain = b->leftGain, rightGain = b->rightGain;
+    const bool loop = b->loop;
+    double position = b->position;
+    for (int i = 0; i < frames; i++) {
+        if (position >= total) {
+            if (!loop) {
+                b->playing = false;
+                b->position = 0.0;
+                return;
+            }
+            position = fmod(position, (double)total);
+        }
+        const DWORD f0 = (DWORD)position;
+        const DWORD f1 = f0 + 1 < total ? f0 + 1 : (loop ? 0 : f0);
+        const float t = (float)(position - f0);
+        const float l = SampleOf<Bits, Channels>(bytes, f0, 0) * (1.0f - t) + SampleOf<Bits, Channels>(bytes, f1, 0) * t;
+        const float r = SampleOf<Bits, Channels>(bytes, f0, 1) * (1.0f - t) + SampleOf<Bits, Channels>(bytes, f1, 1) * t;
+        out[i * 2] += l * leftGain;
+        out[i * 2 + 1] += r * rightGain;
+        position += step;
     }
-    return (d->bytes[frame * d->channels + ch] - 128) / 128.0f;
+    b->position = position;
 }
 
 void MixBuffer(AudioBuffer *b, float *out, int frames)
@@ -121,23 +149,16 @@ void MixBuffer(AudioBuffer *b, float *out, int frames)
         b->playing = false;
         return;
     }
-    for (int i = 0; i < frames; i++) {
-        if (b->position >= total) {
-            if (!b->loop) {
-                b->playing = false;
-                b->position = 0.0;
-                return;
-            }
-            b->position = fmod(b->position, (double)total);
-        }
-        const DWORD f0 = (DWORD)b->position;
-        const DWORD f1 = f0 + 1 < total ? f0 + 1 : (b->loop ? 0 : f0);
-        const float t = (float)(b->position - f0);
-        const float l = SampleAt(d, f0, 0) * (1.0f - t) + SampleAt(d, f1, 0) * t;
-        const float r = SampleAt(d, f0, 1) * (1.0f - t) + SampleAt(d, f1, 1) * t;
-        out[i * 2] += l * b->leftGain;
-        out[i * 2 + 1] += r * b->rightGain;
-        b->position += step;
+    if (d->bits == 16) {
+        if (d->channels == 2)
+            MixFrames<16, 2>(b, total, step, out, frames);
+        else
+            MixFrames<16, 1>(b, total, step, out, frames);
+    } else {
+        if (d->channels == 2)
+            MixFrames<8, 2>(b, total, step, out, frames);
+        else
+            MixFrames<8, 1>(b, total, step, out, frames);
     }
 }
 
@@ -182,6 +203,12 @@ void AudioMixer_Start(int outputRate)
     s_outputRate = outputRate > 0 ? outputRate : 44100;
 }
 
+void AudioMixer_Stop(void)
+{
+    Lock lock;
+    s_outputRate = 0;
+}
+
 bool AudioMixer_Started(void)
 {
     return s_outputRate > 0;
@@ -197,14 +224,18 @@ void AudioMixer_Mix(float *out, int frames)
     memset(out, 0, (size_t)frames * 2 * sizeof(float));
     if (s_outputRate <= 0)
         return;
-    {
+    // The lock is held for one part of the block at a time: a game call that
+    // sets a sound waits for a part, not for the whole mix.
+    const int kPartFrames = 128;
+    for (int start = 0; start < frames; start += kPartFrames) {
+        const int count = frames - start < kPartFrames ? frames - start : kPartFrames;
         Lock lock;
         for (AudioBuffer *b : s_buffers)
             if (b->playing)
-                MixBuffer(b, out, frames);
+                MixBuffer(b, out + start * 2, count);
         for (AudioStream *s : s_streams)
             if (s->playing)
-                MixStream(s, out, frames);
+                MixStream(s, out + start * 2, count);
     }
     for (int i = 0; i < frames * 2; i++)
         out[i] = out[i] > 1.0f ? 1.0f : (out[i] < -1.0f ? -1.0f : out[i]);
@@ -259,8 +290,11 @@ extern "C" AudioBuffer *Audio_CreateBuffer(DWORD sampleRate, int bits, int chann
 {
     if ((bits != 8 && bits != 16) || channels < 1 || channels > 2 || bytes == 0)
         return NULL;
+    BYTE *data = (BYTE *)calloc(1, bytes);
+    if (data == NULL)
+        return NULL;
     AudioData *d = new AudioData;
-    d->bytes = (BYTE *)calloc(1, bytes);
+    d->bytes = data;
     d->size = bytes;
     d->sampleRate = sampleRate;
     d->bits = bits;
@@ -482,7 +516,11 @@ extern "C" DWORD Audio_DecodeMsAdpcm(const AudioWaveFormat *format, const BYTE *
                 delta[c] = delta[c] * adaptation[nibble] / 256;
                 if (delta[c] < 16)
                     delta[c] = 16;
-                channel = (channel + 1) % channels;
+                // Bad data cannot overflow the next product (adaptation is at most 768).
+                if (delta[c] > INT32_MAX / 768)
+                    delta[c] = INT32_MAX / 768;
+                if (++channel == channels)
+                    channel = 0;
             }
         }
     }

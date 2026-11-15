@@ -55,6 +55,8 @@ if(WIN32)
 endif()
 if(VITA)
     add_compile_definitions(VITA)
+    # The vitasdk GCC schedules for a generic ARMv7-A. The PS Vita has four Cortex-A9 cores.
+    add_compile_options(-mtune=cortex-a9)
 endif()
 if(OPENCMR2_DEV)
     add_compile_definitions(OPENCMR2_DEV)

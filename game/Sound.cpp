@@ -555,7 +555,9 @@ HRESULT Sound_DecodeMusicBlocks(BYTE *pDst, int count)
                 blocks = FTOI(UINT, X87S_MUL(X87S_LOAD(read), (1.0f / 2048.0f)));
                 CSound::IsSoundCallSuccessful(CSound::m_pMMIO->StartDataRead());
                 CSound::IsSoundCallSuccessful(CSound::m_pMMIO->Read(0x4000 - pos, buffer + pos, &read));
-                Sound_DecodeADPCMBlock(buffer, pDst + (blocks + 0xfe80) * i);
+                // PORT: the original wrote to pDst + (blocks + 0xfe80) * i, which is pOut
+                // only for i = 0; a later block went off its place and past the ring.
+                Sound_DecodeADPCMBlock(buffer, pOut);
                 pos += read;
             } while (pos < 0x4000);
         } else {

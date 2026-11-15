@@ -323,6 +323,9 @@ struct GfxBatchData {
     std::vector<GfxBatchOutput> draws;      // the jobs
     std::vector<GfxVertex> vertices;        // of the draws, in world space
     std::vector<uint16_t> drawIndices;
+    // Gfx_SpliceSmallBatches builds the frame's commands here and swaps: both
+    // vectors keep their room, and a frame allocates nothing (not in Reset).
+    std::vector<GfxCommand> spliced;
     // The jobs: the batch of the job before, and its last draw, which a
     // draw of the same batch can join (~0: none).
     uint32_t runPlaceholder = ~0u;

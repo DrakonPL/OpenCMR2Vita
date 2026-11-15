@@ -10,6 +10,8 @@
 // The output is open: the mixer mixes at outputRate frames each second. The
 // lock between the game's thread and the output's thread is made here.
 void AudioMixer_Start(int outputRate);
+// The output is closed: a stream opened after it opens the output again.
+void AudioMixer_Stop(void);
 bool AudioMixer_Started(void);
 int AudioMixer_OutputRate(void);
 
