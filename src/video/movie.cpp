@@ -6,6 +6,7 @@
 #include "video/bink_decoder.h"
 #include "video/yuv_convert.h"
 #include "video/hw_movie_handle.h"
+#include "video/hw_movie_clock.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -87,7 +88,9 @@ static void LogDecodeTime(Movie *movie, double ms)
 // draws a frame where it is (Gfx_SetTextureVideoFrame): no conversion and no
 // upload. The decoder writes a frame again when the game has taken the next
 // one, so the renderer ends its drawing before the game asks for a frame
-// (Gfx_FinishDrawing). [video] movie_gpu = 0 converts on the CPU. A movie
+// (Gfx_FinishDrawing). The decoder moves its picture on with the sound that
+// the game takes: the sound is taken as it plays, and a frame waits for its
+// time (video/hw_movie_clock.h). [video] movie_gpu = 0 converts on the CPU. A movie
 // whose size is not a multiple of 16 is converted on the CPU too: its rows
 // in the frame are longer than its width.
 
@@ -100,6 +103,13 @@ struct HwMovie {
     bool gpu = false;           // the renderer draws the frames where they are
     bool gpuDrew = false;       // a frame given to the renderer since its last end of drawing
     bool gpuLogged = false;     // the log has the end of the drawing of the first frame
+    // The time of the movie (video/hw_movie_clock.h): the sound that went
+    // into the stream, when the stream started to play (below zero: not
+    // yet), and the stamp of the first frame.
+    double soundQueuedMs = 0.0;
+    double soundStart = -1.0;
+    uint64_t firstStamp = 0;
+    unsigned shown = 0;         // frames given to the renderer
     unsigned width = 0, height = 0;
 };
 
@@ -179,12 +189,21 @@ static bool HwPath(const char *path, int audioTrack, char *host, size_t size)
 // frame of sound, at its rate).
 static void HwPumpAudio(Movie *movie)
 {
+    HwMovie *hw = movie->hw;
     SceAvPlayerFrameInfo sound{};
-    while (sceAvPlayerGetAudioData(movie->hw->handle, &sound)) {
+    // The sound as it plays: the decoder moves its picture on with the
+    // sound taken.
+    const double now = Sys_GetTicksPrecise();
+    if (movie->started && hw->soundStart < 0.0)
+        hw->soundStart = now;
+    const double played = hw->soundStart >= 0.0 ? now - hw->soundStart : 0.0;
+    while (HwMovie_SoundWanted(hw->soundQueuedMs, played) && sceAvPlayerGetAudioData(hw->handle, &sound)) {
         const unsigned channels = sound.details.audio.channelCount;
         const unsigned samples = sound.details.audio.size / 2;
         if (channels == 0 || samples == 0 || sound.pData == nullptr)
             continue;
+        if (sound.details.audio.sampleRate > 0)
+            hw->soundQueuedMs += 1000.0 * (double)(samples / channels) / (double)sound.details.audio.sampleRate;
         if (movie->audio == nullptr) {
             movie->audio = Audio_CreateStream(sound.details.audio.sampleRate, (int)channels);
             if (movie->audio == nullptr)
@@ -279,6 +298,7 @@ static Movie *HwOpen(const char *path, int audioTrack)
     }
     hw->width = hw->frame.details.video.width;
     hw->height = hw->frame.details.video.height;
+    hw->firstStamp = hw->frame.timeStamp;
     movie->info.width = hw->width;
     movie->info.height = hw->height;
     movie->info.frames = 1;     // Movie_GetFrameCount follows the decoder
@@ -322,6 +342,14 @@ static void HwConvertFrame(Movie *movie)
             hw->gpuDrew = true;
             hw->frameReady = false;
             movie->decodedCurrent = true;
+#ifdef OPENCMR2_DEV
+            // The stamp of the frame against the time of the movie.
+            if (++hw->shown % 100 == 0)
+                Sys_Log("movie: frame %u of the hardware decoder, its time %u ms, shown at %u ms, sound queued %u ms",
+                        hw->shown, (unsigned)(hw->frame.timeStamp - hw->firstStamp),
+                        movie->started ? (unsigned)(Sys_GetTicks() - movie->startTicks) : 0u,
+                        (unsigned)hw->soundQueuedMs);
+#endif
             return;
         }
         Sys_Log("movie: the renderer does not draw the frames of the hardware decoder: the CPU converts them");
@@ -507,7 +535,15 @@ extern "C" BOOL Movie_Wait(Movie *movie)
     // The decoder's time: wait until it gives the next frame or ends.
     if (movie->hw != nullptr) {
         HwPumpAudio(movie);
-        return HwTakeFrame(movie) || movie->hw->ended ? FALSE : TRUE;
+        if (movie->hw->ended)
+            return FALSE;
+        if (!HwTakeFrame(movie))
+            return movie->hw->ended ? FALSE : TRUE;
+        // The frame is here: it waits for its time.
+        return HwMovie_FrameDue(movie->started, movie->hw->frame.timeStamp, movie->hw->firstStamp,
+                                movie->started ? Sys_GetTicks() - movie->startTicks : 0)
+                   ? FALSE
+                   : TRUE;
     }
 #endif
     if (!movie->started)
