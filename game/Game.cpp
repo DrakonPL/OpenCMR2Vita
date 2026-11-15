@@ -2239,6 +2239,9 @@ struct DeferredDraw {
 };
 
 #include "DeferredOrder.h"
+#include "BatchRuns.h"
+#include "TreeCull.h"
+#include "GroundMerge.h"
 
 static int __cdecl Game_CompareDeferredDistance(const void *a, const void *b)
 {
@@ -2417,6 +2420,508 @@ void Game_AddTreeToBatch(Mesh *pMesh, const float *pMatrix)
     }
 }
 
+// PORT: the trees outside the view are left out before the deferred pass.
+// The game queues each camera-facing object of the sectors in view, makes
+// its matrix, sorts it and gives it to the tree batch. The renderer then
+// leaves out those outside the view: half of the trees of a forest, some
+// 900 instructions each on the game's thread and a transform on the batch
+// thread. A tree that the batch would take, and whose sphere is outside the
+// view (TreeCull.h), is not queued.
+// - The picture is the same: the renderer leaves out each such tree.
+// - The object that the deferred pass draws last is drawn alone, and it
+//   leaves its state. It is the nearest object (the last one of the walk
+//   without the sort). It is queued also when its sphere is outside.
+// - The deferred pass sets the blend mode of the first texture of each
+//   object and marks its mesh. It does the same for the trees left out.
+// - The view at the deferred pass is the view of this pass. If it is
+//   another one, each tree left out goes back into the queue, at its place
+//   in the walk.
+// [video] tree_cull = 0 queues each tree.
+extern GfxMatrix g_unk0x00597cc0;
+
+enum { kTreesOut = 4096, kTreeQueue = 4096 };
+struct TreeBounds {
+    Mesh *pLod;
+    GfxVertexBuffer *pBuffer;
+    int first, count;
+    DWORD serial;
+    float radius;
+};
+struct TreePass {
+    bool cull;                  // the trees outside the view are left out in this pass
+    bool sorted;                // the deferred pass sorts its objects
+    bool whole;                 // the queue of the deferred pass was empty at the start of the pass
+    float planes[24];           // the view of the pass (Gfx_GetViewPlanes)
+    TreeCullView view;
+    unsigned int seen;          // the deferred objects of the walk so far
+    unsigned int queued;        // those that the pass queued
+    // The object that the deferred pass draws last.
+    StageObjectDraw *pLast;
+    unsigned int lastKey, lastSeq;
+    int lastDistance;
+    bool lastOut;
+    // The trees left out, with their numbers in the walk.
+    unsigned int outCount;
+    StageObjectDraw *out[kTreesOut];
+    unsigned int outSeq[kTreesOut];
+    int outDistance[kTreesOut];
+    // For each object of the queue: its number in the walk and its distance.
+    unsigned int keptSeq[kTreeQueue];
+    int distance[kTreeQueue];
+};
+static TreePass s_treePass;
+// Each tree of a stage has a mesh of its own: a place for some thousands.
+enum { kTreeBoundsBits = 13 };
+static TreeBounds s_treeBounds[1 << kTreeBoundsBits];
+#ifdef OPENCMR2_DEV
+static unsigned int s_treeFrames, s_treesSeen, s_treesOut, s_treesMeasured, s_treesRestored;
+#endif
+
+// The matrix of a camera-facing object: the rows of the camera's yaw with
+// the scales of the object, at its place.
+static void Game_SetTreeMatrix(StageObjectDraw *pObject)
+{
+    *(GfxMatrix *)pObject->matrix = g_unk0x00597cc0;
+    if (pObject->scaleX != 0x10000 || pObject->scaleY != 0x10000 || pObject->scaleZ != 0x10000) {
+        float scale;
+        scale = (float)(X87S_MUL_FIX16(pObject->scaleX, CGraphics::m_oneOver65536));
+        pObject->matrix[0] = scale * pObject->matrix[0];
+        pObject->matrix[1] = scale * pObject->matrix[1];
+        pObject->matrix[2] = scale * pObject->matrix[2];
+        scale = (float)(X87S_MUL_FIX16(pObject->scaleY, CGraphics::m_oneOver65536));
+        pObject->matrix[4] = scale * pObject->matrix[4];
+        pObject->matrix[5] = scale * pObject->matrix[5];
+        pObject->matrix[6] = scale * pObject->matrix[6];
+        scale = (float)(X87S_MUL_FIX16(pObject->scaleZ, CGraphics::m_oneOver65536));
+        pObject->matrix[8] = scale * pObject->matrix[8];
+        pObject->matrix[9] = scale * pObject->matrix[9];
+        pObject->matrix[10] = scale * pObject->matrix[10];
+    }
+    pObject->matrix[12] = (float)(X87S_MUL_FIX16(pObject->offsetX, CGraphics::m_oneOver65536));
+    pObject->matrix[13] = (float)(X87S_MUL_FIX16(pObject->offsetY, CGraphics::m_oneOver65536));
+    pObject->matrix[14] = (float)(X87S_MUL_FIX16(pObject->offsetZ, CGraphics::m_oneOver65536));
+}
+
+// The distance of the farthest vertex of a mesh from its origin, kept while
+// the positions of its vertex buffer stay. Below zero: not known.
+float Game_TreeRadius(Mesh *pLod)
+{
+    TreeBounds &b = s_treeBounds[((unsigned int)((UINT_PTR)pLod >> 4) * 2654435761u) >> (32 - kTreeBoundsBits)];
+    GfxVertexBuffer *pBuffer = CGraphics::m_pTextureManager->pVertexBuffers[pLod->vertexBufferIndex];
+    const DWORD serial = Gfx_GetPositionSerial(pBuffer);
+    if (b.pLod != pLod || b.pBuffer != pBuffer || b.first != pLod->vertexOffset || b.count != pLod->field_0x10 ||
+        b.serial != serial) {
+        float low[3], high[3];
+        b.pLod = NULL;
+        if (pLod->field_0x10 <= 0 ||
+            !Gfx_GetRangeBox(pBuffer, (DWORD)pLod->vertexOffset, (DWORD)pLod->field_0x10, low, high))
+            return -1.0f;
+        b.pLod = pLod;
+        b.pBuffer = pBuffer;
+        b.first = pLod->vertexOffset;
+        b.count = pLod->field_0x10;
+        // The serial after the box: the box itself reads no lock.
+        b.serial = Gfx_GetPositionSerial(pBuffer);
+        b.radius = TreeCull_BoxRadius(low, high);
+#ifdef OPENCMR2_DEV
+        s_treesMeasured++;
+#endif
+    }
+    return b.radius;
+}
+
+// Whether the sphere of a camera-facing object is outside the view of the
+// pass.
+static bool Game_TreeOutsideView(StageObjectDraw *pObject)
+{
+    Mesh *pLod = (Mesh *)((BYTE *)pObject->pMesh + pObject->pMesh->lodIndex * offsetof(Mesh, field_0x108));
+    const float radius = Game_TreeRadius(pLod);
+    const float k = 1.0f / 65536.0f;
+    float scale;
+
+    if (radius < 0.0f)
+        return false;
+    scale = fabsf((float)pObject->scaleX);
+    scale = fabsf((float)pObject->scaleY) > scale ? fabsf((float)pObject->scaleY) : scale;
+    scale = fabsf((float)pObject->scaleZ) > scale ? fabsf((float)pObject->scaleZ) : scale;
+    return TreeCull_Outside(s_treePass.view, (float)pObject->offsetX * k, (float)pObject->offsetY * k,
+                            (float)pObject->offsetZ * k, radius * scale * k);
+}
+
+static void Game_BeginTreePass(bool batches)
+{
+    TreePass &t = s_treePass;
+
+    t.seen = 0;
+    t.queued = 0;
+    t.outCount = 0;
+    t.pLast = NULL;
+    t.lastKey = 0;
+    t.lastOut = false;
+    t.sorted = g_depthSortDrawLists != 0;
+    t.whole = CGame::m_deferredDrawCount == 0;
+    t.cull = batches && t.whole && Sys_GetOption("video.tree_cull", 1) != 0 && Gfx_GetViewPlanes(t.planes) != FALSE;
+    if (t.cull)
+        TreeCull_SetView(&t.view, t.planes);
+}
+
+// Makes the matrix of a deferred object and queues it.
+static void Game_KeepTree(StageObjectDraw *pObject, int distance, unsigned int seq)
+{
+    TreePass &t = s_treePass;
+    const unsigned int at = (unsigned int)CGame::m_deferredDrawCount;
+
+    Game_SetTreeMatrix(pObject);
+    if (at < kTreeQueue) {
+        t.keptSeq[at] = seq;
+        t.distance[at] = distance;
+    }
+    t.queued++;
+    CGame::QueuePrimaryDrawObject(pObject);
+}
+
+// A deferred object of the walk, with its distance: queued, or left out.
+static void Game_QueueTree(StageObjectDraw *pObject, int distance)
+{
+    TreePass &t = s_treePass;
+    const unsigned int seq = t.seen++;
+    // The key of the sort of the deferred pass: the greatest key is last.
+    const unsigned int key = 0x7fffffffu - (unsigned int)distance;
+    // The sphere first: it tells "inside" for half of the trees.
+    const bool out = t.cull && t.outCount < kTreesOut && Game_TreeOutsideView(pObject) &&
+                     Game_TreeBatchable(pObject->pMesh);
+
+    if (!t.sorted || key >= t.lastKey) {
+        t.pLast = pObject;
+        t.lastKey = key;
+        t.lastSeq = seq;
+        t.lastDistance = distance;
+        t.lastOut = out;
+    }
+    if (out) {
+        t.out[t.outCount] = pObject;
+        t.outSeq[t.outCount] = seq;
+        t.outDistance[t.outCount] = distance;
+        t.outCount++;
+        return;
+    }
+    Game_KeepTree(pObject, distance, seq);
+}
+
+// The end of the walk: the object that the deferred pass draws last is
+// queued, also when its sphere is outside the view.
+static void Game_EndTreePass(void)
+{
+    TreePass &t = s_treePass;
+    unsigned int i;
+
+#ifdef OPENCMR2_DEV
+    s_treesSeen += t.seen;
+    s_treesOut += t.outCount;
+    if (++s_treeFrames == 600) {
+        Sys_Log("trees: in a frame %.1f camera-facing objects, %.1f left out (outside the view); %u spheres "
+                "measured, %u frames with the trees put back, in 600 frames",
+                s_treesSeen / 600.0, s_treesOut / 600.0, s_treesMeasured, s_treesRestored);
+        s_treeFrames = s_treesSeen = s_treesOut = s_treesMeasured = s_treesRestored = 0;
+    }
+#endif
+    if (t.pLast == NULL || !t.lastOut)
+        return;
+    for (i = t.outCount; i-- > 0;)
+        if (t.out[i] == t.pLast && t.outSeq[i] == t.lastSeq) {
+            for (; i + 1 < t.outCount; i++) {
+                t.out[i] = t.out[i + 1];
+                t.outSeq[i] = t.outSeq[i + 1];
+                t.outDistance[i] = t.outDistance[i + 1];
+            }
+            t.outCount--;
+            break;
+        }
+    Game_KeepTree(t.pLast, t.lastDistance, t.lastSeq);
+}
+
+// An object of the queue with its number in the walk.
+struct TreeQueueEntry {
+    unsigned int seq;
+    StageObjectDraw *pObject;
+    int distance;
+};
+
+static int __cdecl Game_CompareTreeQueueEntries(const void *a, const void *b)
+{
+    const unsigned int seqA = ((const TreeQueueEntry *)a)->seq, seqB = ((const TreeQueueEntry *)b)->seq;
+    return seqA < seqB ? -1 : seqA > seqB ? 1 : 0;
+}
+
+// The start of the deferred pass: what it does to each object for the trees
+// left out. With another view than that of the walk, they go back into the
+// queue, each at its place in the walk.
+void Game_SettleTreesLeftOut(void)
+{
+    TreePass &t = s_treePass;
+    float planes[24];
+    unsigned int i;
+
+    if (t.outCount == 0)
+        return;
+    if (Gfx_GetViewPlanes(planes) != FALSE && memcmp(planes, t.planes, sizeof(planes)) == 0) {
+        for (i = 0; i < t.outCount; i++) {
+            Mesh *pMesh = t.out[i]->pMesh;
+            Frontend_SetObjectField118(CGraphics::m_pTextureManager->textureBuffer[pMesh->pTriangles->textures[0]], 0);
+            pMesh->flags |= 8;
+        }
+        t.outCount = 0;
+        return;
+    }
+    typedef TreeQueueEntry Entry;
+    static Entry entries[kTreeQueue + kTreesOut];
+    unsigned int n = 0;
+    const unsigned int count = (unsigned int)CGame::m_deferredDrawCount;
+    // Without the numbers of the queue's objects, the trees go after them.
+    const bool known = t.whole && t.queued == count && count <= kTreeQueue;
+    for (i = 0; i < count && i < kTreeQueue; i++) {
+        const Entry e = { known ? t.keptSeq[i] : 0, (StageObjectDraw *)CGame::m_deferredDrawObjects[i],
+                          known ? t.distance[i] : 0 };
+        entries[n++] = e;
+    }
+    for (i = 0; i < t.outCount; i++) {
+        const Entry e = { t.outSeq[i], t.out[i], t.outDistance[i] };
+        Game_SetTreeMatrix(t.out[i]);
+        entries[n++] = e;
+    }
+    // Each object has a number of its own.
+    if (known)
+        qsort(entries, n, sizeof(entries[0]), Game_CompareTreeQueueEntries);
+    n = n < kTreeQueue ? n : (unsigned int)kTreeQueue;
+    for (i = 0; i < n; i++) {
+        CGame::m_deferredDrawObjects[i] = entries[i].pObject;
+        t.keptSeq[i] = entries[i].seq;
+        t.distance[i] = entries[i].distance;
+    }
+    CGame::m_deferredDrawCount = (int)n;
+    t.queued = known ? n : ~0u;
+    t.outCount = 0;
+#ifdef OPENCMR2_DEV
+    s_treesRestored++;
+#endif
+}
+
+// PORT: the view test of the parts of the ground and of the static objects
+// (Game_DrawMergedGroundParts, Game_DrawObjectRunMerged). Gfx_IsRangeVisible
+// looked up the box of the part, compared the matrices of the state with
+// those of its planes and tested the box: 350 instructions, for some 170
+// parts in a frame of the stage probe. The planes are those of the walk for
+// each part, and the box of a part stays while the positions of its vertex
+// buffer stay (Gfx_GetPositionSerial): the box is kept here, and the test is
+// that of the renderer for a draw (TreeCull_BoxOutside). The parts are in
+// world space: the world matrix is the identity.
+struct PartBounds {
+    MeshPart *pPart;
+    GfxVertexBuffer *pBuffer;
+    int first, count;
+    DWORD serial;
+    float low[3], high[3];
+};
+enum { kPartBoundsBits = 13 };
+static PartBounds s_partBounds[1 << kPartBoundsBits];
+
+struct StageView {
+    bool known;                 // else each part is in the view, as Gfx_IsRangeVisible tells it
+    TreeCullView view;
+    GfxVertexBuffer *pBuffer;   // the buffer of the last part, and its number
+    DWORD serial;
+
+    void Set(void)
+    {
+        float planes[24];
+        known = Gfx_GetViewPlanes(planes) != FALSE;
+        if (known)
+            TreeCull_SetView(&view, planes);
+        pBuffer = NULL;
+        serial = 0;
+    }
+
+    // Whether count vertices of a buffer from first, the vertices of a
+    // part, can be in the view.
+    bool Shows(MeshPart *pPart, GfxVertexBuffer *pPartBuffer, int first, int count)
+    {
+        if (!known)
+            return true;
+        if (pPartBuffer != pBuffer) {
+            pBuffer = pPartBuffer;
+            serial = Gfx_GetPositionSerial(pPartBuffer);
+        }
+        PartBounds &b = s_partBounds[((unsigned int)((UINT_PTR)pPart >> 2) * 2654435761u) >> (32 - kPartBoundsBits)];
+        if (b.pPart != pPart || b.pBuffer != pPartBuffer || b.first != first || b.count != count ||
+            b.serial != serial) {
+            b.pPart = NULL;
+            if (!Gfx_GetRangeBox(pPartBuffer, (DWORD)first, (DWORD)count, b.low, b.high))
+                return false;
+            // The number after the box: the box reads no lock.
+            serial = Gfx_GetPositionSerial(pPartBuffer);
+            b.pPart = pPart;
+            b.pBuffer = pPartBuffer;
+            b.first = first;
+            b.count = count;
+            b.serial = serial;
+        }
+        return !TreeCull_BoxOutside(view, b.low, b.high);
+    }
+};
+
+// PORT: the state flags of a mesh for the tree batch (TREE_STATE_FLAGS).
+static unsigned int Game_TreeBatchState(Mesh *pMesh)
+{
+    Mesh *pLod = (Mesh *)((BYTE *)pMesh + pMesh->lodIndex * offsetof(Mesh, field_0x108));
+
+    return pLod->flags & TREE_STATE_FLAGS;
+}
+
+// PORT: a run of static stage objects for the tree batch. The batch draws
+// when an object has another state than the one before, and the objects of
+// a stage alternate between two or three states: the batch drew for nearly
+// each object. The objects of a run are solid and write the depth, so the
+// picture does not depend on their order. They go into the batch with those
+// of their state together, the state of the last object last
+// (BatchRuns.h): the state after the run is the same. A run ends at an
+// object that is drawn alone and at a blended one.
+enum { kObjectRun = 1024 };
+static Mesh *s_objectRunMeshes[kObjectRun];
+static unsigned int s_objectRunStates[kObjectRun];
+static unsigned int s_objectRunCount;
+
+// PORT: the objects of a run as one draw for each texture, as the ground
+// (Game_DrawMergedGroundParts). In the tree batch each object is a draw of
+// its own for the renderer: some 1,700 instructions each, 185 of them in a
+// frame of a forest on the PS Vita. The vertices of the objects are in
+// world space, in the vertex buffers of the stage. The parts in view (the
+// test that the renderer makes for each draw) go into groups of one vertex
+// buffer, texture, cull mode and lighting, and the groups stay from frame
+// to frame while the parts are the same (GroundMerge.h). The state after
+// the run is that of its last object, as before. False: no merge (the
+// renderer does not merge the ground, the world matrix is not the
+// identity, no room, a texture stage that kept another setup): the run then
+// goes into the tree batch. [video] merge_objects = 0 does the same.
+static GroundMerge s_objectMerge;
+static GroundMergePart s_objectParts[kGroundMergeParts];
+static bool s_objectMergeWanted;
+#ifdef OPENCMR2_DEV
+static unsigned int s_objectMergeRuns, s_objectMergeParts, s_objectMergeGroups;
+#endif
+extern GfxMatrix g_identityWorldMatrix;
+
+bool Game_DrawObjectRunMerged(GfxMatrix *pWorld)
+{
+    GroundMergePart *parts = s_objectParts;
+    unsigned int partCount = 0;
+    unsigned int i;
+    int k;
+
+    if (!s_objectMergeWanted)
+        return false;
+    // The batch before the run (blended objects) draws first, as it did
+    // when the first object of the run came with another state.
+    Game_FlushTreeBatch();
+    Gfx_GetTransform(GFX_TRANSFORM_WORLD, pWorld);
+    if (memcmp(pWorld, &g_identityWorldMatrix, sizeof(GfxMatrix)) != 0)
+        return false;
+    StageView view;
+    view.Set();
+    for (i = 0; i < s_objectRunCount; i++) {
+        Mesh *pMesh = s_objectRunMeshes[i];
+        Mesh *pLod = (Mesh *)((BYTE *)pMesh + pMesh->lodIndex * offsetof(Mesh, field_0x108));
+        GfxVertexBuffer *pBuffer = CGraphics::m_pTextureManager->pVertexBuffers[pLod->vertexBufferIndex];
+        const int cull = (pLod->flags & 1) != 0 ? 1 : CGame::GetSectorDrawState();
+        const int lighting = (pLod->flags & 0x20) != 0 ? -1 : (pLod->flags & 0x40000) != 0 ? 3 : 2;
+        // The vertices of a part as the tree batch gives them: from its
+        // first one to the end of the mesh.
+        const int end = pLod->vertexOffset + pLod->field_0x10;
+        for (k = 0; k < pLod->partCount; k++) {
+            MeshPart *pPart = pLod->pParts[k];
+            const int first = pLod->vertexOffset + pPart->minIndex;
+            if (pPart->indexCount <= 0 || end <= first || !view.Shows(pPart, pBuffer, first, end - first))
+                continue;
+            if (partCount == kGroundMergeParts)
+                return false;
+            const GroundMergePart part = { pLod, pPart, pPart->pData, pPart->indexCount, first, end,
+                                           pLod->vertexBufferIndex, pPart->texture, cull, lighting };
+            parts[partCount++] = part;
+        }
+    }
+    if (!GroundMerge_Update(&s_objectMerge, parts, partCount))
+        return false;
+    const GroundMergeGroup *groups = s_objectMerge.groups;
+    const unsigned int groupCount = s_objectMerge.groupCount;
+    const int lightingMode = Graphics_GetGeometryStateValue();
+    bool lightingChanged = false;
+    Graphics_SwitchAlphaBlendAndTest(0);
+    for (unsigned g = 0; g < groupCount; g++) {
+        const GroundMergeGroup &group = groups[g];
+        CGraphics::SetCullMode(group.cull);
+        CGraphics::ApplyTextureStageChange(0, CGraphics::m_pTextureManager->textureBuffer[group.texture]);
+        // A stage that kept its setup for another blend mode: the tree
+        // batch draws each part alone then (Game_FlushTreeBatch).
+        if (g == 0 && g_unk0x00520b18 != 0)
+            return false;
+        if (group.lighting >= 0) {
+            Graphics_SetLightingMode(group.lighting);
+            lightingChanged = true;
+        } else if (lightingChanged) {
+            Graphics_SetLightingMode(lightingMode);
+            lightingChanged = false;
+        }
+        Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, CGraphics::m_pTextureManager->pVertexBuffers[group.buffer],
+                                   group.first, group.end - group.first, &s_objectMerge.indices[group.indexStart],
+                                   group.indexCount);
+        CGame::m_unk0x0059ce18 += group.indexCount / 3;
+    }
+    if (lightingChanged)
+        Graphics_SetLightingMode(lightingMode);
+    // The state that the last object of the run left in the tree batch: its
+    // cull mode and the texture of its last part.
+    {
+        Mesh *pMesh = s_objectRunMeshes[s_objectRunCount - 1];
+        Mesh *pLod = (Mesh *)((BYTE *)pMesh + pMesh->lodIndex * offsetof(Mesh, field_0x108));
+        CGraphics::SetCullMode((pLod->flags & 1) != 0 ? 1 : CGame::GetSectorDrawState());
+        CGraphics::ApplyTextureStageChange(
+            0, CGraphics::m_pTextureManager->textureBuffer[pLod->pParts[pLod->partCount - 1]->texture]);
+    }
+#ifdef OPENCMR2_DEV
+    s_objectMergeParts += partCount;
+    s_objectMergeGroups += groupCount;
+    if (++s_objectMergeRuns == 600) {
+        Sys_Log("objects: in a run %.1f parts in view in %.1f draws; the merge was made in %u of 600 runs and kept "
+                "in %u",
+                s_objectMergeParts / 600.0, s_objectMergeGroups / 600.0, s_objectMerge.made, s_objectMerge.kept);
+        s_objectMergeRuns = s_objectMergeParts = s_objectMergeGroups = 0;
+        s_objectMerge.made = s_objectMerge.kept = 0;
+    }
+#endif
+    return true;
+}
+
+static void Game_EmitObjectRun(GfxMatrix *pWorld)
+{
+    static unsigned short order[kObjectRun];
+    unsigned int i;
+
+    if (s_objectRunCount == 0)
+        return;
+    if (Game_DrawObjectRunMerged(pWorld)) {
+        s_objectRunCount = 0;
+        return;
+    }
+    BatchRun_Order(s_objectRunStates, s_objectRunCount, order);
+    for (i = 0; i < s_objectRunCount; i++) {
+        // The world matrix that is set, while the batch is empty: as each
+        // object of the run read it before.
+        if (g_treeBatchCount == 0)
+            Gfx_GetTransform(GFX_TRANSFORM_WORLD, pWorld);
+        Game_AddTreeToBatch(s_objectRunMeshes[order[i]], &pWorld->_11);
+    }
+    s_objectRunCount = 0;
+}
+
 // Draws the objects the deferred pass of the static stage objects queued:
 // sorts them by view depth (farthest first) and, for each one, binds its
 // texture, sets its world matrix and marks the mesh for the culling test of
@@ -2429,6 +2934,8 @@ void Game_DrawDeferredObjects(void)
     FixVector delta;
     unsigned int i;
 
+    // PORT: the trees that the walk left out (Game_QueueTree).
+    Game_SettleTreesLeftOut();
     if ((unsigned int)CGame::m_deferredDrawCount >= 1) {
         // PORT: the order of the objects, the farthest first (see
         // Game_OrderDeferredDraws).
@@ -2437,12 +2944,20 @@ void Game_DrawDeferredObjects(void)
 #ifdef OPENCMR2_DEV
             Diagnostics::ScenePartNest sortPart(Diagnostics::SCENE_PART_DEFERRED_SORT);
 #endif
+            // PORT: the distance of each object from the walk that queued
+            // it (Game_KeepTree), where the queue is that of the walk.
+            const bool known = s_treePass.whole && s_treePass.queued == (unsigned int)CGame::m_deferredDrawCount &&
+                               (unsigned int)CGame::m_deferredDrawCount <= kTreeQueue;
             for (i = 0; i < (unsigned int)CGame::m_deferredDrawCount; i++) {
                 pObject = (StageObjectDraw *)CGame::m_deferredDrawObjects[i];
-                delta.x = g_unk0x0059be6c->world.position.x - pObject->position.x;
-                delta.y = 0;
-                delta.z = g_unk0x0059be6c->world.position.z - pObject->position.z;
-                sorted[i].distance = FixVecLength(&delta);
+                if (known) {
+                    sorted[i].distance = s_treePass.distance[i];
+                } else {
+                    delta.x = g_unk0x0059be6c->world.position.x - pObject->position.x;
+                    delta.y = 0;
+                    delta.z = g_unk0x0059be6c->world.position.z - pObject->position.z;
+                    sorted[i].distance = FixVecLength(&delta);
+                }
                 sorted[i].pObject = pObject;
             }
             Game_OrderDeferredDraws(sorted, (unsigned int)CGame::m_deferredDrawCount, g_depthSortDrawLists != 0,
@@ -2471,6 +2986,8 @@ void Game_DrawDeferredObjects(void)
         }
         CGame::m_deferredDrawCount = 0;
     }
+    // PORT: the queue is empty: its numbers of the walk are no longer good.
+    s_treePass.queued = ~0u;
 }
 
 // qsort comparator of the transparent draw list (0x49cd20): type 0x14 goes
@@ -2524,50 +3041,48 @@ void Game_DrawStaticStageObjects(void)
     // into batches, as the trees do (Game_AddTreeToBatch), with the world
     // matrix that is set: their vertices are in world space. The renderer
     // leaves out those outside the view. The matrix is read again while the
-    // batch is empty: a mesh drawn alone can change it.
+    // batch is empty: a mesh drawn alone can change it. The objects wait in
+    // a run and go into the batch with those of their state together
+    // (Game_EmitObjectRun).
     const bool batches = Sys_GetOption("video.tree_batch", 1) != 0;
     static GfxMatrix world;
 
+    s_objectMergeWanted = batches && Gfx_MergesGroundDraws() != FALSE &&
+                          Sys_GetOption("video.merge_objects", 1) != 0;
+    Game_BeginTreePass(batches);
     for (i = 0; i < (unsigned int)g_sectorCullEnabled; i++) {
         pObject = (StageObjectDraw *)g_sectors[g_visibleSectorIndices[i]]->pObjects;
         while (pObject != NULL) {
             if (pObject->field_0x14 != 0) {
                 if ((pObject->pMesh->flags & 2) != 0) {
-                    *(GfxMatrix *)pObject->matrix = g_unk0x00597cc0;
-                    if (pObject->scaleX != 0x10000 || pObject->scaleY != 0x10000 ||
-                        pObject->scaleZ != 0x10000) {
-                        float scale;
-                        scale = X87S_MUL(X87S_FILD(float, pObject->scaleX), CGraphics::m_oneOver65536);
-                        pObject->matrix[0] = scale * pObject->matrix[0];
-                        pObject->matrix[1] = scale * pObject->matrix[1];
-                        pObject->matrix[2] = scale * pObject->matrix[2];
-                        scale = X87S_MUL(X87S_FILD(float, pObject->scaleY), CGraphics::m_oneOver65536);
-                        pObject->matrix[4] = scale * pObject->matrix[4];
-                        pObject->matrix[5] = scale * pObject->matrix[5];
-                        pObject->matrix[6] = scale * pObject->matrix[6];
-                        scale = X87S_MUL(X87S_FILD(float, pObject->scaleZ), CGraphics::m_oneOver65536);
-                        pObject->matrix[8] = scale * pObject->matrix[8];
-                        pObject->matrix[9] = scale * pObject->matrix[9];
-                        pObject->matrix[10] = scale * pObject->matrix[10];
-                    }
-                    pObject->matrix[12] = X87S_MUL(X87S_FILD(float, pObject->offsetX), CGraphics::m_oneOver65536);
-                    pObject->matrix[13] = X87S_MUL(X87S_FILD(float, pObject->offsetY), CGraphics::m_oneOver65536);
-                    pObject->matrix[14] = X87S_MUL(X87S_FILD(float, pObject->offsetZ), CGraphics::m_oneOver65536);
-                }
-                if ((pObject->pMesh->flags & 2) != 0) {
+                    // PORT: the distance first. The object gets its matrix
+                    // and goes into the queue unless it is a tree outside
+                    // the view (Game_QueueTree).
                     delta.x = g_unk0x0059be6c->world.position.x - pObject->position.x;
                     delta.y = 0;
                     delta.z = g_unk0x0059be6c->world.position.z - pObject->position.z;
                     pObject->pMesh->field_0x114 = FixVecLength(&delta);
-                    CGame::QueuePrimaryDrawObject(pObject);
+                    Game_QueueTree(pObject, pObject->pMesh->field_0x114);
                 } else if (batches && Game_TreeBatchable(pObject->pMesh)) {
-                    if (g_treeBatchCount == 0)
-                        Gfx_GetTransform(GFX_TRANSFORM_WORLD, &world);
-                    Game_AddTreeToBatch(pObject->pMesh, &world._11);
+                    const unsigned int state = Game_TreeBatchState(pObject->pMesh);
+                    if (g_depthSortDrawLists != 0 && (state & 8) != 0) {
+                        // Blended: in its place, after the run before it.
+                        Game_EmitObjectRun(&world);
+                        if (g_treeBatchCount == 0)
+                            Gfx_GetTransform(GFX_TRANSFORM_WORLD, &world);
+                        Game_AddTreeToBatch(pObject->pMesh, &world._11);
+                    } else {
+                        if (s_objectRunCount == kObjectRun)
+                            Game_EmitObjectRun(&world);
+                        s_objectRunMeshes[s_objectRunCount] = pObject->pMesh;
+                        s_objectRunStates[s_objectRunCount] = state;
+                        s_objectRunCount++;
+                    }
                     pTrailing = NULL;
                 } else if (Game_StageMeshOutsideView(pObject->pMesh)) {
                     pTrailing = pObject;
                 } else {
+                    Game_EmitObjectRun(&world);
                     Game_FlushTreeBatch();
                     Graphics_DrawMeshLOD(pObject->pMesh, 1, 0, 0);
                     pTrailing = NULL;
@@ -2576,6 +3091,8 @@ void Game_DrawStaticStageObjects(void)
             pObject = pObject->pNext;
         }
     }
+    Game_EndTreePass();
+    Game_EmitObjectRun(&world);
     Game_FlushTreeBatch();
     if (pTrailing != NULL)
         Graphics_DrawMeshLOD(pTrailing->pMesh, 1, 0, 0);
@@ -2689,16 +3206,9 @@ int Graphics_GetGeometryStateValue(void);
 // lighting mode that is set, as in Graphics_DrawMeshLOD. pMerged: for each
 // visible sector, whether its mesh was drawn here. The PC GL renderer gives
 // the same frames with the merge.
-struct GroundGroup {
-    int buffer, texture, cull, lighting;    // lighting: -1 for the mode that is set
-    int first, end;             // vertices of the buffer
-    unsigned indexStart, indexCount;
-};
-struct GroundPart {
-    Mesh *pMesh;
-    MeshPart *pPart;
-    unsigned group;
-};
+// The groups and their indices stay from frame to frame while the parts in
+// view are the same (GroundMerge.h). The lighting of a group: -1 for the
+// mode that is set.
 
 static bool Game_GroundMeshMerges(const Mesh *pMesh)
 {
@@ -2712,37 +3222,37 @@ static bool Game_GroundMeshMerges(const Mesh *pMesh)
     return true;
 }
 
-// The groups, the parts and the indices of a frame. A frame with more of
-// them than these hold draws its ground as the original did.
-enum { kGroundGroups = 1024, kGroundParts = 8192, kGroundIndices = 1 << 18 };
-static GroundGroup s_groundGroups[kGroundGroups];
-static GroundPart s_groundParts[kGroundParts];
-static unsigned short s_groundIndices[kGroundIndices];
+// The merge of the ground, and the parts in view of the frame. A frame with
+// more parts, groups or indices than the merge holds draws its ground as
+// the original did.
+static GroundMerge s_groundMerge;
+static GroundMergePart s_groundParts[kGroundMergeParts];
+#ifdef OPENCMR2_DEV
+static unsigned int s_groundFrames;
+#endif
+
+// The stage goes or comes: its meshes are not those of the merges.
+void Game_ForgetGroundMerge(void)
+{
+    GroundMerge_Forget(&s_groundMerge);
+    GroundMerge_Forget(&s_objectMerge);
+}
 
 void Game_DrawMergedGroundParts(bool *pMerged)
 {
-    GroundGroup *groups = s_groundGroups;
-    GroundPart *parts = s_groundParts;
-    unsigned short *indices = s_groundIndices;
-    unsigned int groupCount = 0, partCount = 0, indexCount = 0;
+    GroundMergePart *parts = s_groundParts;
+    unsigned int partCount = 0;
     unsigned int count = (unsigned int)g_sectorCullEnabled;
     unsigned int i;
     int k;
 
-    // The sizes first: all parts of the meshes that merge, in the view or not.
-    for (i = 0; i + 1 < count; i++) {
-        Mesh *pMesh = (Mesh *)g_sectors[g_visibleSectorIndices[i]]->pMesh;
-        if (pMesh == NULL || !Game_GroundMeshMerges(pMesh))
-            continue;
-        partCount += (unsigned int)pMesh->partCount;
-        for (k = 0; k < pMesh->partCount; k++)
-            indexCount += pMesh->pParts[k]->indexCount > 0 ? (unsigned int)pMesh->pParts[k]->indexCount : 0;
-    }
     for (i = 0; i < count; i++)
         pMerged[i] = false;
-    if (partCount > kGroundParts || indexCount > kGroundIndices)
-        return;
-    partCount = 0;
+    // The view test of each part (StageView): the world matrix is the
+    // identity here (Game_DrawCulledSectorMeshes).
+    StageView view;
+    view.Set();
+    // The parts in view of the meshes that merge, in their order.
     for (i = 0; i + 1 < count; i++) {
         Mesh *pMesh = (Mesh *)g_sectors[g_visibleSectorIndices[i]]->pMesh;
         if (pMesh == NULL || !Game_GroundMeshMerges(pMesh))
@@ -2755,55 +3265,43 @@ void Game_DrawMergedGroundParts(bool *pMerged)
             MeshPart *pPart = pMesh->pParts[k];
             const int first = pMesh->vertexOffset + pPart->minIndex;
             const int end = pMesh->vertexOffset + pPart->maxIndex + 1;
-            if (pPart->indexCount <= 0 || end <= first || !Gfx_IsRangeVisible(pBuffer, first, end - first))
+            if (pPart->indexCount <= 0 || end <= first || !view.Shows(pPart, pBuffer, first, end - first))
                 continue;
-            unsigned g;
-            for (g = 0; g < groupCount; g++) {
-                const GroundGroup &group = groups[g];
-                if (group.buffer == pMesh->vertexBufferIndex && group.texture == pPart->texture &&
-                    group.cull == cull && group.lighting == lighting)
-                    break;
+            if (partCount == kGroundMergeParts) {
+                // No room: the original walk draws all meshes.
+                for (i = 0; i < count; i++)
+                    pMerged[i] = false;
+                return;
             }
-            if (g == groupCount) {
-                if (groupCount == kGroundGroups) {
-                    // No room: the original walk draws all meshes.
-                    for (i = 0; i < count; i++)
-                        pMerged[i] = false;
-                    return;
-                }
-                GroundGroup group = { pMesh->vertexBufferIndex, pPart->texture, cull, lighting, first, end, 0, 0 };
-                groups[groupCount++] = group;
-            }
-            GroundGroup &group = groups[g];
-            group.first = first < group.first ? first : group.first;
-            group.end = end > group.end ? end : group.end;
-            group.indexCount += pPart->indexCount;
-            GroundPart part = { pMesh, pPart, g };
+            const GroundMergePart part = { pMesh, pPart, pPart->pData, pPart->indexCount, first, end,
+                                           pMesh->vertexBufferIndex, pPart->texture, cull, lighting };
             parts[partCount++] = part;
         }
     }
-    if (groupCount == 0)
+    if (partCount == 0)
         return;
-    unsigned start = 0;
-    for (unsigned g = 0; g < groupCount; g++) {
-        groups[g].indexStart = start;
-        start += groups[g].indexCount;
-        groups[g].indexCount = 0;
+    // The groups of the frame before, where its parts were these.
+    if (!GroundMerge_Update(&s_groundMerge, parts, partCount)) {
+        for (i = 0; i < count; i++)
+            pMerged[i] = false;
+        return;
     }
-    for (unsigned p = 0; p < partCount; p++) {
-        const GroundPart &part = parts[p];
-        GroundGroup &group = groups[part.group];
-        const int base = part.pMesh->vertexOffset + part.pPart->minIndex - group.first;
-        unsigned short *pOut = &indices[group.indexStart + group.indexCount];
-        for (k = 0; k < part.pPart->indexCount; k++)
-            pOut[k] = (unsigned short)(part.pPart->pData[k] + base);
-        group.indexCount += part.pPart->indexCount;
+#ifdef OPENCMR2_DEV
+    if (++s_groundFrames == 600) {
+        Sys_Log("ground: the merge was made in %u of 600 frames and kept in %u (%u parts, %u groups in the last)",
+                s_groundMerge.made, s_groundMerge.kept, partCount, s_groundMerge.groupCount);
+        s_groundFrames = 0;
+        s_groundMerge.made = s_groundMerge.kept = 0;
     }
+#endif
+    const GroundMergeGroup *groups = s_groundMerge.groups;
+    const unsigned short *indices = s_groundMerge.indices;
+    const unsigned int groupCount = s_groundMerge.groupCount;
     const int lightingMode = Graphics_GetGeometryStateValue();
     bool lightingChanged = false;
     Graphics_SwitchAlphaBlendAndTest(0);
     for (unsigned g = 0; g < groupCount; g++) {
-        const GroundGroup &group = groups[g];
+        const GroundMergeGroup &group = groups[g];
         CGraphics::SetCullMode(group.cull);
         if (group.lighting >= 0) {
             Graphics_SetLightingMode(group.lighting);

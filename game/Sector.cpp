@@ -801,6 +801,7 @@ void Sector_CullGridAroundViewNode(SceneNode *pNode, void *pRect)
 
 void Sector_RebuildNodeLists(void);
 void Sector_ComputeBounds(void);
+void Game_ForgetGroundMerge(void);
 extern int g_unk0x0067f228;
 extern int g_finCount;
 extern FinRecord *g_finData;
@@ -823,6 +824,9 @@ void Sector_RebuildStageGrid(void)
     int halfSize;
     Sector **ppSector;
 
+    // PORT: the meshes of the stage before are not those of the ground merge
+    // of the frames (Game_DrawMergedGroundParts).
+    Game_ForgetGroundMerge();
     CGraphics::m_unk0x0072d56c = 1;
     g_sectorSize = abs(g_sectors[1]->x - g_sectors[0]->x);
     g_sectorHalfSize = FixMul(g_sectorSize, 0x8000);
