@@ -259,6 +259,9 @@ struct Stats {
 //                     variants made for the arguments keys save
 //   fade always       normal, with the fade also in the draws that are too
 //                     near for it: what the near test saves
+//   fade never        each draw with the program without the fade (the far
+//                     scenery then does not dissolve into the sky): what
+//                     the fade still costs
 //   depth pass always normal, with the depth pass also for the blended
 //                     draws whose alpha test passes for each pixel
 //   lookup only       the 3D draws stop before their first GXM call: with
@@ -275,8 +278,8 @@ struct Stats {
 //   two passes        such a draw has a depth pass with the discard and a
 //                     blended pass that writes each pixel: what the single
 //                     pass saves
-// The modes quarter, general, fade always, depth pass always, no depth pass
-// and single pass are not in the cycle: their questions are answered.
+// The modes quarter, general, depth pass always, no depth pass and single
+// pass are not in the cycle: their questions are answered.
 // Each line also has the CPU time of an Execute up to the present: the cost
 // of the draw calls without the wait for the GPU.
 enum ProbeMode {
@@ -285,7 +288,8 @@ enum ProbeMode {
     PROBE_SINGLE_PASS, PROBE_TWO_PASSES, PROBE_NO_BLENDED_3D, PROBE_NO_2D, PROBE_NO_QUADS, PROBE_NO_LAYERS,
     PROBE_NO_BILLBOARDS, PROBE_NO_PARTICLES, PROBE_NO_BLENDED_SKY, PROBE_NO_BLENDED_GROUND,
     PROBE_NO_BLENDED_OBJECTS, PROBE_NO_BLENDED_NODES, PROBE_SKY_WHITE, PROBE_SKY_OPAQUE, PROBE_TREES_WHITE,
-    PROBE_SKY_AS_RECORDED, PROBE_SKY_FULL, PROBE_SKY_HALF, PROBE_SKY_NO_STENCIL, PROBE_ALPHA_TEST_KEPT, PROBE_END
+    PROBE_SKY_AS_RECORDED, PROBE_SKY_FULL, PROBE_SKY_HALF, PROBE_SKY_NO_STENCIL, PROBE_ALPHA_TEST_KEPT,
+    PROBE_FADE_NEVER, PROBE_END
 };
 const char *const kProbeNames[PROBE_END] = { "off",         "normal",        "quarter", "tile",
                                              "no 3D",       "no depth pass", "general", "fade always",
@@ -295,7 +299,7 @@ const char *const kProbeNames[PROBE_END] = { "off",         "normal",        "qu
                                              "no blended sky", "no blended ground", "no blended objects",
                                              "no blended nodes", "sky white", "sky opaque", "trees white",
                                              "sky as recorded", "sky full", "sky half", "sky no stencil",
-                                             "alpha test kept" };
+                                             "alpha test kept", "fade never" };
 
 // The steps the profile mode times: an Execute before its draws, then the
 // steps of a 3D draw in Draw's order.
@@ -335,10 +339,15 @@ enum ProfileSection {
 // has none). "normal" draws it as the settings
 // ask. "alpha test kept" draws a draw without blending whose alpha test
 // passes for each pixel with the test, as recorded (normal: without it).
-// The mode "tile" left the cycle: "no 3D" gives the cost of the CPU.
-const int kProbeCycle[] = { PROBE_NORMAL,          PROBE_NO_3D,           PROBE_ALPHA_TEST_KEPT,
-                            PROBE_NO_BLENDED_3D,   PROBE_NO_BLENDED_SKY,  PROBE_SKY_AS_RECORDED,
-                            PROBE_SKY_FULL,        PROBE_SKY_HALF,        PROBE_SKY_NO_STENCIL };
+// The sky's modes left the cycle: the stretched sky saves 6 to 8 ms. The
+// cycle now splits a frame whose limit is the GPU: "tile" has the cost of
+// the CPU and of the vertices of each draw and almost no pixels, "no 3D"
+// the CPU alone, "no billboards" is without the trees, and "fade always"
+// and "fade never" give what the near test of the fade saves and what the
+// fade still costs.
+const int kProbeCycle[] = { PROBE_NORMAL,          PROBE_NO_3D,           PROBE_TILE,
+                            PROBE_NO_BLENDED_3D,   PROBE_NO_BLENDED_SKY,  PROBE_NO_BILLBOARDS,
+                            PROBE_FADE_ALWAYS,     PROBE_FADE_NEVER,      PROBE_ALPHA_TEST_KEPT };
 
 // The part whose blended 3D draws a mode leaves out, or -1.
 int ProbeBlendedPart(int mode)
@@ -1712,7 +1721,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
                                     : Gxm_EyeDistanceBound(range->box, &vertexUniforms[VU_WORLD_VIEW]);
                 known = true;
             }
-            const bool tooNear = known && reach < s.fadeStart;
+            const bool tooNear = (known && reach < s.fadeStart) || probe.mode == PROBE_FADE_NEVER;
             step(PROFILE_RANGE);
             if (tooNear)
                 resolved = Resolve(key & ~kFadeKeyBit, args, s, c.transformed);
