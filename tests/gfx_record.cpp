@@ -62,7 +62,14 @@ bool s_takesVideo;
 int s_videoFrames, s_finishes, s_releases;
 size_t s_commandsBeforeVideo;
 
+// An executor that copies the snapshots late (the threaded GXM executor):
+// the recorder's waits for those copies.
+bool s_lateSnapshots;
+int s_snapshotWaits;
+
 struct CaptureExecutor : GfxExecutor {
+    bool CopiesSnapshotsLate() const override { return s_lateSnapshots; }
+    void WaitForSnapshotCopies() override { s_snapshotWaits++; }
     bool SetVideoMode(int, int, bool) override { return true; }
     void SetFullscreen(bool) override {}
     void Execute(GfxFrame &frame, std::vector<GfxTexture *> &, GfxReadback &, bool, int, bool) override
@@ -1000,6 +1007,45 @@ int main()
         Gfx_Present(FALSE);
         REQUIRE(Draws() == 1 && !Draw(0).snapshot && Draw(0).buffer == NULL && s_frame.snapshots.empty());
         REQUIRE(Vertex3D(Draw(0), 0).x == 50.0f && Draw(0).boxHigh[0] == 50.0f);
+        // An executor that copies the snapshots after Execute returned: a
+        // lock of a buffer with a snapshot of the frame handed over waits for
+        // the copy, once; a lock of another buffer does not wait.
+        {
+            s_lateSnapshots = true;
+            s_snapshotWaits = 0;
+            GfxVertexBuffer *fresh = Gfx_CreateVertexBuffer(16);
+            GfxVertexBuffer *other = Gfx_CreateVertexBuffer(16);
+            Gfx_LockVertexBuffer(fresh);
+            Gfx_LockVertexBuffer(other);
+            Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, fresh, 0, 4, triangle, 3);
+            Gfx_Present(FALSE);
+            REQUIRE(Draws() == 1 && Draw(0).snapshot && s_snapshotWaits == 0);
+            Gfx_LockVertexBuffer(other);
+            REQUIRE(s_snapshotWaits == 0);
+            Gfx_LockVertexBuffer(fresh);
+            REQUIRE(s_snapshotWaits == 1);
+            Gfx_LockVertexBuffer(fresh);
+            REQUIRE(s_snapshotWaits == 1);
+            Gfx_DestroyVertexBuffer(other);
+            Gfx_DestroyVertexBuffer(fresh);
+            s_lateSnapshots = false;
+            for (int frame = 0; frame < 5; frame++)
+                Gfx_Present(FALSE);
+        }
+        // A streaming buffer that rests is drawn by reference and streams no
+        // more: a write of a part of it is a range lock, not a whole lock.
+        for (int frame = 0; frame < 4; frame++)
+            Gfx_Present(FALSE);
+        Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, mesh, 0, 4, triangle, 3);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && Draw(0).buffer == mesh && !Draw(0).snapshot && !mesh->streaming);
+        {
+            const uint32_t lockedBefore = mesh->lastLockFrame;
+            GfxVertex changed = mesh->vertices[2];
+            changed.x += 1.0f;
+            Gfx_WriteVertexBufferRange(mesh, 2, &changed, 1);
+            REQUIRE(mesh->lastLockFrame == lockedBefore && mesh->vertices[2].x == changed.x);
+        }
         Gfx_DestroyVertexBuffer(mesh);
         // An executor that does not take joined draws gets no snapshot.
         s_joins = false;

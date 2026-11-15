@@ -548,6 +548,16 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     uint32_t executeCount = 0;      // Execute calls (GxmVertexBuffer::snapshotExecute)
     // The snapshots that Prepare copied, for the ring in Execute.
     GxmSnapshotStage snapshotStage;
+    // With the threaded executor (SetSnapshotCopiesLate): the snapshots of
+    // Prepare, which CopySnapshots copies from the game's buffers into the
+    // ring on the worker. No copy into the stage on the game's thread.
+    struct LateSnapshot {
+        const void *source;
+        unsigned bytes;
+        unsigned *ringOffset;
+    };
+    std::vector<LateSnapshot> lateSnapshots;   // grows once
+    bool snapshotsLate = false;
 
     // Textures made or destroyed in this frame; in an earlier one, not logged yet.
     bool texturesChanged = false, texturesLogPending = false;
@@ -2203,7 +2213,36 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         stats.gameWaits.presentWait += times.presentWait;
         stats.gameWaits.flushWait += times.flushWait;
         stats.gameWaits.otherWait += times.otherWait;
+        stats.gameWaits.snapshotWait += times.snapshotWait;
         stats.expandMicros += times.expand;
+    }
+
+    void SetSnapshotCopiesLate(bool late) override { snapshotsLate = late; }
+
+    // The snapshots that Prepare left for the worker, into the ring.
+    void CopySnapshots(GfxFrame &) override
+    {
+        if (lateSnapshots.empty())
+            return;
+        const uint64_t entered = sceKernelGetProcessTimeWide();
+        unsigned total = 0;
+        for (const LateSnapshot &s : lateSnapshots)
+            total = ((total + GxmSnapshotStage::kAlign - 1) & ~(GxmSnapshotStage::kAlign - 1)) + s.bytes;
+        GxmFrameRing &ring = memory.FrameRing();
+        const unsigned base = ready ? ring.Alloc(total, GxmSnapshotStage::kAlign) : GxmFrameRing::kFull;
+        unsigned offset = 0;
+        for (const LateSnapshot &s : lateSnapshots) {
+            offset = (offset + GxmSnapshotStage::kAlign - 1) & ~(GxmSnapshotStage::kAlign - 1);
+            if (base == GxmFrameRing::kFull) {
+                *s.ringOffset = GxmFrameRing::kFull;
+            } else {
+                memcpy(ring.At(base + offset), s.source, s.bytes);
+                *s.ringOffset = base + offset;
+            }
+            offset += s.bytes;
+        }
+        lateSnapshots.clear();
+        stats.ringCopyMicros += (unsigned)(sceKernelGetProcessTimeWide() - entered);
     }
 
     // ---- frame execution ----
@@ -2257,7 +2296,10 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             if (snapshot.end > b->vertices.size())
                 continue;
             const unsigned bytes = (snapshot.end - snapshot.first) * (unsigned)sizeof(GfxVertex);
-            snapshotStage.Add(&b->vertices[snapshot.first], bytes, &g->snapshotOffset);
+            if (snapshotsLate)
+                lateSnapshots.push_back({ &b->vertices[snapshot.first], bytes, &g->snapshotOffset });
+            else
+                snapshotStage.Add(&b->vertices[snapshot.first], bytes, &g->snapshotOffset);
             stats.snapshotBytes += bytes;
         }
         stats.snapshotMicros += (unsigned)(sceKernelGetProcessTimeWide() - snapshotsStart);
@@ -2283,6 +2325,8 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     {
         if (!ready)
             return;
+        // The snapshots that the threaded executor did not copy yet.
+        CopySnapshots(frame);
         const uint64_t entered = sceKernelGetProcessTimeWide();
         // The snapshots of Prepare, then the frame's vertices and indices,
         // after those of its earlier Execute calls.
@@ -2621,10 +2665,11 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         // The game's thread: prepare and its wait for the worker. The worker:
         // the expand, execute (the ring copy in it) and the present's wait.
         Sys_Log("gxm: per frame ms: prepare parts: textures %.2f, vertex buffers %.2f, snapshots %.2f; game thread "
-                "waited for the worker %.2f at the present, %.2f at a flush, %.2f else, %.2f executes; worker: "
-                "batches spliced %.2f, ring copy %.2f, present wait %.2f",
+                "waited for the worker %.2f at the present, %.2f at a flush, %.2f for snapshots, %.2f else, %.2f "
+                "executes; worker: batches spliced %.2f, ring copy %.2f, present wait %.2f",
                 stats.textureMicros * msPerFrame, stats.bufferMicros * msPerFrame, stats.snapshotMicros * msPerFrame,
                 stats.gameWaits.presentWait * msPerFrame, stats.gameWaits.flushWait * msPerFrame,
+                stats.gameWaits.snapshotWait * msPerFrame,
                 stats.gameWaits.otherWait * msPerFrame, stats.executes / frames, stats.expandMicros * msPerFrame,
                 stats.ringCopyMicros * msPerFrame, stats.presentWaitMicros * msPerFrame);
         // The batch thread (core 1): the time of its jobs, and the waits for

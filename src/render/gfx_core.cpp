@@ -31,6 +31,10 @@ static inline uint8_t ScenePartNow()
     return Diagnostics::observer != nullptr ? (uint8_t)Diagnostics::observer->Part() : 0;
 }
 static void SettleBatches(GfxVertexBuffer *buffer, uint32_t first, uint32_t count);
+static void SettleSnapshotCopy(GfxVertexBuffer *buffer);
+// The recording whose snapshots the executor copies after Execute returned,
+// and has maybe not copied yet (0: none).
+static uint32_t s_snapshotFence;
 
 // Why the recorder runs the draws recorded so far in the middle of a frame.
 enum {
@@ -1042,7 +1046,13 @@ void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD 
     cmd.transformed = transformed;
     cmd.vertexCount = vertexCount;
     const bool rested = buffer != NULL && s_presentedFrames - buffer->lastLockFrame >= kStaticAfterFrames;
+    bool appended = false;  // the vertices were copied into the frame's data (the counter of the log)
     if (rested && !buffer->rangeLocks.Recent(firstVertex, vertexCount, s_presentedFrames)) {
+        // A buffer that rested is not streaming any more: its writes can be
+        // range locks again, and its boxes are kept. Nothing cleared it
+        // before, and a buffer that streamed once (the cars, the relit
+        // ground) made a whole lock of each later write.
+        buffer->streaming = false;
         cmd.buffer = buffer;
         cmd.firstVertexByte = firstVertex * (uint32_t)sizeof(GfxVertex);
         if (buffer->referencedRecord != s_record) {
@@ -1101,6 +1111,7 @@ void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD 
     } else {
         size_t stride = transformed ? sizeof(GfxTLVertex) : sizeof(GfxVertex);
         cmd.firstVertexByte = AppendVertices(vertices, vertexCount * stride, stride);
+        appended = true;
         if (box) {
             cmd.hasBox = true;
             if (knownBox != NULL) {
@@ -1138,7 +1149,7 @@ void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD 
     s_frame.commands.push_back(cmd);
 #if defined(VITA) && defined(OPENCMR2_DEV)
     g_sysVitaDrawCounts.commands++;
-    if (cmd.buffer == NULL)
+    if (appended)
         g_sysVitaDrawCounts.vertexBytes += vertexCount * (transformed ? sizeof(GfxTLVertex) : sizeof(GfxVertex));
 #endif
 }
@@ -1490,6 +1501,13 @@ static void Submit(bool present, int vsync, bool stretch)
     if (!s_threaded) {
         Gfx_WaitForBatchJobs(s_frame.batchSequence, 0);
         Gfx_SpliceSmallBatches(s_frame);
+    }
+    // The worker copies the snapshots of this recording after Execute
+    // returned: a write of one of their buffers waits for the copies.
+    if (s_executor->CopiesSnapshotsLate() && !s_frame.snapshots.empty()) {
+        for (const GfxSnapshot &snapshot : s_frame.snapshots)
+            snapshot.buffer->snapshotCopyRecord = s_record;
+        s_snapshotFence = s_record;
     }
     s_executor->Prepare(s_frame, s_textures, s_readback, present);
     s_executor->Execute(s_frame, s_textures, s_readback, present, vsync, stretch);
@@ -1905,6 +1923,17 @@ extern "C" void Gfx_DestroyVertexBuffer(GfxVertexBuffer *buffer)
 // jobs that read them are done (GfxSmallItem::buffer). The blocks of the
 // buffer have the numbers of those jobs. Most are done already: they run
 // while the game records.
+// Before the game writes a buffer: the copy of its snapshot that the worker
+// makes is done (GfxExecutor::CopiesSnapshotsLate). The worker copies them
+// first in its frame: the game seldom waits.
+static void SettleSnapshotCopy(GfxVertexBuffer *buffer)
+{
+    if (s_snapshotFence == 0 || buffer->snapshotCopyRecord != s_snapshotFence || s_executor == NULL)
+        return;
+    s_executor->WaitForSnapshotCopies();
+    s_snapshotFence = 0;
+}
+
 static void SettleBatches(GfxVertexBuffer *buffer, uint32_t first, uint32_t count)
 {
     const uint32_t latest = buffer->batchBlocks.Latest(first, count);
@@ -1918,6 +1947,7 @@ extern "C" GfxVertex *Gfx_LockVertexBuffer(GfxVertexBuffer *buffer)
 {
     if (buffer == NULL)
         return NULL;
+    SettleSnapshotCopy(buffer);
     SettleBatches(buffer, 0, (uint32_t)buffer->vertices.size());
     // Draws recorded this frame refer to the contents before this lock: run
     // them first. It is rare: buffers drawn by reference are rarely locked.
@@ -1951,6 +1981,7 @@ static bool RangeLockPossible(const GfxVertexBuffer *buffer, DWORD firstVertex, 
 // are recent.
 static void BeginRangeWrite(GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount)
 {
+    SettleSnapshotCopy(buffer);
     SettleBatches(buffer, firstVertex, vertexCount);
     // The draws recorded so far that refer to the GPU copy keep its
     // contents: the copy changes only with a patch. A patch of this frame
