@@ -18,6 +18,7 @@
 #define REQUIRE(x) do { if (!(x)) { fprintf(stderr, "failed line %d: %s\n", __LINE__, #x); return 1; } } while (0)
 
 extern "C" void Sys_Log(const char *, ...) {}
+extern "C" int Sys_GetOption(const char *, int fallback) { return fallback; }
 
 namespace {
 
@@ -92,6 +93,19 @@ struct SlowExecutor : GfxExecutor {
         destroyed++;
     }
     void DestroyVertexBuffer(GfxVertexBuffer *) override { Check(); }
+    // The snapshots (SetSnapshotCopiesLate): copied on the worker before the
+    // frame's Execute, some time after the caller went on.
+    std::atomic<bool> late{ false };
+    std::atomic<int> snapshotCopies{ 0 }, copiesOnCaller{ 0 }, copiesInExecute{ 0 };
+    void SetSnapshotCopiesLate(bool value) override { late = value; }
+    void CopySnapshots(GfxFrame &) override
+    {
+        if (std::this_thread::get_id() == caller)
+            copiesOnCaller++;
+        copiesInExecute += running ? 1 : 0;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        snapshotCopies++;
+    }
     bool JoinsDraws() const override { return true; }
     void ReadTexture(GfxTexture *) override { Check(); }
     // The frames of a video decoder: each call must meet no running frame.
@@ -254,6 +268,22 @@ int main()
     UntilRunning(*slow);
     threaded->ReleaseVideoMemory(nullptr);
     REQUIRE(slow->videoCalls == 3);
+
+    // The snapshots: the worker copies them first in its job; a wait for
+    // them returns after that copy and before the frame ends.
+    REQUIRE(slow->late && threaded->CopiesSnapshotsLate());
+    {
+        const int copiesBefore = slow->snapshotCopies, finishedBefore = slow->finished;
+        frame = FrameOf(1);
+        threaded->Execute(frame, textures, readback, false, false, false);
+        threaded->WaitForSnapshotCopies();
+        REQUIRE(slow->snapshotCopies == copiesBefore + 1 && slow->finished == finishedBefore);
+        REQUIRE(slow->copiesOnCaller == 0 && slow->copiesInExecute == 0);
+        // Another wait for the same frame returns at once.
+        threaded->WaitForSnapshotCopies();
+        threaded->Wait();
+        REQUIRE(slow->finished == finishedBefore + 1);
+    }
 
     // Each Execute called the wait of its own worker, which returned (else
     // the first frame would never have ended). A frame that runs when the

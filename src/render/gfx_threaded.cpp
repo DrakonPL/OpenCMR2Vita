@@ -12,6 +12,10 @@
 //    the recorder's thread while the worker is idle.
 //  - Each other call (a video mode, a texture or vertex buffer that goes, a
 //    read of a render target) waits for the worker first.
+//  - The snapshots of the frame's vertex buffers (GfxFrame::snapshots) are
+//    the exception: the worker copies them from the game's buffers first in
+//    its job, and the recorder waits for that (a fence) before the game
+//    writes one of those buffers ([video] worker_snapshots, 1 by default).
 //  - The small batches of the frame are draws when their jobs are done
 //    (gfx_batch_worker.h): the worker waits for them, then puts the draws
 //    in their place (Gfx_SpliceSmallBatches).
@@ -184,6 +188,54 @@ private:
 #endif
 };
 
+// A point in the worker's job that the making thread waits for: Arm before
+// the job starts, Signal on the worker, Wait on the making thread. It is
+// signalled when nothing is armed.
+class Fence {
+public:
+#ifdef VITA
+    Fence() { flag = sceKernelCreateEventFlag("gfx_snapshots", SCE_EVENT_WAITSINGLE, 1, nullptr); }
+    ~Fence()
+    {
+        if (flag >= 0)
+            sceKernelDeleteEventFlag(flag);
+    }
+    bool Ok() const { return flag >= 0; }
+    // sceKernelClearEventFlag keeps the bits of its pattern.
+    void Arm() { sceKernelClearEventFlag(flag, ~1u); }
+    void Signal() { sceKernelSetEventFlag(flag, 1); }
+    void Wait() { sceKernelWaitEventFlag(flag, 1, SCE_EVENT_WAITAND, nullptr, nullptr); }
+
+private:
+    SceUID flag;
+#else
+    bool Ok() const { return true; }
+    void Arm()
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        signalled = false;
+    }
+    void Signal()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            signalled = true;
+        }
+        changed.notify_all();
+    }
+    void Wait()
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        changed.wait(lock, [this] { return signalled; });
+    }
+
+private:
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool signalled = true;
+#endif
+};
+
 struct ThreadedExecutor : GfxExecutor {
     std::unique_ptr<GfxExecutor> inner;
     // The frame the worker runs, and how.
@@ -197,14 +249,26 @@ struct ThreadedExecutor : GfxExecutor {
     // For the logs (GfxExecutor::NoteWorkerTimes). The worker writes expand,
     // the game's thread the waits.
     GfxWorkerTimes times;
-    Worker worker;
+    // The snapshots: copied on the worker (late), behind the fence.
+    Fence snapshotsCopied;
+    bool late = false;
+    Worker worker;      // last: its thread starts when the rest is ready
 
-    explicit ThreadedExecutor(GfxExecutor *executor) : inner(executor), worker(&Run, this) {}
+    explicit ThreadedExecutor(GfxExecutor *executor) : inner(executor), worker(&Run, this)
+    {
+        late = snapshotsCopied.Ok() && Sys_GetOption("video.worker_snapshots", 1) != 0;
+        inner->SetSnapshotCopiesLate(late);
+    }
     ~ThreadedExecutor() override { worker.Wait(); }
 
     static void Run(void *data)
     {
         ThreadedExecutor *self = (ThreadedExecutor *)data;
+        // The snapshots first: the game can wait for them.
+        if (self->late) {
+            self->inner->CopySnapshots(self->frame);
+            self->snapshotsCopied.Signal();
+        }
         // The batch jobs of the frame run while the game records: most are
         // done by now.
         Gfx_WaitForBatchJobs(self->frame.batchSequence, 1);
@@ -250,7 +314,18 @@ struct ThreadedExecutor : GfxExecutor {
         present = presentFrame;
         vsync = vsyncFrame;
         stretch = stretchFrame;
+        if (late)
+            snapshotsCopied.Arm();
         worker.Start();
+    }
+    bool CopiesSnapshotsLate() const override { return late; }
+    void WaitForSnapshotCopies() override
+    {
+        if (!late || worker.OnWorker())
+            return;
+        const unsigned long long start = Micros();
+        snapshotsCopied.Wait();
+        times.snapshotWait += (unsigned)(Micros() - start);
     }
     void DestroyTexture(GfxTexture *texture) override
     {

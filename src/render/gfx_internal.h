@@ -101,6 +101,9 @@ struct GfxVertexBuffer {
     // copies its own vertices into the frame's data.
     bool streaming = false;
     uint32_t snapshotRecord = 0;    // the recording whose frame has a snapshot of it
+    // The recording whose snapshot of it the executor copies after Execute
+    // returned (GfxExecutor::CopiesSnapshotsLate).
+    uint32_t snapshotCopyRecord = 0;
     uint32_t snapshotIndex = 0;     // that snapshot in GfxFrame::snapshots
     // The parts that the game locked alone (Gfx_LockVertexBufferRange), for
     // an executor that takes joined draws: gfx_range_locks.h.
@@ -424,6 +427,7 @@ struct GfxWorkerTimes {
     // present, before an Execute in the middle of a frame (the recorder ran
     // the draws so far: a lock of what they use), and in other calls.
     unsigned presentWait = 0, flushWait = 0, otherWait = 0;
+    unsigned snapshotWait = 0;  // for the copy of a snapshot of a buffer that the game writes
     unsigned expand = 0;    // the worker's splice of the small batches of the last Execute
 };
 
@@ -470,6 +474,16 @@ struct GfxExecutor {
     // Completes the back buffer read the last presented frame started, when
     // the game asks for its pixels (Gfx_ReadBackBuffer).
     virtual void CollectReadback(GfxReadback &) {}
+    // The snapshots of a frame (GfxFrame::snapshots) are copied from the
+    // vertex buffers after Execute returned, on the worker of the threaded
+    // executor. The recorder then waits (WaitForSnapshotCopies) before the
+    // game writes a buffer of them.
+    virtual bool CopiesSnapshotsLate() const { return false; }
+    virtual void WaitForSnapshotCopies() {}
+    // For an inner executor: the threaded executor calls CopySnapshots on its
+    // worker, before Execute. Otherwise Prepare copies them.
+    virtual void SetSnapshotCopiesLate(bool) {}
+    virtual void CopySnapshots(GfxFrame &) {}
 };
 
 // A text for the logs: what the recorder did with the small 3D draws since
