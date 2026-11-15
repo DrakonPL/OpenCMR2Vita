@@ -62,7 +62,8 @@ void Gfx_RunBatchJob(const GfxBatchJob &job)
         if (data.run != kNoRun) {
             GfxCommand &last = data.draws[data.run].draw;
             if (last.textures[0] == texture && last.vertexCount + count <= kGfxJoinedVertices &&
-                last.indexCount % 3 == 0) {
+                last.indexCount % 3 == 0 &&
+                Gfx_FadeSideJoins(job.fadeStart, last.reach, reach, &data.runNearTail)) {
                 data.vertices.insert(data.vertices.end(), v, v + count);
                 for (uint32_t i = 0; i < item.indexCount; i++)
                     data.drawIndices.push_back((uint16_t)(indices[i] + last.vertexCount));
@@ -101,6 +102,7 @@ void Gfx_RunBatchJob(const GfxBatchJob &job)
         draw.reach = reach;
         data.draws.push_back(made);
         data.run = data.draws.size() - 1;
+        data.runNearTail = 0;
     }
 }
 

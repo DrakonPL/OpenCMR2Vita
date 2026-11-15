@@ -5,8 +5,14 @@
 // parts in view are the same as in the frame before in most frames (85% in
 // the stage probe): the groups and their indices are then those of the
 // frame before. A new list of parts makes them again, with a table for the
-// group of a part. No game state here: tests/ground_merge.cpp checks it on
-// the PC against a merge that is made again each time.
+// group of a part.
+// A part that is nearer than the start of the distance fade when the groups
+// are made goes into a group of such parts (FadeReach.h): the renderer draws
+// that group without the fade. Each draw comes with the reach of its parts
+// as they are now, so a group that stays while the view moves is right: the
+// renderer draws it with the fade when one of its parts reaches the start.
+// No game state here: tests/ground_merge.cpp checks it on the PC against a
+// merge that is made again each time.
 #ifndef OPENCMR2_GROUND_MERGE_H
 #define OPENCMR2_GROUND_MERGE_H
 
@@ -22,14 +28,23 @@ struct GroundMergePart {
     int indexCount;
     int first, end;             // its vertices in the vertex buffer
     int buffer, texture, cull, lighting;
+    // Whether each of its vertices is nearer than the start of the distance
+    // fade, and how far from the eye its farthest one can be (below zero:
+    // not known). They change with the view: a part with others is the same
+    // part.
+    int beforeFade;
+    float reach;
 };
 
-// The parts of one vertex buffer, texture, cull mode and lighting: one draw.
-// Its indices are relative to first.
+// The parts of one vertex buffer, texture, cull mode, lighting and side of
+// the start of the fade: one draw. Its indices are relative to first.
+// reach: the farthest of its parts as they are now (below zero: not known).
 struct GroundMergeGroup {
     int buffer, texture, cull, lighting;
     int first, end;
     unsigned indexStart, indexCount;
+    int beforeFade;
+    float reach;
 };
 
 struct GroundMerge {
@@ -62,6 +77,19 @@ inline void GroundMerge_Forget(GroundMerge *m)
     m->groupCount = 0;
 }
 
+// The reach of each group from those of its parts (the parts of the groups,
+// as the view has them now).
+inline void GroundMerge_SetReaches(GroundMerge *m, const GroundMergePart *parts, unsigned count)
+{
+    for (unsigned g = 0; g < m->groupCount; g++)
+        m->groups[g].reach = 0.0f;
+    for (unsigned i = 0; i < count; i++) {
+        GroundMergeGroup &group = m->groups[m->partGroup[i]];
+        if (group.reach >= 0.0f)
+            group.reach = parts[i].reach < 0.0f ? -1.0f : parts[i].reach > group.reach ? parts[i].reach : group.reach;
+    }
+}
+
 // The groups and the indices for the parts in view, in their order: those
 // that are there, if the parts are the same, else made again. The groups
 // are in the order of their first parts, and the indices of a group in the
@@ -80,6 +108,7 @@ inline bool GroundMerge_Update(GroundMerge *m, const GroundMergePart *parts, uns
             ;
         if (i == count) {
             m->kept++;
+            GroundMerge_SetReaches(m, parts, count);
             return true;
         }
     }
@@ -89,6 +118,8 @@ inline bool GroundMerge_Update(GroundMerge *m, const GroundMergePart *parts, uns
     unsigned indexCount = 0;
     for (i = 0; i < count; i++) {
         const GroundMergePart &p = parts[i];
+        // The two groups of a texture (the sides of the fade) start at one
+        // place of the table: the second is one step on.
         unsigned h = (unsigned)p.buffer * 2654435761u ^ (unsigned)p.texture * 2246822519u ^
                      (unsigned)p.cull * 3266489917u ^ (unsigned)p.lighting * 668265263u;
         h = (h ^ h >> 15) & mask;
@@ -101,14 +132,15 @@ inline bool GroundMerge_Update(GroundMerge *m, const GroundMergePart *parts, uns
                 }
                 g = m->groupCount++;
                 m->table[h] = (unsigned short)(g + 1);
-                const GroundMergeGroup group = { p.buffer, p.texture, p.cull, p.lighting, p.first, p.end, 0, 0 };
+                const GroundMergeGroup group = { p.buffer, p.texture, p.cull, p.lighting, p.first, p.end, 0, 0,
+                                                 p.beforeFade, 0.0f };
                 m->groups[g] = group;
                 break;
             }
             g = m->table[h] - 1u;
             const GroundMergeGroup &group = m->groups[g];
             if (group.buffer == p.buffer && group.texture == p.texture && group.cull == p.cull &&
-                group.lighting == p.lighting)
+                group.lighting == p.lighting && group.beforeFade == p.beforeFade)
                 break;
         }
         GroundMergeGroup &group = m->groups[g];
@@ -141,6 +173,7 @@ inline bool GroundMerge_Update(GroundMerge *m, const GroundMergePart *parts, uns
     }
     m->partCount = count;
     m->made++;
+    GroundMerge_SetReaches(m, parts, count);
     return true;
 }
 

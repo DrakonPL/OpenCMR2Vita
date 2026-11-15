@@ -34,6 +34,7 @@ int s_cullDraws = 0;
 int s_alphaBlend = 1, s_alphaTest = 1;     // video.alpha_blend, video.alpha_test
 int s_perfStats = 1;                        // video.perf_stats
 int s_skyHalf = 1;                          // video.sky_half
+int s_fadeSplit = 1;                        // video.fade_split
 int Platform_GetSettingInt(const char *key, int value)
 {
     if (strcmp(key, "video.perf_stats") == 0)
@@ -44,6 +45,8 @@ int Platform_GetSettingInt(const char *key, int value)
         return s_alphaTest;
     if (strcmp(key, "video.sky_half") == 0)
         return s_skyHalf;
+    if (strcmp(key, "video.fade_split") == 0)
+        return s_fadeSplit;
     return strcmp(key, "video.cull_draws") == 0 ? s_cullDraws : value;
 }
 const char *Platform_GetSetting(const char *, const char *value) { return value; }
@@ -625,7 +628,88 @@ int main()
             REQUIRE(Draw(0).hasBox && Draw(0).boxLow[2] == 60.0f && Draw(0).boxHigh[2] == 300.0f);
             Gfx_SetTexture(0, oak);
         }
+        // A run stays on one side of the start of the fade: the executor
+        // draws the near quads, the largest on the screen, without the fade.
+        // A quad at or past the start does not join a run before it.
+        Billboard(2.0f, 10.0f, 30.0f);
+        Billboard(2.0f, 10.0f, 40.0f);
+        Billboard(2.0f, 10.0f, 150.0f);
+        Billboard(2.0f, 10.0f, 160.0f);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 2 && Draw(0).vertexCount == 8 && Draw(1).vertexCount == 8);
+        REQUIRE(Draw(0).reach < 100.0f && Draw(1).reach >= 100.0f);
+        // Near quads join a run past the start, eight of them after its last
+        // far quad (near and far quads that take turns stay one run). The
+        // ninth starts a run of near quads.
+        Billboard(2.0f, 10.0f, 150.0f);
+        for (int i = 0; i < 11; i++)
+            Billboard(2.0f, 10.0f, 30.0f + (float)i);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 2 && Draw(0).vertexCount == 36 && Draw(1).vertexCount == 12);
+        REQUIRE(Draw(0).reach >= 100.0f && Draw(1).reach < 100.0f);
+        // A far quad starts the count again.
+        for (int k = 0; k < 3; k++) {
+            Billboard(2.0f, 10.0f, 150.0f);
+            for (int i = 0; i < 8; i++)
+                Billboard(2.0f, 10.0f, 30.0f);
+        }
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && Draw(0).vertexCount == 108);
+        // video.fade_split = 0: the runs join across the start, as before.
+        s_fadeSplit = 0;
+        Gfx_Present(FALSE);
+        Billboard(2.0f, 10.0f, 30.0f);
+        Billboard(2.0f, 10.0f, 150.0f);
+        for (int i = 0; i < 11; i++)
+            Billboard(2.0f, 10.0f, 30.0f);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && Draw(0).vertexCount == 52 && Draw(0).reach >= 100.0f);
+        s_fadeSplit = 1;
+        Gfx_Present(FALSE);
+        {
+            // What the game asks for its groups: the world matrix times the
+            // view matrix, and the start. None with the setting off, with no
+            // fade, and for an executor that takes no joined draws.
+            float worldView[16], start = 0.0f;
+            GfxMatrix world = Identity();
+            world._22 = 2.0f;
+            world._41 = 7.0f;
+            Gfx_SetTransform(GFX_TRANSFORM_WORLD, &world);
+            // A view that turns about y and moves.
+            GfxMatrix before, view = Identity();
+            Gfx_GetTransform(GFX_TRANSFORM_VIEW, &before);
+            view._11 = view._33 = 0.0f;
+            view._13 = 1.0f;
+            view._31 = -1.0f;
+            view._41 = 3.0f;
+            view._43 = 5.0f;
+            Gfx_SetTransform(GFX_TRANSFORM_VIEW, &view);
+            REQUIRE(Gfx_GetFadeView(worldView, &start) && start == 100.0f);
+            const float product[16] = { 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f,
+                                        -1.0f, 0.0f, 0.0f, 0.0f, 3.0f, 0.0f, 12.0f, 1.0f };
+            for (int i = 0; i < 16; i++)
+                REQUIRE(worldView[i] == product[i]);
+            Gfx_SetTransform(GFX_TRANSFORM_VIEW, &before);
+            s_fadeSplit = 0;
+            Gfx_Present(FALSE);
+            REQUIRE(!Gfx_GetFadeView(worldView, &start));
+            s_fadeSplit = 1;
+            Gfx_Present(FALSE);
+            s_joins = false;
+            REQUIRE(!Gfx_GetFadeView(worldView, &start));
+            s_joins = true;
+            Gfx_SetDistanceFade(0.0f, 0.0f);
+            REQUIRE(!Gfx_GetFadeView(worldView, &start));
+            Gfx_SetDistanceFade(100.0f, 200.0f);
+            world = Identity();
+            Gfx_SetTransform(GFX_TRANSFORM_WORLD, &world);
+        }
         Gfx_SetDistanceFade(0.0f, 0.0f);
+        // No fade: a far quad joins a run of near ones.
+        Billboard(2.0f, 10.0f, 30.0f);
+        Billboard(2.0f, 10.0f, 150.0f);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && Draw(0).vertexCount == 8);
 
         // A second stage that is off reads no texture: its texture does not
         // keep a quad out of the atlas.
@@ -884,6 +968,17 @@ int main()
         REQUIRE(Draw(0).boxLow[0] == 2.0f && Draw(0).boxHigh[0] == 13.0f);
         REQUIRE(Draw(1).boxLow[0] == 6.0f && Draw(1).boxHigh[0] == 13.0f);
         REQUIRE(Draw(2).boxLow[0] == 0.0f && Draw(2).boxHigh[0] == 3.0f);
+        // A draw that comes with its reach (the merged parts of the ground)
+        // has it, with the box of its range. The draw after it has none.
+        Gfx_DrawIndexedPrimitiveVBReach(GFX_TRIANGLELIST, mesh, 2, 12, triangle, 3, 77.5f);
+        Gfx_SetAlphaRef(8);
+        Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, mesh, 2, 12, triangle, 3);
+        Gfx_SetAlphaRef(9);
+        Gfx_DrawIndexedPrimitiveVBReach(GFX_TRIANGLELIST, mesh, 2, 12, triangle, 3, -1.0f);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 3 && Draw(0).snapshot && Draw(0).hasBox && Draw(0).reach == 77.5f);
+        REQUIRE(Draw(0).boxLow[0] == 2.0f && Draw(0).boxHigh[0] == 13.0f);
+        REQUIRE(Draw(1).hasBox && Draw(1).reach < 0.0f && Draw(2).hasBox && Draw(2).reach < 0.0f);
         // A lock after a draw of the frame runs the draws first: the
         // executor copies the snapshot before the game changes the buffer.
         // The buffer is streaming from then on: each draw copies its range.
@@ -1626,6 +1721,46 @@ int main()
         // Both quads from the atlas, joined: the first as it was.
         REQUIRE(Draws() == 1 && Draw(0).vertexCount == 8);
         REQUIRE(Vertex3D(Draw(0), 1).x == worldX(0.5f) && Vertex3D(Draw(0), 5).x == worldX(0.4f));
+        // The runs of a batch stay on one side of the start of the distance
+        // fade, as those of small draws made alone: a near quad, a far one
+        // with the eight near ones after it, two near ones, and a far one
+        // with three near ones.
+        {
+            GfxMatrix farWorld = m[0];
+            farWorld._43 = 50.0f;
+            const GfxBatchDraw nearQuad = two[0], farQuad = { &farWorld, oak, buffer, 0, 4, quad, 6 };
+            std::vector<GfxBatchDraw> trees = { nearQuad, farQuad };
+            trees.insert(trees.end(), 10, nearQuad);
+            trees.push_back(farQuad);
+            trees.insert(trees.end(), 3, nearQuad);
+            s_cullDraws = 0;
+            Gfx_Present(FALSE);
+            start();
+            Gfx_SetDistanceFade(10.0f, 20.0f);
+            Gfx_DrawBatch(trees.data(), (DWORD)trees.size());
+            Gfx_Present(FALSE);
+            REQUIRE(Draws() == 4 && Draw(0).vertexCount == 4 && Draw(1).vertexCount == 36);
+            REQUIRE(Draw(2).vertexCount == 8 && Draw(3).vertexCount == 16);
+            REQUIRE(Draw(0).reach < 10.0f && Draw(1).reach >= 10.0f && Draw(2).reach < 10.0f && Draw(3).reach >= 10.0f);
+            // video.fade_split = 0, and no fade (an end that is not past
+            // the start): one run.
+            s_fadeSplit = 0;
+            Gfx_Present(FALSE);
+            start();
+            Gfx_DrawBatch(trees.data(), (DWORD)trees.size());
+            Gfx_Present(FALSE);
+            REQUIRE(Draws() == 1 && Draw(0).vertexCount == 64);
+            s_fadeSplit = 1;
+            Gfx_Present(FALSE);
+            start();
+            Gfx_SetDistanceFade(10.0f, 10.0f);
+            Gfx_DrawBatch(trees.data(), (DWORD)trees.size());
+            Gfx_Present(FALSE);
+            REQUIRE(Draws() == 1 && Draw(0).vertexCount == 64);
+            Gfx_SetDistanceFade(0.0f, 0.0f);
+            s_cullDraws = 1;
+            Gfx_Present(FALSE);
+        }
         // The same with the batch jobs on a thread of their own: the lock
         // waits for the job that reads the vertices. 4,000 draws in one job,
         // so that it runs for some time.
@@ -1860,6 +1995,7 @@ int main()
     // from its GPU copy rested since its last lock (kStaticAfterFrames).
     {
         s_joins = false;
+        const WORD kRestedTriangle[3] = { 0, 1, 2 };
         const auto rest = [] {
             for (int i = 0; i < 5; i++)
                 Gfx_Present(FALSE);
@@ -1878,6 +2014,29 @@ int main()
         Gfx_Present(FALSE);
         REQUIRE(Draws() == 1 && Draw(0).buffer == mesh && Draw(0).vertexAlphaKnown);
         REQUIRE(Draw(0).vertexAlpha[0] == 0xff && Draw(0).vertexAlpha[1] == 0xf0);
+        // A rested buffer, for an executor that takes joined draws: a draw
+        // with its reach has it and the box of its range (here without the
+        // view test, which finds the box otherwise). A draw without has
+        // neither.
+        {
+            s_joins = true;
+            GfxVertexBuffer *ground = Gfx_CreateVertexBuffer(64);
+            GfxVertex *g = Gfx_LockVertexBuffer(ground);
+            for (int i = 0; i < 64; i++)
+                g[i].x = (float)i;
+            Gfx_UnlockVertexBuffer(ground);
+            rest();
+            Gfx_DrawIndexedPrimitiveVBReach(GFX_TRIANGLELIST, ground, 4, 60, kRestedTriangle, 3, 12.25f);
+            Gfx_SetAlphaRef(2);
+            Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, ground, 4, 60, kRestedTriangle, 3);
+            Gfx_Present(FALSE);
+            REQUIRE(Draws() == 2 && Draw(0).buffer == ground && !Draw(0).snapshot && Draw(0).hasBox);
+            REQUIRE(Draw(0).reach == 12.25f && Draw(0).boxLow[0] == 4.0f && Draw(0).boxHigh[0] == 63.0f);
+            REQUIRE(Draw(1).buffer == ground && !Draw(1).snapshot && !Draw(1).hasBox && Draw(1).reach < 0.0f);
+            Gfx_SetAlphaRef(0);
+            Gfx_DestroyVertexBuffer(ground);
+            s_joins = false;
+        }
         // A lock that lowers a vertex outside the draw: the buffer's least
         // alpha at the next submit.
         v = Gfx_LockVertexBuffer(mesh);

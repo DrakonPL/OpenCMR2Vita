@@ -1,7 +1,9 @@
 // The merge of the ground parts of a frame, kept from frame to frame
 // (game/GroundMerge.h): the same groups and indices as a merge that is made
 // again each time, kept while the parts are the same, made again when a
-// part differs in anything.
+// part differs in anything. The parts before the start of the distance fade
+// have groups of their own, and each group has the reach of its parts as
+// they are now.
 
 #include "GroundMerge.h"
 
@@ -27,26 +29,35 @@ struct Reference {
     std::vector<unsigned short> indices;
 };
 
-Reference MergeAgain(const std::vector<GroundMergePart> &parts)
+// sides: the parts as they were when the groups were made (the side of the
+// fade of each), where the merge was kept since. The reaches are those of
+// parts.
+Reference MergeAgain(const std::vector<GroundMergePart> &parts, const std::vector<GroundMergePart> *sides = nullptr)
 {
     Reference r;
     std::vector<unsigned> partGroup;
-    for (const GroundMergePart &p : parts) {
+    for (size_t i = 0; i < parts.size(); i++) {
+        const GroundMergePart &p = parts[i];
+        const int beforeFade = sides != nullptr ? (*sides)[i].beforeFade : p.beforeFade;
         unsigned g;
         for (g = 0; g < r.groups.size(); g++) {
             const GroundMergeGroup &group = r.groups[g];
             if (group.buffer == p.buffer && group.texture == p.texture && group.cull == p.cull &&
-                group.lighting == p.lighting)
+                group.lighting == p.lighting && group.beforeFade == beforeFade)
                 break;
         }
         if (g == r.groups.size()) {
-            const GroundMergeGroup group = { p.buffer, p.texture, p.cull, p.lighting, p.first, p.end, 0, 0 };
+            const GroundMergeGroup group = { p.buffer, p.texture, p.cull, p.lighting, p.first, p.end, 0, 0,
+                                             beforeFade, 0.0f };
             r.groups.push_back(group);
         }
         GroundMergeGroup &group = r.groups[g];
         group.first = p.first < group.first ? p.first : group.first;
         group.end = p.end > group.end ? p.end : group.end;
         group.indexCount += (unsigned)p.indexCount;
+        // The farthest part, and not known where one part is not.
+        if (group.reach >= 0.0f)
+            group.reach = p.reach < 0.0f ? -1.0f : p.reach > group.reach ? p.reach : group.reach;
         partGroup.push_back(g);
     }
     unsigned start = 0;
@@ -74,7 +85,8 @@ bool Same(const GroundMerge &m, const Reference &r)
     for (unsigned g = 0; g < m.groupCount; g++) {
         const GroundMergeGroup &a = m.groups[g], &b = r.groups[g];
         if (a.buffer != b.buffer || a.texture != b.texture || a.cull != b.cull || a.lighting != b.lighting ||
-            a.first != b.first || a.end != b.end || a.indexStart != b.indexStart || a.indexCount != b.indexCount)
+            a.first != b.first || a.end != b.end || a.indexStart != b.indexStart || a.indexCount != b.indexCount ||
+            a.beforeFade != b.beforeFade || a.reach != b.reach)
             return false;
         total += a.indexCount;
     }
@@ -110,6 +122,9 @@ struct Stage {
             p.texture = (int)(Next() % (unsigned)textures);
             p.cull = 1 + (int)(Next() % 2);
             p.lighting = (int)(Next() % 3) - 1;
+            // The fade starts at 400. Some parts have no reach.
+            p.reach = Next() % 10 == 0 ? -1.0f : (float)(Next() % 8000) * 0.1f;
+            p.beforeFade = p.reach >= 0.0f && p.reach < 400.0f ? 1 : 0;
             all.push_back(p);
         }
     }
@@ -178,6 +193,43 @@ int main()
         REQUIRE(s_merge.made == madeBefore + 1 && Same(s_merge, MergeAgain(other)));
     }
 
+    // The parts on the two sides of the fade's start are groups of their
+    // own, and a group has the reach of its farthest part: not known where
+    // one of its parts has none.
+    {
+        unsigned short three[3] = { 0, 1, 2 };
+        const GroundMergePart a = { &stage, &stage, three, 3, 0, 3, 0, 5, 1, 0, 1, 120.0f };
+        const GroundMergePart b = { &stage, &stage, three, 3, 8, 11, 0, 5, 1, 0, 0, 480.0f };
+        const GroundMergePart c = { &stage, &stage, three, 3, 16, 19, 0, 5, 1, 0, 1, 250.0f };
+        const GroundMergePart d = { &stage, &stage, three, 3, 24, 27, 0, 5, 1, 0, 0, -1.0f };
+        std::vector<GroundMergePart> four = { a, b, c, d };
+        REQUIRE(GroundMerge_Update(&s_merge, four.data(), 4) && s_merge.groupCount == 2);
+        REQUIRE(s_merge.groups[0].beforeFade == 1 && s_merge.groups[0].reach == 250.0f);
+        REQUIRE(s_merge.groups[0].first == 0 && s_merge.groups[0].end == 19 && s_merge.groups[0].indexCount == 6);
+        REQUIRE(s_merge.groups[1].beforeFade == 0 && s_merge.groups[1].reach == -1.0f);
+        REQUIRE(s_merge.groups[1].first == 8 && s_merge.groups[1].end == 27 && s_merge.groups[1].indexCount == 6);
+        REQUIRE(Same(s_merge, MergeAgain(four)));
+        // The view moves: the parts are the same, so the groups stay, with
+        // the reaches of now. A part of the near group that is far now
+        // makes its group far for the renderer, with no new groups.
+        const std::vector<GroundMergePart> made = four;
+        const unsigned madeBefore = s_merge.made;
+        four[0].reach = 130.0f;
+        four[1].reach = 300.0f;
+        four[1].beforeFade = 1;
+        four[2].reach = 410.0f;
+        four[2].beforeFade = 0;
+        four[3].reach = 600.0f;
+        REQUIRE(GroundMerge_Update(&s_merge, four.data(), 4) && s_merge.made == madeBefore);
+        REQUIRE(s_merge.groupCount == 2 && s_merge.groups[0].beforeFade == 1 && s_merge.groups[0].reach == 410.0f);
+        REQUIRE(s_merge.groups[1].reach == 600.0f && Same(s_merge, MergeAgain(four, &made)));
+        // Made again (a part goes): the groups by the sides of now.
+        four.pop_back();
+        REQUIRE(GroundMerge_Update(&s_merge, four.data(), 3) && s_merge.made == madeBefore + 1);
+        REQUIRE(s_merge.groupCount == 2 && s_merge.groups[0].reach == 300.0f && s_merge.groups[0].indexCount == 6);
+        REQUIRE(s_merge.groups[1].reach == 410.0f && Same(s_merge, MergeAgain(four)));
+    }
+
     // After a stage went: made again, also for the same parts.
     REQUIRE(GroundMerge_Update(&s_merge, view.data(), (unsigned)view.size()));
     unsigned madeBefore = s_merge.made;
@@ -190,13 +242,23 @@ int main()
         Stage s(1 + Next() % 900, 1 + (int)(Next() % 200), 1 + (int)(Next() % 4));
         GroundMerge_Forget(&s_merge);
         std::vector<GroundMergePart> now = s.View(30 + Next() % 70);
+        std::vector<GroundMergePart> sides = now;
         for (int frame = 0; frame < 30; frame++) {
             const bool fresh = Next() % 4 == 0;
             const unsigned made = s_merge.made, kept = s_merge.kept;
-            if (fresh)
+            if (fresh) {
                 now = s.View(30 + Next() % 70);
+            } else {
+                // The view moves: other reaches, and other sides of the fade.
+                for (GroundMergePart &p : now) {
+                    p.reach = Next() % 10 == 0 ? -1.0f : (float)(Next() % 8000) * 0.1f;
+                    p.beforeFade = p.reach >= 0.0f && p.reach < 400.0f ? 1 : 0;
+                }
+            }
+            if (fresh || frame == 0)
+                sides = now;
             REQUIRE(GroundMerge_Update(&s_merge, now.data(), (unsigned)now.size()));
-            REQUIRE(Same(s_merge, MergeAgain(now)));
+            REQUIRE(Same(s_merge, MergeAgain(now, &sides)));
             if (!fresh && frame > 0)
                 REQUIRE(s_merge.kept == kept + 1 && s_merge.made == made);
         }

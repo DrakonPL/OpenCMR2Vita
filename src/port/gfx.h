@@ -394,6 +394,13 @@ BOOL Gfx_GetRangeBox(GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCou
 /* A number of the buffer that changes when a lock or a write can have
    changed a position: a box that the caller keeps is good while it stays. */
 DWORD Gfx_GetPositionSerial(GfxVertexBuffer *buffer);
+/* The distance fade, for a caller that groups its draws by its start.
+   worldView: the world matrix times the view matrix that are set (16
+   numbers, a row-vector matrix). start: the distance from the eye where the
+   fade starts. FALSE: no fade is set, or the renderer draws all distances
+   with one program (also the setting video.fade_split = 0). The caller then
+   does not group. */
+BOOL Gfx_GetFadeView(float worldView[16], float *start);
 /* Whether the game draws the ground parts of the visible sectors together,
    one draw for each vertex buffer and texture (the setting
    video.merge_ground; on by default where each draw costs much CPU time,
@@ -402,6 +409,13 @@ BOOL Gfx_MergesGroundDraws(void);
 /* Indices are relative to firstVertex. */
 void Gfx_DrawIndexedPrimitiveVB(int primitive, GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount,
                                 const WORD *indices, DWORD indexCount);
+/* The same, from a caller that knows how far its vertices are. reach: no
+   vertex that the indices use is farther from the eye, after the world and
+   view matrices. The renderer then draws without the distance fade where
+   the reach is below its start (the fade changes no pixel there). Below
+   zero: not known, as Gfx_DrawIndexedPrimitiveVB. */
+void Gfx_DrawIndexedPrimitiveVBReach(int primitive, GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount,
+                                     const WORD *indices, DWORD indexCount, float reach);
 void Gfx_DrawPrimitive(int primitive, const GfxVertex *vertices, DWORD vertexCount);
 void Gfx_DrawIndexedPrimitive(int primitive, const GfxVertex *vertices, DWORD vertexCount, const WORD *indices,
                               DWORD indexCount);
