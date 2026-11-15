@@ -118,8 +118,13 @@ void main(
 
     vDiffuse = diffuse;
     vSpecular = specular;
-    vTex0 = TexCoord(texCoord.x, texCoord.z, MATRIX(VU_TEXTURE_MATRIX0), aTex0, aTex1, eye.xyz, n);
-    vTex1 = TexCoord(texCoord.y, texCoord.w, MATRIX(VU_TEXTURE_MATRIX1), aTex0, aTex1, eye.xyz, n);
+    float2 tex1 = aTex1;
+    if (fogFlags.w > 0.5) {
+        const float4 m = float4((aPosition + aNormal) * 0.5, 1.0);
+        tex1 = float2(dot(m, ROW(VU_TEX_GEN1)), dot(m, ROW(VU_TEX_GEN1 + 1)));
+    }
+    vTex0 = TexCoord(texCoord.x, texCoord.z, MATRIX(VU_TEXTURE_MATRIX0), aTex0, tex1, eye.xyz, n);
+    vTex1 = TexCoord(texCoord.y, texCoord.w, MATRIX(VU_TEXTURE_MATRIX1), aTex0, tex1, eye.xyz, n);
     float fog = fogFlags.z > 0.5 ? color2.a : 1.0;
     if (fogFlags.x > 0.5) {
         const float4 fogParams = ROW(VU_FOG_PARAMS);

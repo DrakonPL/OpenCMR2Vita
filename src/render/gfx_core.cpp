@@ -772,6 +772,7 @@ void CountChangedParts()
     PART(CHANGED_MATERIAL, SAME(material));
     PART(CHANGED_LIGHTING, a.lighting == b.lighting && a.ambient == b.ambient && a.specular == b.specular &&
                                a.localViewer == b.localViewer && a.normalizeNormals == b.normalizeNormals &&
+                               a.texGen1 == b.texGen1 && SAME(texGen1Rows) &&
                                a.colorVertex == b.colorVertex && a.diffuseSource == b.diffuseSource &&
                                a.specularSource == b.specularSource && a.ambientSource == b.ambientSource &&
                                a.emissiveSource == b.emissiveSource);
@@ -1782,6 +1783,18 @@ BOOL_SETTER(Gfx_SetLighting, lighting)
 BOOL_SETTER(Gfx_SetSpecular, specular)
 BOOL_SETTER(Gfx_SetLocalViewer, localViewer)
 BOOL_SETTER(Gfx_SetNormalizeNormals, normalizeNormals)
+
+extern "C" void Gfx_SetTexCoord1Generation(const float rows[8])
+{
+    Set<bool>(s_state.texGen1, rows != NULL);
+    float value[2][4] = {};
+    if (rows != NULL)
+        memcpy(value, rows, sizeof(value));
+    if (memcmp(s_state.texGen1Rows, value, sizeof(value)) != 0) {
+        memcpy(s_state.texGen1Rows, value, sizeof(value));
+        Touch();
+    }
+}
 BOOL_SETTER(Gfx_SetColorVertex, colorVertex)
 BOOL_SETTER(Gfx_SetFog, fog)
 

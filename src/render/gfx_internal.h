@@ -161,6 +161,9 @@ struct GfxDrawState {
     bool specular = false;
     bool localViewer = true;
     bool normalizeNormals = false;
+    // Gfx_SetTexCoord1Generation: the rows of u1 and v1 when texGen1 is set.
+    bool texGen1 = false;
+    float texGen1Rows[2][4] = {};
     bool colorVertex = true;
     int diffuseSource = GFX_MCS_COLOR1, specularSource = GFX_MCS_COLOR2;
     int ambientSource = GFX_MCS_MATERIAL, emissiveSource = GFX_MCS_MATERIAL;

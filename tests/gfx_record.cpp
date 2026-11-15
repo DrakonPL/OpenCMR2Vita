@@ -847,6 +847,15 @@ int main()
             [] { Gfx_SetSpecular(TRUE); },
             [] { Gfx_SetLocalViewer(FALSE); },
             [] { Gfx_SetNormalizeNormals(TRUE); },
+            [] {
+                const float rows[8] = { 0.25f, 0.0f, 0.5f, 0.5f, 0.0f, -0.5f, 0.0f, 0.5f };
+                Gfx_SetTexCoord1Generation(rows);
+            },
+            [] {
+                const float rows[8] = { 0.25f, 0.0f, 0.5f, 0.5f, 0.0f, -0.5f, 0.125f, 0.5f };
+                Gfx_SetTexCoord1Generation(rows);
+            },
+            [] { Gfx_SetTexCoord1Generation(NULL); },
             [] { Gfx_SetColorVertex(FALSE); },
             [] { Gfx_SetDiffuseMaterialSource(GFX_MCS_MATERIAL); },
             [] { Gfx_SetSpecularMaterialSource(GFX_MCS_MATERIAL); },

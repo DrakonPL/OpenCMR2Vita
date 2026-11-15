@@ -72,7 +72,7 @@ inline void Gxm_SmallRows(const GfxDrawState &s, const GfxViewport &viewport, fl
     // Direct3D takes the fog factor from the vertex's specular alpha when
     // fog is on with neither vertex nor table fog (the backdrop of a foggy stage).
     u[VU_FOG_FLAGS][2] = vertexFog && s.fogVertexMode == GFX_FOG_NONE;
-    u[VU_FOG_FLAGS][3] = 0.0f;
+    u[VU_FOG_FLAGS][3] = s.texGen1;
     u[VU_FOG_PARAMS][0] = s.fogStart;
     u[VU_FOG_PARAMS][1] = s.fogEnd;
     u[VU_FOG_PARAMS][2] = u[VU_FOG_PARAMS][3] = 0.0f;
@@ -84,6 +84,7 @@ inline void Gxm_SmallRows(const GfxDrawState &s, const GfxViewport &viewport, fl
     u[VU_TARGET][0] = u[VU_TARGET][1] = 0.0f;
     u[VU_TARGET][2] = viewport.width ? 1.0f / viewport.width : 0.0f;
     u[VU_TARGET][3] = viewport.height ? -1.0f / viewport.height : 0.0f;
+    memcpy(u[VU_TEX_GEN1], s.texGen1Rows, sizeof(s.texGen1Rows));
 }
 
 // All rows of s. Without lighting the light rows are 0.
@@ -140,8 +141,8 @@ inline bool Gxm_UpdateVertexUniforms(const GfxDrawState &prev, const GfxDrawStat
         Gxm_LightRows(s, u);
         changed = true;
     }
-    // The small rows are one block (VU_GLOBAL_AMBIENT to VU_TARGET).
-    float before[VU_TARGET - VU_GLOBAL_AMBIENT + 1][4];
+    // The small rows are one block (VU_GLOBAL_AMBIENT to VU_TEX_GEN1).
+    float before[VU_TEX_GEN1 + 2 - VU_GLOBAL_AMBIENT][4];
     memcpy(before, u[VU_GLOBAL_AMBIENT], sizeof(before));
     Gxm_SmallRows(s, viewport, u);
     return changed || memcmp(before, u[VU_GLOBAL_AMBIENT], sizeof(before)) != 0;

@@ -299,6 +299,12 @@ void Gfx_SetAmbient(DWORD color);
 void Gfx_SetSpecular(BOOL enable);
 void Gfx_SetLocalViewer(BOOL enable);
 void Gfx_SetNormalizeNormals(BOOL enable);
+/* The second texture coordinates of each vertex from the vertex itself:
+   with m = (position + normal) / 2 in model space,
+   u1 = m.x * rows[0] + m.y * rows[1] + m.z * rows[2] + rows[3], and
+   v1 the same with rows[4..7]. NULL: the coordinates of the vertex. The
+   game's car reflection computed them on the CPU in each frame. */
+void Gfx_SetTexCoord1Generation(const float rows[8]);
 void Gfx_SetColorVertex(BOOL enable);
 void Gfx_SetDiffuseMaterialSource(int source);
 void Gfx_SetSpecularMaterialSource(int source);

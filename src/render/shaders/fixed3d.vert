@@ -28,6 +28,16 @@ vec4 MaterialColor(int source, vec4 material, vec4 color1, vec4 color2)
     return material;
 }
 
+// The second texture coordinates: the vertex's, or made from the vertex
+// (Gfx_SetTexCoord1Generation).
+vec2 Tex1()
+{
+    if (fogFlags.w == 0)
+        return inTex1;
+    vec4 m = vec4((inPosition + inNormal) * 0.5, 1.0);
+    return vec2(dot(m, texGen1[0]), dot(m, texGen1[1]));
+}
+
 vec4 TexCoord(int stage, vec3 eyePosition, vec3 eyeNormal)
 {
     int index = texCoordIndex[stage];
@@ -38,7 +48,7 @@ vec4 TexCoord(int stage, vec3 eyePosition, vec3 eyeNormal)
         vec3 e = normalize(-eyePosition);
         tc = vec4(2.0 * dot(e, eyeNormal) * eyeNormal - e, 1.0);
     } else {
-        vec2 uv = (index & 0xffff) == 1 ? inTex1 : inTex0;
+        vec2 uv = (index & 0xffff) == 1 ? Tex1() : inTex0;
         tc = vec4(uv, 1.0, 0.0);
     }
     if (transform != 0) {

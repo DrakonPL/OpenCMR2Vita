@@ -50,7 +50,8 @@ int main()
     // before them.
     REQUIRE(VU_UNLIT_ROWS == VU_LIGHTS && VU_LIGHTS + 8 * VU_LIGHT_ROWS == VU_ROWS);
     for (int row : { VU_WORLD_VIEW, VU_PROJECTION, VU_TEXTURE_MATRIX1, VU_MATERIAL_EMISSIVE, VU_GLOBAL_AMBIENT,
-                     VU_LIGHT_FLAGS, VU_SOURCES, VU_FOG_FLAGS, VU_FOG_PARAMS, VU_TEX_COORD, VU_TARGET })
+                     VU_LIGHT_FLAGS, VU_SOURCES, VU_FOG_FLAGS, VU_FOG_PARAMS, VU_TEX_COORD, VU_TARGET,
+                     VU_TEX_GEN1 + 1 })
         REQUIRE(row < VU_UNLIT_ROWS);
 
     GfxViewport viewport{};
@@ -108,6 +109,14 @@ int main()
     state.normalizeNormals = true;
     REQUIRE(Step(state, viewport) && s_changed);
     state.diffuseSource = GFX_MCS_MATERIAL;
+    REQUIRE(Step(state, viewport) && s_changed);
+    // The rows of the second texture coordinates, then their flag alone.
+    state.texGen1 = true;
+    state.texGen1Rows[1][2] = -0.25f;
+    REQUIRE(Step(state, viewport) && s_changed);
+    state.texGen1Rows[0][3] = 0.5f;
+    REQUIRE(Step(state, viewport) && s_changed);
+    state.texGen1 = false;
     REQUIRE(Step(state, viewport) && s_changed);
     viewport.width = 256;
     REQUIRE(Step(state, viewport) && s_changed);
