@@ -2241,6 +2241,7 @@ struct DeferredDraw {
 #include "DeferredOrder.h"
 #include "BatchRuns.h"
 #include "TreeCull.h"
+#include "GroundMerge.h"
 
 static int __cdecl Game_CompareDeferredDistance(const void *a, const void *b)
 {
@@ -2469,7 +2470,9 @@ struct TreePass {
     int distance[kTreeQueue];
 };
 static TreePass s_treePass;
-static TreeBounds s_treeBounds[512];
+// Each tree of a stage has a mesh of its own: a place for some thousands.
+enum { kTreeBoundsBits = 13 };
+static TreeBounds s_treeBounds[1 << kTreeBoundsBits];
 #ifdef OPENCMR2_DEV
 static unsigned int s_treeFrames, s_treesSeen, s_treesOut, s_treesMeasured, s_treesRestored;
 #endif
@@ -2503,10 +2506,9 @@ static void Game_SetTreeMatrix(StageObjectDraw *pObject)
 // the positions of its vertex buffer stay. Below zero: not known.
 float Game_TreeRadius(Mesh *pLod)
 {
+    TreeBounds &b = s_treeBounds[((unsigned int)((UINT_PTR)pLod >> 4) * 2654435761u) >> (32 - kTreeBoundsBits)];
     GfxVertexBuffer *pBuffer = CGraphics::m_pTextureManager->pVertexBuffers[pLod->vertexBufferIndex];
     const DWORD serial = Gfx_GetPositionSerial(pBuffer);
-    TreeBounds &b = s_treeBounds[((unsigned int)((UINT_PTR)pLod >> 4) * 2654435761u) >> 23];
-
     if (b.pLod != pLod || b.pBuffer != pBuffer || b.first != pLod->vertexOffset || b.count != pLod->field_0x10 ||
         b.serial != serial) {
         float low[3], high[3];
@@ -2585,8 +2587,9 @@ static void Game_QueueTree(StageObjectDraw *pObject, int distance)
     const unsigned int seq = t.seen++;
     // The key of the sort of the deferred pass: the greatest key is last.
     const unsigned int key = 0x7fffffffu - (unsigned int)distance;
-    const bool out = t.cull && t.outCount < kTreesOut && Game_TreeBatchable(pObject->pMesh) &&
-                     Game_TreeOutsideView(pObject);
+    // The sphere first: it tells "inside" for half of the trees.
+    const bool out = t.cull && t.outCount < kTreesOut && Game_TreeOutsideView(pObject) &&
+                     Game_TreeBatchable(pObject->pMesh);
 
     if (!t.sorted || key >= t.lastKey) {
         t.pLast = pObject;
@@ -2724,6 +2727,114 @@ static Mesh *s_objectRunMeshes[kObjectRun];
 static unsigned int s_objectRunStates[kObjectRun];
 static unsigned int s_objectRunCount;
 
+// PORT: the objects of a run as one draw for each texture, as the ground
+// (Game_DrawMergedGroundParts). In the tree batch each object is a draw of
+// its own for the renderer: some 1,700 instructions each, 185 of them in a
+// frame of a forest on the PS Vita. The vertices of the objects are in
+// world space, in the vertex buffers of the stage. The parts in view (the
+// test that the renderer makes for each draw) go into groups of one vertex
+// buffer, texture, cull mode and lighting, and the groups stay from frame
+// to frame while the parts are the same (GroundMerge.h). The state after
+// the run is that of its last object, as before. False: no merge (the
+// renderer does not merge the ground, the world matrix is not the
+// identity, no room, a texture stage that kept another setup): the run then
+// goes into the tree batch. [video] merge_objects = 0 does the same.
+static GroundMerge s_objectMerge;
+static GroundMergePart s_objectParts[kGroundMergeParts];
+static bool s_objectMergeWanted;
+#ifdef OPENCMR2_DEV
+static unsigned int s_objectMergeRuns, s_objectMergeParts, s_objectMergeGroups;
+#endif
+extern GfxMatrix g_identityWorldMatrix;
+
+bool Game_DrawObjectRunMerged(GfxMatrix *pWorld)
+{
+    GroundMergePart *parts = s_objectParts;
+    unsigned int partCount = 0;
+    unsigned int i;
+    int k;
+
+    if (!s_objectMergeWanted)
+        return false;
+    // The batch before the run (blended objects) draws first, as it did
+    // when the first object of the run came with another state.
+    Game_FlushTreeBatch();
+    Gfx_GetTransform(GFX_TRANSFORM_WORLD, pWorld);
+    if (memcmp(pWorld, &g_identityWorldMatrix, sizeof(GfxMatrix)) != 0)
+        return false;
+    for (i = 0; i < s_objectRunCount; i++) {
+        Mesh *pMesh = s_objectRunMeshes[i];
+        Mesh *pLod = (Mesh *)((BYTE *)pMesh + pMesh->lodIndex * offsetof(Mesh, field_0x108));
+        GfxVertexBuffer *pBuffer = CGraphics::m_pTextureManager->pVertexBuffers[pLod->vertexBufferIndex];
+        const int cull = (pLod->flags & 1) != 0 ? 1 : CGame::GetSectorDrawState();
+        const int lighting = (pLod->flags & 0x20) != 0 ? -1 : (pLod->flags & 0x40000) != 0 ? 3 : 2;
+        // The vertices of a part as the tree batch gives them: from its
+        // first one to the end of the mesh.
+        const int end = pLod->vertexOffset + pLod->field_0x10;
+        for (k = 0; k < pLod->partCount; k++) {
+            MeshPart *pPart = pLod->pParts[k];
+            const int first = pLod->vertexOffset + pPart->minIndex;
+            if (pPart->indexCount <= 0 || end <= first || !Gfx_IsRangeVisible(pBuffer, first, end - first))
+                continue;
+            if (partCount == kGroundMergeParts)
+                return false;
+            const GroundMergePart part = { pLod, pPart, pPart->pData, pPart->indexCount, first, end,
+                                           pLod->vertexBufferIndex, pPart->texture, cull, lighting };
+            parts[partCount++] = part;
+        }
+    }
+    if (!GroundMerge_Update(&s_objectMerge, parts, partCount))
+        return false;
+    const GroundMergeGroup *groups = s_objectMerge.groups;
+    const unsigned int groupCount = s_objectMerge.groupCount;
+    const int lightingMode = Graphics_GetGeometryStateValue();
+    bool lightingChanged = false;
+    Graphics_SwitchAlphaBlendAndTest(0);
+    for (unsigned g = 0; g < groupCount; g++) {
+        const GroundMergeGroup &group = groups[g];
+        CGraphics::SetCullMode(group.cull);
+        CGraphics::ApplyTextureStageChange(0, CGraphics::m_pTextureManager->textureBuffer[group.texture]);
+        // A stage that kept its setup for another blend mode: the tree
+        // batch draws each part alone then (Game_FlushTreeBatch).
+        if (g == 0 && g_unk0x00520b18 != 0)
+            return false;
+        if (group.lighting >= 0) {
+            Graphics_SetLightingMode(group.lighting);
+            lightingChanged = true;
+        } else if (lightingChanged) {
+            Graphics_SetLightingMode(lightingMode);
+            lightingChanged = false;
+        }
+        Gfx_DrawIndexedPrimitiveVB(GFX_TRIANGLELIST, CGraphics::m_pTextureManager->pVertexBuffers[group.buffer],
+                                   group.first, group.end - group.first, &s_objectMerge.indices[group.indexStart],
+                                   group.indexCount);
+        CGame::m_unk0x0059ce18 += group.indexCount / 3;
+    }
+    if (lightingChanged)
+        Graphics_SetLightingMode(lightingMode);
+    // The state that the last object of the run left in the tree batch: its
+    // cull mode and the texture of its last part.
+    {
+        Mesh *pMesh = s_objectRunMeshes[s_objectRunCount - 1];
+        Mesh *pLod = (Mesh *)((BYTE *)pMesh + pMesh->lodIndex * offsetof(Mesh, field_0x108));
+        CGraphics::SetCullMode((pLod->flags & 1) != 0 ? 1 : CGame::GetSectorDrawState());
+        CGraphics::ApplyTextureStageChange(
+            0, CGraphics::m_pTextureManager->textureBuffer[pLod->pParts[pLod->partCount - 1]->texture]);
+    }
+#ifdef OPENCMR2_DEV
+    s_objectMergeParts += partCount;
+    s_objectMergeGroups += groupCount;
+    if (++s_objectMergeRuns == 600) {
+        Sys_Log("objects: in a run %.1f parts in view in %.1f draws; the merge was made in %u of 600 runs and kept "
+                "in %u",
+                s_objectMergeParts / 600.0, s_objectMergeGroups / 600.0, s_objectMerge.made, s_objectMerge.kept);
+        s_objectMergeRuns = s_objectMergeParts = s_objectMergeGroups = 0;
+        s_objectMerge.made = s_objectMerge.kept = 0;
+    }
+#endif
+    return true;
+}
+
 static void Game_EmitObjectRun(GfxMatrix *pWorld)
 {
     static unsigned short order[kObjectRun];
@@ -2731,6 +2842,10 @@ static void Game_EmitObjectRun(GfxMatrix *pWorld)
 
     if (s_objectRunCount == 0)
         return;
+    if (Game_DrawObjectRunMerged(pWorld)) {
+        s_objectRunCount = 0;
+        return;
+    }
     BatchRun_Order(s_objectRunStates, s_objectRunCount, order);
     for (i = 0; i < s_objectRunCount; i++) {
         // The world matrix that is set, while the batch is empty: as each
@@ -2867,6 +2982,8 @@ void Game_DrawStaticStageObjects(void)
     const bool batches = Sys_GetOption("video.tree_batch", 1) != 0;
     static GfxMatrix world;
 
+    s_objectMergeWanted = batches && Gfx_MergesGroundDraws() != FALSE &&
+                          Sys_GetOption("video.merge_objects", 1) != 0;
     Game_BeginTreePass(batches);
     for (i = 0; i < (unsigned int)g_sectorCullEnabled; i++) {
         pObject = (StageObjectDraw *)g_sectors[g_visibleSectorIndices[i]]->pObjects;
@@ -3027,7 +3144,6 @@ int Graphics_GetGeometryStateValue(void);
 // The groups and their indices stay from frame to frame while the parts in
 // view are the same (GroundMerge.h). The lighting of a group: -1 for the
 // mode that is set.
-#include "GroundMerge.h"
 
 static bool Game_GroundMeshMerges(const Mesh *pMesh)
 {
@@ -3050,10 +3166,11 @@ static GroundMergePart s_groundParts[kGroundMergeParts];
 static unsigned int s_groundFrames;
 #endif
 
-// The stage goes or comes: its meshes are not those of the merge.
+// The stage goes or comes: its meshes are not those of the merges.
 void Game_ForgetGroundMerge(void)
 {
     GroundMerge_Forget(&s_groundMerge);
+    GroundMerge_Forget(&s_objectMerge);
 }
 
 void Game_DrawMergedGroundParts(bool *pMerged)

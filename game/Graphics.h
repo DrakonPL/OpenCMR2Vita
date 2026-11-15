@@ -1503,6 +1503,7 @@ private:
     friend void Game_AddTreeToBatch(Mesh *pMesh, const float *pMatrix);
     friend void Game_FlushTreeBatch(void);
     friend float Game_TreeRadius(Mesh *pLod);
+    friend bool Game_DrawObjectRunMerged(GfxMatrix *pWorld);
     friend void Game_SettleTreesLeftOut(void);
 };
 
