@@ -3,14 +3,20 @@
 // append). No GXM here, so tests/gpu_sub_allocator.cpp can test the clamp.
 //
 // A slot is free again when its frame comes round: the display queue holds
-// two flips at most, so when the CPU starts frame n + 3, frame n is shown and
-// the GPU is done with it.
+// g_gxmFrameSlots - 1 flips at most, so when the CPU starts frame
+// n + g_gxmFrameSlots, frame n is shown and the GPU is done with it.
 #ifndef OPENCMR2_GXM_FRAME_RING_H
 #define OPENCMR2_GXM_FRAME_RING_H
 
 // Frames in flight: the CPU records one, the GPU draws one, the display
-// shows one. Per-frame data has a slot for each.
+// shows one. Per-frame data has a slot for each. [video] frames_in_flight = 3
+// gives one more slot (g_gxmFrameSlots 4): the GPU then has two frames to draw
+// when the CPU starts one, and the worker waits less for it at the present,
+// for one more frame between the input and the picture.
 constexpr int kGxmFrameSlots = 3;
+constexpr int kGxmMaxFrameSlots = 4;
+// The slots in use, set once by the GXM device before its first frame.
+inline int g_gxmFrameSlots = kGxmFrameSlots;
 
 struct GxmFrameRing {
     static constexpr unsigned kFull = ~0u;

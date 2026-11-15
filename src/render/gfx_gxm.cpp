@@ -2218,6 +2218,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     }
 
     void SetSnapshotCopiesLate(bool late) override { snapshotsLate = late; }
+    unsigned FramesInFlight() const override { return (unsigned)g_gxmFrameSlots - 1; }
 
     // The snapshots that Prepare left for the worker, into the ring.
     void CopySnapshots(GfxFrame &) override

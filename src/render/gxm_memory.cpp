@@ -160,7 +160,7 @@ GxmMemory::GxmMemory()
 
 bool GxmMemory::Init()
 {
-    if (!Gxm_AllocGpu(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, kRingSlotBytes * 3, kRead, ringMemory))
+    if (!Gxm_AllocGpu(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, kRingSlotBytes * (unsigned)g_gxmFrameSlots, kRead, ringMemory))
         return false;
     ring.base = (unsigned char *)ringMemory.data;
     ring.slotBytes = kRingSlotBytes;

@@ -27,7 +27,7 @@ struct GxmDeferredFree {
     {
         size_t kept = 0;
         for (const Entry &e : entries) {
-            if (frame - e.frame >= (unsigned)kGxmFrameSlots)
+            if (frame - e.frame >= (unsigned)g_gxmFrameSlots)
                 release(e.memory);
             else
                 entries[kept++] = e;

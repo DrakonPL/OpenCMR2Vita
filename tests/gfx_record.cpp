@@ -1084,6 +1084,15 @@ int main()
         REQUIRE(patches.size() == 1 && patches[0] == std::make_pair(64u, 96u) && !locks.Any());
         take(9);
         REQUIRE(patches.empty());
+        // Three frames in flight (GfxExecutor::FramesInFlight): recent for three.
+        g_gfxRecentFrames = 3;
+        locks.Lock(40, 1, 10);
+        REQUIRE(locks.Recent(40, 1, 12) && !locks.Recent(40, 1, 13));
+        take(12);
+        REQUIRE(patches.empty());
+        take(13);
+        REQUIRE(patches.size() == 1 && patches[0] == std::make_pair(32u, 64u));
+        g_gfxRecentFrames = 2;
         // The ranges that touch a patch.
         const GfxPatch some[2] = { { NULL, 32, 64 }, { NULL, 192, 200 } };
         REQUIRE(!Gfx_TouchesPatch(some, 2, 0, 32) && Gfx_TouchesPatch(some, 2, 0, 33) && Gfx_TouchesPatch(some, 2, 63, 1));

@@ -17,9 +17,9 @@
 #include <vector>
 
 struct GxmTextureCopies {
-    // Three copies with the one that is drawn: a frame that the GPU draws
-    // reads its copy for kGxmFrameSlots frames.
-    static constexpr size_t kMaxSpares = kGxmFrameSlots - 1;
+    // A copy for each frame in flight with the one that is drawn: a frame that
+    // the GPU draws reads its copy for g_gxmFrameSlots frames.
+    static size_t MaxSpares() { return (size_t)g_gxmFrameSlots - 1; }
     static constexpr unsigned kNotDrawn = ~0u;
 
     struct Spare {
@@ -48,7 +48,7 @@ struct GxmTextureCopies {
     int Free(unsigned frame) const
     {
         for (size_t i = 0; i < spares.size(); i++)
-            if (spares[i].lastDrawn == kNotDrawn || frame - spares[i].lastDrawn >= (unsigned)kGxmFrameSlots)
+            if (spares[i].lastDrawn == kNotDrawn || frame - spares[i].lastDrawn >= (unsigned)g_gxmFrameSlots)
                 return (int)i;
         return -1;
     }
@@ -57,7 +57,7 @@ struct GxmTextureCopies {
     // kMaxSpares already.
     bool Add(void *memory)
     {
-        if (spares.size() >= kMaxSpares)
+        if (spares.size() >= MaxSpares())
             return false;
         spares.push_back({ memory, true, GfxTileSet(), kNotDrawn });
         return true;

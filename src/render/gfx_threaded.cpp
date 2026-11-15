@@ -319,6 +319,7 @@ struct ThreadedExecutor : GfxExecutor {
         worker.Start();
     }
     bool CopiesSnapshotsLate() const override { return late; }
+    unsigned FramesInFlight() const override { return inner->FramesInFlight(); }
     void WaitForSnapshotCopies() override
     {
         if (!late || worker.OnWorker())

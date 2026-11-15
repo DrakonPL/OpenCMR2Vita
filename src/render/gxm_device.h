@@ -24,7 +24,7 @@ public:
     {
         return (w == 720 && h == 408) || (w == 640 && h == 368) || (w == 480 && h == 272);
     }
-    static constexpr int kFrameSlots = kGxmFrameSlots;
+    static constexpr int kFrameSlots = kGxmMaxFrameSlots;   // the array; g_gxmFrameSlots are in use
 
     GxmDevice() = default;
     GxmDevice(const GxmDevice &) = delete;
