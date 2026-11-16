@@ -149,19 +149,27 @@ int main()
     Stage stage(600, 40, 3);
     GroundMerge_Forget(&s_merge);
     s_merge.made = s_merge.kept = 0;
+    const unsigned generation = s_merge.generation;
 
-    // A view: the merge is made. The same view again: it is kept.
+    // A view: the merge is made. The same view again: it is kept, with the
+    // number of its indices (the copy of an index buffer stays good).
     std::vector<GroundMergePart> view = stage.View(50);
     REQUIRE(GroundMerge_Update(&s_merge, view.data(), (unsigned)view.size()));
     REQUIRE(s_merge.made == 1 && s_merge.kept == 0 && Same(s_merge, MergeAgain(view)));
+    REQUIRE(s_merge.generation == generation + 1);
+    unsigned indexCount = 0;
+    for (const GroundMergePart &p : view)
+        indexCount += (unsigned)p.indexCount;
+    REQUIRE(GroundMerge_IndexCount(&s_merge) == indexCount);
     REQUIRE(GroundMerge_Update(&s_merge, view.data(), (unsigned)view.size()));
     REQUIRE(s_merge.made == 1 && s_merge.kept == 1 && Same(s_merge, MergeAgain(view)));
+    REQUIRE(s_merge.generation == generation + 1);
 
     // One part less, one more, two in another order: made again each time.
     std::vector<GroundMergePart> other = view;
     other.pop_back();
     REQUIRE(GroundMerge_Update(&s_merge, other.data(), (unsigned)other.size()));
-    REQUIRE(s_merge.made == 2 && Same(s_merge, MergeAgain(other)));
+    REQUIRE(s_merge.made == 2 && Same(s_merge, MergeAgain(other)) && s_merge.generation == generation + 2);
     REQUIRE(GroundMerge_Update(&s_merge, view.data(), (unsigned)view.size()));
     REQUIRE(s_merge.made == 3 && Same(s_merge, MergeAgain(view)));
     other = view;

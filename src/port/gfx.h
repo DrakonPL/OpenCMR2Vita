@@ -23,6 +23,7 @@ extern "C" {
 
 typedef struct GfxTexture GfxTexture;
 typedef struct GfxVertexBuffer GfxVertexBuffer;
+typedef struct GfxIndexBuffer GfxIndexBuffer;
 
 /* Row-vector matrix, Direct3D layout: v' = v * M, translation in _41.._43. */
 typedef struct GfxMatrix {
@@ -369,6 +370,16 @@ GfxVertex *Gfx_LockVertexBufferRange(GfxVertexBuffer *buffer, DWORD firstVertex,
 void Gfx_WriteVertexBufferRange(GfxVertexBuffer *buffer, DWORD firstVertex, const GfxVertex *vertices,
                                 DWORD vertexCount);
 void Gfx_UnlockVertexBuffer(GfxVertexBuffer *buffer);
+/* Indices that stay from frame to frame, as the vertices of a vertex buffer
+   do: a renderer that keeps a copy of the buffer copies no index for each
+   draw. The contents are kept between writes. */
+GfxIndexBuffer *Gfx_CreateIndexBuffer(DWORD indexCount);
+void Gfx_DestroyIndexBuffer(GfxIndexBuffer *buffer);
+/* Copies count indices into the buffer from firstIndex. The draws of the
+   buffer recorded before the write in this frame keep the indices that
+   they had: a write over the indices that they use costs a run of them
+   first. */
+void Gfx_WriteIndexBuffer(GfxIndexBuffer *buffer, DWORD firstIndex, const WORD *indices, DWORD count);
 
 void Gfx_DrawPrimitiveVB(int primitive, GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount);
 /* A draw whose vertices the caller gives in parts: Gfx_BeginPrimitive, then
@@ -422,6 +433,10 @@ void Gfx_DrawIndexedPrimitiveVB(int primitive, GfxVertexBuffer *buffer, DWORD fi
    zero: not known, as Gfx_DrawIndexedPrimitiveVB. */
 void Gfx_DrawIndexedPrimitiveVBReach(int primitive, GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount,
                                      const WORD *indices, DWORD indexCount, float reach);
+/* As Gfx_DrawIndexedPrimitiveVBReach, with indexCount indices from
+   firstIndex of an index buffer (relative to firstVertex). */
+void Gfx_DrawIndexedPrimitiveIB(int primitive, GfxVertexBuffer *buffer, DWORD firstVertex, DWORD vertexCount,
+                                GfxIndexBuffer *indices, DWORD firstIndex, DWORD indexCount, float reach);
 void Gfx_DrawPrimitive(int primitive, const GfxVertex *vertices, DWORD vertexCount);
 void Gfx_DrawIndexedPrimitive(int primitive, const GfxVertex *vertices, DWORD vertexCount, const WORD *indices,
                               DWORD indexCount);

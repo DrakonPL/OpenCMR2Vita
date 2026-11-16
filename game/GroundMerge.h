@@ -56,6 +56,9 @@ struct GroundMerge {
     unsigned partCount;
     // For the logs and the tests: how often the groups were made, and kept.
     unsigned made, kept;
+    // One more each time the groups and the indices are made: a copy of the
+    // indices (an index buffer) with another number is old.
+    unsigned generation;
     // While the groups are made: the group of each part, and the groups by
     // a hash of what makes a group (the index of the group + 1, 0: free).
     unsigned short partGroup[kGroundMergeParts];
@@ -173,8 +176,18 @@ inline bool GroundMerge_Update(GroundMerge *m, const GroundMergePart *parts, uns
     }
     m->partCount = count;
     m->made++;
+    m->generation++;
     GroundMerge_SetReaches(m, parts, count);
     return true;
+}
+
+// The indices of all groups (the groups are in the order of their indices).
+inline unsigned GroundMerge_IndexCount(const GroundMerge *m)
+{
+    if (m->groupCount == 0)
+        return 0;
+    const GroundMergeGroup &last = m->groups[m->groupCount - 1];
+    return last.indexStart + last.indexCount;
 }
 
 #endif

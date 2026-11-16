@@ -2824,7 +2824,44 @@ static unsigned int s_objectRunCount;
 // renderer does not merge the ground, the world matrix is not the
 // identity, no room, a texture stage that kept another setup): the run then
 // goes into the tree batch. [video] merge_objects = 0 does the same.
+// PORT: the indices of a merge in an index buffer that stays: a frame that
+// keeps the merge copies none of them. [video] index_buffers = 0 draws from
+// the merge's own indices, which the renderer copies for each draw.
+// The indices of each new merge go after those of the merge before, so a
+// frame with two merges (two runs of objects, two players) writes over no
+// index that it drew: the buffer holds the indices of two full merges.
+enum { kMergeIndexBufferIndices = 2 * kGroundMergeIndices };
+struct MergeIndexBuffer {
+    GfxIndexBuffer *buffer;
+    unsigned generation;    // GroundMerge::generation of its indices
+    unsigned offset, count; // where they are in the buffer
+};
+static int s_indexBuffersSetting = -1;
+
+// The buffer with the merge's indices from p->offset, NULL: none.
+static GfxIndexBuffer *Game_MergeIndices(MergeIndexBuffer *p, const GroundMerge *m)
+{
+    if (s_indexBuffersSetting < 0)
+        s_indexBuffersSetting = Sys_GetOption("video.index_buffers", 1);
+    if (s_indexBuffersSetting == 0)
+        return NULL;
+    if (p->buffer == NULL)
+        p->buffer = Gfx_CreateIndexBuffer(kMergeIndexBufferIndices);
+    if (p->buffer != NULL && p->generation != m->generation) {
+        const unsigned count = GroundMerge_IndexCount(m);
+        unsigned offset = p->offset + p->count;
+        if (offset + count > kMergeIndexBufferIndices)
+            offset = 0;
+        Gfx_WriteIndexBuffer(p->buffer, offset, m->indices, count);
+        p->offset = offset;
+        p->count = count;
+        p->generation = m->generation;
+    }
+    return p->buffer;
+}
+
 static GroundMerge s_objectMerge;
+static MergeIndexBuffer s_objectIndices;
 static GroundMergePart s_objectParts[kGroundMergeParts];
 static bool s_objectMergeWanted;
 #ifdef OPENCMR2_DEV
@@ -2876,6 +2913,7 @@ bool Game_DrawObjectRunMerged(GfxMatrix *pWorld)
         return false;
     const GroundMergeGroup *groups = s_objectMerge.groups;
     const unsigned int groupCount = s_objectMerge.groupCount;
+    GfxIndexBuffer *indexBuffer = Game_MergeIndices(&s_objectIndices, &s_objectMerge);
     const int lightingMode = Graphics_GetGeometryStateValue();
     bool lightingChanged = false;
     Graphics_SwitchAlphaBlendAndTest(0);
@@ -2894,9 +2932,13 @@ bool Game_DrawObjectRunMerged(GfxMatrix *pWorld)
             Graphics_SetLightingMode(lightingMode);
             lightingChanged = false;
         }
-        Gfx_DrawIndexedPrimitiveVBReach(GFX_TRIANGLELIST, CGraphics::m_pTextureManager->pVertexBuffers[group.buffer],
-                                        group.first, group.end - group.first,
-                                        &s_objectMerge.indices[group.indexStart], group.indexCount, group.reach);
+        GfxVertexBuffer *pBuffer = CGraphics::m_pTextureManager->pVertexBuffers[group.buffer];
+        if (indexBuffer != NULL)
+            Gfx_DrawIndexedPrimitiveIB(GFX_TRIANGLELIST, pBuffer, group.first, group.end - group.first, indexBuffer,
+                                       s_objectIndices.offset + group.indexStart, group.indexCount, group.reach);
+        else
+            Gfx_DrawIndexedPrimitiveVBReach(GFX_TRIANGLELIST, pBuffer, group.first, group.end - group.first,
+                                            &s_objectMerge.indices[group.indexStart], group.indexCount, group.reach);
         CGame::m_unk0x0059ce18 += group.indexCount / 3;
     }
     if (lightingChanged)
@@ -3250,6 +3292,7 @@ static bool Game_GroundMeshMerges(const Mesh *pMesh)
 // more parts, groups or indices than the merge holds draws its ground as
 // the original did.
 static GroundMerge s_groundMerge;
+static MergeIndexBuffer s_groundIndices;
 static GroundMergePart s_groundParts[kGroundMergeParts];
 #ifdef OPENCMR2_DEV
 static unsigned int s_groundFrames;
@@ -3327,6 +3370,7 @@ void Game_DrawMergedGroundParts(bool *pMerged)
     const GroundMergeGroup *groups = s_groundMerge.groups;
     const unsigned short *indices = s_groundMerge.indices;
     const unsigned int groupCount = s_groundMerge.groupCount;
+    GfxIndexBuffer *indexBuffer = Game_MergeIndices(&s_groundIndices, &s_groundMerge);
     const int lightingMode = Graphics_GetGeometryStateValue();
     bool lightingChanged = false;
     Graphics_SwitchAlphaBlendAndTest(0);
@@ -3341,9 +3385,13 @@ void Game_DrawMergedGroundParts(bool *pMerged)
             lightingChanged = false;
         }
         CGraphics::ApplyTextureStageChange(0, CGraphics::m_pTextureManager->textureBuffer[group.texture]);
-        Gfx_DrawIndexedPrimitiveVBReach(GFX_TRIANGLELIST, CGraphics::m_pTextureManager->pVertexBuffers[group.buffer],
-                                        group.first, group.end - group.first, &indices[group.indexStart],
-                                        group.indexCount, group.reach);
+        GfxVertexBuffer *pBuffer = CGraphics::m_pTextureManager->pVertexBuffers[group.buffer];
+        if (indexBuffer != NULL)
+            Gfx_DrawIndexedPrimitiveIB(GFX_TRIANGLELIST, pBuffer, group.first, group.end - group.first, indexBuffer,
+                                       s_groundIndices.offset + group.indexStart, group.indexCount, group.reach);
+        else
+            Gfx_DrawIndexedPrimitiveVBReach(GFX_TRIANGLELIST, pBuffer, group.first, group.end - group.first,
+                                            &indices[group.indexStart], group.indexCount, group.reach);
         CGame::m_unk0x0059ce18 += group.indexCount / 3;
     }
     if (lightingChanged)

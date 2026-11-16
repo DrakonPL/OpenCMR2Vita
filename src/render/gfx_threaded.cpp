@@ -338,6 +338,12 @@ struct ThreadedExecutor : GfxExecutor {
         Wait();
         inner->DestroyVertexBuffer(buffer);
     }
+    void DestroyIndexBuffer(GfxIndexBuffer *buffer) override
+    {
+        Wait();
+        inner->DestroyIndexBuffer(buffer);
+    }
+    bool TakesIndexBuffers() const override { return inner->TakesIndexBuffers(); }
     bool JoinsDraws() const override { return inner->JoinsDraws(); }
     bool DrawsHalfSky() const override { return inner->DrawsHalfSky(); }
     void ReadTexture(GfxTexture *texture) override

@@ -67,6 +67,11 @@ size_t s_commandsBeforeVideo;
 bool s_lateSnapshots;
 int s_snapshotWaits;
 
+// An executor that keeps copies of the index buffers (the GXM one), and
+// the count of the Execute calls (a write over drawn indices runs them).
+bool s_takesIndexBuffers;
+int s_executes;
+
 struct CaptureExecutor : GfxExecutor {
     bool CopiesSnapshotsLate() const override { return s_lateSnapshots; }
     void WaitForSnapshotCopies() override { s_snapshotWaits++; }
@@ -75,7 +80,9 @@ struct CaptureExecutor : GfxExecutor {
     void Execute(GfxFrame &frame, std::vector<GfxTexture *> &, GfxReadback &, bool, int, bool) override
     {
         s_frame = frame;
+        s_executes++;
     }
+    bool TakesIndexBuffers() const override { return s_takesIndexBuffers; }
     void DestroyTexture(GfxTexture *) override {}
     void ReadTexture(GfxTexture *) override {}
     bool JoinsDraws() const override { return s_joins; }
@@ -2216,6 +2223,58 @@ int main()
         Gfx_SetTexture(0, NULL);
         Gfx_Present(FALSE);
         Gfx_DestroyTexture(movie);
+    }
+
+    // Index buffers. A draw of a vertex buffer that rested points into the
+    // index buffer for an executor that keeps a copy of it: the frame has
+    // no copy of the indices.
+    {
+        s_joins = true;
+        s_takesIndexBuffers = true;
+        GfxVertexBuffer *mesh = Gfx_CreateVertexBuffer(64);
+        Gfx_LockVertexBuffer(mesh);
+        Gfx_UnlockVertexBuffer(mesh);
+        for (int frame = 0; frame < 5; frame++)
+            Gfx_Present(FALSE);
+        // 40 vertices: more than a small draw, which goes into the frame.
+        GfxIndexBuffer *ib = Gfx_CreateIndexBuffer(64);
+        const WORD quad[6] = { 0, 1, 2, 2, 1, 3 };
+        Gfx_WriteIndexBuffer(ib, 10, quad, 6);
+        REQUIRE(ib->used == 16 && ib->version == 2 && ib->indices[12] == 2);
+        Gfx_DrawIndexedPrimitiveIB(GFX_TRIANGLELIST, mesh, 0, 40, ib, 10, 3, -1.0f);
+        Gfx_DrawIndexedPrimitiveIB(GFX_TRIANGLELIST, mesh, 0, 40, ib, 13, 3, -1.0f);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 2 && Draw(0).buffer == mesh && Draw(0).indexBuffer == ib && Draw(1).indexBuffer == ib);
+        REQUIRE(Draw(0).firstIndex == 10 && Draw(0).indexCount == 3 && Draw(1).firstIndex == 13);
+        REQUIRE(s_frame.indices.empty() && s_frame.indexBuffers.size() == 1 && s_frame.indexBuffers[0] == ib);
+        REQUIRE(ib->drawnStart == 10 && ib->drawnEnd == 16);
+
+        // A write past the indices drawn in this frame runs no draw. A
+        // write over them runs the draws before it first.
+        Gfx_DrawIndexedPrimitiveIB(GFX_TRIANGLELIST, mesh, 0, 40, ib, 10, 3, -1.0f);
+        int executes = s_executes;
+        Gfx_WriteIndexBuffer(ib, 20, quad, 6);
+        REQUIRE(s_executes == executes && ib->used == 26);
+        Gfx_WriteIndexBuffer(ib, 12, quad, 3);
+        REQUIRE(s_executes == executes + 1 && Draws() == 1 && Draw(0).firstIndex == 10);
+        Gfx_Present(FALSE);
+
+        // A draw past the written indices is left out.
+        Gfx_DrawIndexedPrimitiveIB(GFX_TRIANGLELIST, mesh, 0, 40, ib, 24, 3, -1.0f);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 0);
+
+        // An executor without copies of the index buffers gets the
+        // indices 13 to 15 (1, 2, 3 after the write at 12) in the frame,
+        // as from Gfx_DrawIndexedPrimitiveVBReach.
+        s_takesIndexBuffers = false;
+        Gfx_DrawIndexedPrimitiveIB(GFX_TRIANGLELIST, mesh, 0, 40, ib, 13, 3, -1.0f);
+        Gfx_Present(FALSE);
+        REQUIRE(Draws() == 1 && Draw(0).indexBuffer == NULL && Draw(0).firstIndex == 0 && Draw(0).indexCount == 3);
+        REQUIRE(s_frame.indices.size() == 3 && s_frame.indices[0] == 1 && s_frame.indices[1] == 2 && s_frame.indices[2] == 3);
+        REQUIRE(s_frame.indexBuffers.empty());
+        Gfx_DestroyIndexBuffer(ib);
+        Gfx_DestroyVertexBuffer(mesh);
     }
 
     printf("gfx_record: ok\n");
