@@ -30,7 +30,10 @@
 #include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/message_dialog.h>
+#include <psp2/net/net.h>
+#include <psp2/net/netctl.h>
 #include <psp2/system_param.h>
+#include <psp2/sysmodule.h>
 
 #include <malloc.h>
 #include <stdarg.h>
@@ -40,6 +43,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -861,6 +865,54 @@ void SysVita_FramePresented(bool stats)
 }
 #endif
 
+// ---- network --------------------------------------------------------------------
+// [net] enabled = 1 loads the network modules. net_api.cpp offers its
+// provider on the same setting.
+
+constexpr int kNetMemoryBytes = 1024 * 1024;
+std::unique_ptr<unsigned char[]> s_netMemory;   // sceNetInit's, until sceNetTerm
+bool s_netStarted;
+
+void StartNetwork()
+{
+    if (Platform_GetSettingInt("net.enabled", 0) == 0) {
+        Sys_Log("net: off ([net] enabled = 0), no network module loaded");
+        return;
+    }
+    int result = sceSysmoduleLoadModule(SCE_SYSMODULE_NET);
+    if (result < 0) {
+        Sys_Log("net: sceSysmoduleLoadModule(NET): 0x%08x", (unsigned)result);
+        return;
+    }
+    s_netMemory.reset(new unsigned char[kNetMemoryBytes]);
+    SceNetInitParam param{};
+    param.memory = s_netMemory.get();
+    param.size = kNetMemoryBytes;
+    result = sceNetInit(&param);
+    if (result < 0) {
+        Sys_Log("net: sceNetInit: 0x%08x", (unsigned)result);
+        s_netMemory.reset();
+        sceSysmoduleUnloadModule(SCE_SYSMODULE_NET);
+        return;
+    }
+    result = sceNetCtlInit();
+    if (result < 0)
+        Sys_Log("net: sceNetCtlInit: 0x%08x", (unsigned)result);
+    s_netStarted = true;
+    Sys_Log("net: on, %d KB for the network", kNetMemoryBytes / 1024);
+}
+
+void StopNetwork()
+{
+    if (!s_netStarted)
+        return;
+    sceNetCtlTerm();
+    sceNetTerm();
+    s_netMemory.reset();
+    sceSysmoduleUnloadModule(SCE_SYSMODULE_NET);
+    s_netStarted = false;
+}
+
 // ---- platform -------------------------------------------------------------------
 
 bool Platform_Init(int, char **)
@@ -910,6 +962,7 @@ bool Platform_Init(int, char **)
     } else {
         Sys_Log("game thread: on any core (system.pin_game_thread = 0)");
     }
+    StartNetwork();
 #ifdef OPENCMR2_DEV
     LogFileProbe();
     // The app's memory budget, after the heap and the program are taken out.
@@ -924,6 +977,7 @@ bool Platform_Init(int, char **)
 
 void Platform_Shutdown(void)
 {
+    StopNetwork();
     StopLogWriter();
     FlushLog();
     if (s_logFile >= 0) {

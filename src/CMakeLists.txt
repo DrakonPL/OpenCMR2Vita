@@ -287,24 +287,28 @@ if(NOT VITA)
 endif()
 
 # ---- network (UDP with ENet, third_party/enet) -------------------------------------
-# ENet's unix.c does not build on the vitasdk newlib yet.
-if(NOT VITA)
-    set(ENET_DIR ${PROJECT_SOURCE_DIR}/third_party/enet)
-    add_library(enet STATIC
-        ${ENET_DIR}/callbacks.c ${ENET_DIR}/compress.c ${ENET_DIR}/host.c ${ENET_DIR}/list.c
-        ${ENET_DIR}/packet.c ${ENET_DIR}/peer.c ${ENET_DIR}/protocol.c ${ENET_DIR}/unix.c ${ENET_DIR}/win32.c)
-    target_include_directories(enet PUBLIC ${ENET_DIR}/include)
-    if(WIN32)
-        target_link_libraries(enet PUBLIC ws2_32 winmm)
-    else()
-        target_compile_definitions(enet PRIVATE HAS_FCNTL=1 HAS_POLL=1 HAS_GETADDRINFO=1 HAS_GETNAMEINFO=1
-            HAS_INET_PTON=1 HAS_INET_NTOP=1 HAS_MSGHDR_FLAGS=1 HAS_SOCKLEN_T=1)
-    endif()
+set(ENET_DIR ${PROJECT_SOURCE_DIR}/third_party/enet)
+add_library(enet STATIC
+    ${ENET_DIR}/callbacks.c ${ENET_DIR}/compress.c ${ENET_DIR}/host.c ${ENET_DIR}/list.c
+    ${ENET_DIR}/packet.c ${ENET_DIR}/peer.c ${ENET_DIR}/protocol.c ${ENET_DIR}/unix.c ${ENET_DIR}/win32.c)
+target_include_directories(enet PUBLIC ${ENET_DIR}/include)
+if(VITA)
+    # The vitasdk newlib has no sys/ioctl.h (net/vita_compat).
+    target_include_directories(enet PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/net/vita_compat)
+endif()
+if(WIN32)
+    target_link_libraries(enet PUBLIC ws2_32 winmm)
+else()
+    target_compile_definitions(enet PRIVATE HAS_FCNTL=1 HAS_POLL=1 HAS_GETADDRINFO=1 HAS_GETNAMEINFO=1
+        HAS_INET_PTON=1 HAS_INET_NTOP=1 HAS_MSGHDR_FLAGS=1 HAS_SOCKLEN_T=1)
+endif()
 
-    # Sessions over ENet, without SDL: tests run hosts and clients in one process.
-    add_library(opencmr2_net STATIC net/net_session.cpp)
-    target_include_directories(opencmr2_net PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(opencmr2_net PUBLIC enet Threads::Threads)
+# Sessions over ENet, without SDL: tests run hosts and clients in one process.
+add_library(opencmr2_net STATIC net/net_session.cpp)
+target_include_directories(opencmr2_net PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(opencmr2_net PUBLIC enet)
+if(NOT VITA)
+    target_link_libraries(opencmr2_net PUBLIC Threads::Threads)
 endif()
 
 # ---- platform subsystems ---------------------------------------------------------
@@ -341,7 +345,8 @@ if(VITA)
         input/input_math.cpp
         input/input_vita.cpp
         input/vita_controls.cpp
-        net/net_api_vita.cpp)
+        net/net_api.cpp)
+    target_link_libraries(opencmr2_platform PRIVATE opencmr2_net)
 else()
     target_sources(opencmr2_platform PRIVATE
         platform/sys.cpp

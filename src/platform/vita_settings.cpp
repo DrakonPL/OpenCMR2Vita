@@ -45,7 +45,11 @@ const char kDefaults[] =
     "; Milliseconds before a button held in the menus repeats, and between repeats.\n"
     "key_repeat_delay = 500\n"
     "key_repeat_interval = 33\n"
-    "; The bindings of the buttons are in controls.ini.\n";
+    "; The bindings of the buttons are in controls.ini.\n"
+    "\n"
+    "[net]\n"
+    "; 1 = races over the network (LAN). 0 loads no network module.\n"
+    "enabled = 0\n";
 
 std::string CommentedOut(const std::string &text)
 {

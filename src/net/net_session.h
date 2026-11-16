@@ -19,18 +19,16 @@
 #ifndef OPENCMR2_NET_SESSION_H
 #define OPENCMR2_NET_SESSION_H
 
+#include "net/net_os.h"
 #include "port/net.h"
 
 #include <stdint.h>
 
 #include <atomic>
-#include <condition_variable>
 #include <deque>
 #include <map>
-#include <mutex>
 #include <random>
 #include <string>
-#include <thread>
 #include <vector>
 
 struct _ENetHost;
@@ -120,6 +118,7 @@ private:
     };
 
     void Run();
+    static void RunThread(void *session) { ((Session *)session)->Run(); }
     void Service(uint32_t now);
     void Search(uint32_t now);
     void ResolvePeers();
@@ -157,9 +156,9 @@ private:
     uint32_t SessionPlayerCount() const;
 
     Config config;
-    std::mutex mutex;
-    std::condition_variable changed;    // join and migration results
-    std::thread thread;
+    NetMutex mutex;
+    NetCondition changed;    // join and migration results
+    NetThread thread;
     std::atomic<bool> running{false};
     _ENetHost *host = nullptr;
     uint16_t boundPort = 0;

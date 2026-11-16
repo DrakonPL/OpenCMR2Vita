@@ -73,15 +73,28 @@ const uint32_t kRejectGraceMs = 1000;       // a rejected one must hang up withi
 const DWORD kPlayerTypePlayer = 1;          // DPPLAYERTYPE_PLAYER
 const DWORD kSessionPasswordRequired = 0x400;
 
-thread_local Session *t_servicing;
+NET_THREAD_LOCAL Session *t_servicing;
+
+// Made before main: a function-local static would go through pthread on the Vita.
+const auto kClockStart = std::chrono::steady_clock::now();
 
 uint32_t NowMs()
 {
-    static const auto start = std::chrono::steady_clock::now();
     // Never 0, which the session uses for "not yet".
-    return (uint32_t)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start)
+    return (uint32_t)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - kClockStart)
                .count() +
            1;
+}
+
+// enet_initialize for the process. Two first calls at once only initialize twice,
+// which ENet allows.
+std::atomic<int> s_enetState{0};    // 0 not yet, 1 ready, -1 failed
+
+bool EnetReady()
+{
+    if (s_enetState.load() == 0)
+        s_enetState.store(enet_initialize() == 0 ? 1 : -1);
+    return s_enetState.load() == 1;
 }
 
 bool Elapsed(uint32_t now, uint32_t since, uint32_t ms)
@@ -194,8 +207,7 @@ bool ReadPlayer(Reader &r, Player &p)
 
 Session::Session(const Config &config) : config(config)
 {
-    std::random_device device;
-    rng.seed(((uint64_t)device() << 32) ^ device());
+    rng.seed(NetRandomSeed());
 }
 
 Session::~Session()
@@ -204,7 +216,7 @@ Session::~Session()
     running = false;
     if (thread.joinable())
         thread.join();
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<NetMutex> lock(mutex);
     if (host != nullptr) {
         enet_host_flush(host);
         enet_host_destroy(host);
@@ -220,13 +232,10 @@ Session::~Session()
 
 HRESULT Session::Start()
 {
-    static std::once_flag initialised;
-    static bool enetReady;
-    std::call_once(initialised, [] { enetReady = enet_initialize() == 0; });
-    if (!enetReady)
+    if (!EnetReady())
         return NET_ERR_UNAVAILABLE;
 
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<NetMutex> lock(mutex);
     if (host != nullptr)
         return NET_OK;
     ENetAddress address;
@@ -247,7 +256,7 @@ HRESULT Session::Start()
     boundPort = enet_socket_get_address(host->socket, &bound) == 0 ? bound.port : address.port;
     LOG("net: UDP port %u", (unsigned)boundPort);
     running = true;
-    thread = std::thread(&Session::Run, this);
+    thread = NetThread(RunThread, this);
     return NET_OK;
 }
 
@@ -256,7 +265,7 @@ void Session::Abandon()
     running = false;
     if (thread.joinable())
         thread.join();
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<NetMutex> lock(mutex);
     if (host != nullptr) {
         enet_host_destroy(host);    // resets every peer without a word
         host = nullptr;
@@ -273,7 +282,7 @@ void Session::Run()
         enet_socket_wait(host->socket, &condition, 5);
         bool resolve = false;
         {
-            std::lock_guard<std::mutex> lock(mutex);
+            std::lock_guard<NetMutex> lock(mutex);
             uint32_t now = NowMs();
             Service(now);
             bool browsing = lastSearchCall != 0 && !Elapsed(now, lastSearchCall, kBrowseIdleMs);
@@ -358,7 +367,7 @@ void Session::ResolvePeers()
         else
             LOG("net: cannot resolve %s", entry.c_str());
     }
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<NetMutex> lock(mutex);
     peerAddresses = resolved;
     lastResolve = NowMs();
     lastQuery = 0;      // ask the new list straight away
@@ -446,7 +455,7 @@ HRESULT Session::EnumSessions(const NetGuid *application, NetSessionCallback cal
 {
     std::vector<SessionInfo> list;
     {
-        std::lock_guard<std::mutex> lock(mutex);
+        std::lock_guard<NetMutex> lock(mutex);
         if (host == nullptr)
             return NET_ERR_UNINITIALIZED;
         uint32_t now = NowMs();
@@ -503,7 +512,7 @@ void Session::ResetSession()
 
 HRESULT Session::Open(const NetSessionDesc *d, DWORD flags)
 {
-    std::unique_lock<std::mutex> lock(mutex);
+    std::unique_lock<NetMutex> lock(mutex);
     if (host == nullptr)
         return NET_ERR_UNINITIALIZED;
     if (state != State::Idle)
@@ -561,7 +570,7 @@ HRESULT Session::Open(const NetSessionDesc *d, DWORD flags)
 
 HRESULT Session::Close()
 {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<NetMutex> lock(mutex);
     if (state == State::Idle || host == nullptr)
         return NET_OK;
     // A graceful goodbye: the host's machines elect a new host at once
@@ -581,7 +590,7 @@ HRESULT Session::Close()
 
 HRESULT Session::GetSessionDesc(NetSessionDesc *d)
 {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<NetMutex> lock(mutex);
     if (d == nullptr)
         return NET_ERR_INVALIDPARAMS;
     if (state == State::Idle || state == State::Joining)
@@ -596,7 +605,7 @@ HRESULT Session::GetSessionDesc(NetSessionDesc *d)
 
 HRESULT Session::SetSessionDesc(const NetSessionDesc *d)
 {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<NetMutex> lock(mutex);
     if (d == nullptr)
         return NET_ERR_INVALIDPARAMS;
     if (state != State::Hosting)
@@ -628,7 +637,7 @@ std::vector<uint8_t> Session::SessionDescPacket()
 
 bool Session::IsHost()
 {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<NetMutex> lock(mutex);
     return state == State::Hosting;
 }
 
@@ -672,7 +681,7 @@ void Session::RemovePlayer(NetPlayerID id, bool announce)
 
 HRESULT Session::CreatePlayer(NetPlayerID *id, const NetName *name, const void *data, DWORD dataSize)
 {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<NetMutex> lock(mutex);
     if (state != State::Hosting && state != State::Joined)
         return NET_ERR_NOCONNECTION;
     if (id == nullptr || dataSize > kMaxPlayerData || (dataSize != 0 && data == nullptr))
@@ -705,7 +714,7 @@ HRESULT Session::CreatePlayer(NetPlayerID *id, const NetName *name, const void *
 
 HRESULT Session::DestroyPlayer(NetPlayerID id)
 {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<NetMutex> lock(mutex);
     if (!HasLocalPlayer(id))
         return NET_ERR_INVALIDPLAYER;
     RemovePlayer(id, false);
@@ -724,7 +733,7 @@ HRESULT Session::EnumPlayers(NetPlayerCallback callback, void *context)
 {
     std::vector<Player> list;
     {
-        std::lock_guard<std::mutex> lock(mutex);
+        std::lock_guard<NetMutex> lock(mutex);
         if (state == State::Idle || state == State::Joining)
             return NET_ERR_NOCONNECTION;
         for (const auto &p : players)
@@ -744,7 +753,7 @@ HRESULT Session::EnumPlayers(NetPlayerCallback callback, void *context)
 
 HRESULT Session::SetPlayerData(NetPlayerID id, const void *data, DWORD dataSize)
 {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<NetMutex> lock(mutex);
     if (!HasLocalPlayer(id))
         return NET_ERR_INVALIDPLAYER;
     if (dataSize > kMaxPlayerData || (dataSize != 0 && data == nullptr))
@@ -845,7 +854,7 @@ void Session::Relay(uint8_t origin, NetPlayerID from, NetPlayerID to, const uint
 
 HRESULT Session::Send(NetPlayerID from, NetPlayerID to, BOOL guaranteed, const void *data, DWORD dataSize)
 {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<NetMutex> lock(mutex);
     if (state != State::Hosting && state != State::Joined && state != State::Migrating)
         return NET_ERR_NOCONNECTION;
     if (!HasLocalPlayer(from))
@@ -927,7 +936,7 @@ size_t RenderedSize(const Inbound &m)
 
 HRESULT Session::Receive(NetPlayerID *from, NetPlayerID *to, void *data, DWORD *dataSize)
 {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<NetMutex> lock(mutex);
     if (dataSize == nullptr)
         return NET_ERR_INVALIDPARAMS;
     if (inbox.empty())
