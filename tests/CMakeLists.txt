@@ -156,6 +156,11 @@ add_executable(vita_settings_test vita_settings.cpp ${PROJECT_SOURCE_DIR}/src/pl
 target_include_directories(vita_settings_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME vita_settings COMMAND vita_settings_test)
 
+# The answer of a text dialog typed into a game entry, without SDL.
+add_executable(text_entry_test text_entry.cpp ${PROJECT_SOURCE_DIR}/src/platform/text_entry.cpp)
+target_include_directories(text_entry_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME text_entry COMMAND text_entry_test)
+
 # The keys of a draw's fragment program and pipeline, without SDL.
 add_executable(shader_key_test shader_key.cpp)
 target_include_directories(shader_key_test PRIVATE ${PROJECT_SOURCE_DIR}/src)

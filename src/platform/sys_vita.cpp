@@ -7,8 +7,10 @@
 #include "platform/sys_common.h"
 #include "platform/sys_event_ring.h"
 #include "platform/sys_paths.h"
+#include "platform/text_entry.h"
 #include "platform/vita_settings.h"
 #include "port/diagnostics.h"
+#include "port/input.h"
 #include "port/sys.h"
 #include "render/gxm_dialog.h"
 #include "render/gxm_memory.h"
@@ -16,7 +18,9 @@
 #include <psp2/apputil.h>
 #include <psp2/appmgr.h>
 #include <psp2/common_dialog.h>
+#include <psp2/ctrl.h>
 #include <psp2/display.h>
+#include <psp2/ime_dialog.h>
 #include <psp2/gxm.h>
 #include <psp2/io/dirent.h>
 #include <psp2/io/fcntl.h>
@@ -34,6 +38,7 @@
 #include <string.h>
 #include <time.h>
 
+#include <algorithm>
 #include <atomic>
 #include <string>
 #include <vector>
@@ -298,9 +303,18 @@ void CloseDialogDisplay(DialogBuffer (&buffers)[kDisplayBuffers])
     sceGxmTerminate();
 }
 
-// Returns the button the player chose, SCE_MSG_DIALOG_BUTTON_ID_INVALID if
-// the dialog could not open.
-int RunMessageDialog(const char *text, int buttonType)
+// A system dialog that runs until the player closes it.
+struct CommonDialog {
+    virtual ~CommonDialog() {}
+    virtual bool Start() = 0;
+    virtual SceCommonDialogStatus Status() = 0;
+    // Takes the result and ends the dialog.
+    virtual void Finish() = 0;
+};
+
+// Draws the dialog over black until it ends. The game waits. False if the
+// dialog could not open.
+bool RunCommonDialog(CommonDialog &dialog)
 {
     static bool configured;
     if (!configured) {
@@ -315,19 +329,12 @@ int RunMessageDialog(const char *text, int buttonType)
     if (renderer != nullptr)
         renderer->BeginDialog();
     else if (!OpenDialogDisplay(buffers))
-        return SCE_MSG_DIALOG_BUTTON_ID_INVALID;
+        return false;
 
-    SceMsgDialogUserMessageParam message{};
-    message.buttonType = buttonType;
-    message.msg = (const SceChar8 *)text;
-    SceMsgDialogParam param;
-    sceMsgDialogParamInit(&param);
-    param.mode = SCE_MSG_DIALOG_MODE_USER_MSG;
-    param.userMsgParam = &message;
-    int button = SCE_MSG_DIALOG_BUTTON_ID_INVALID;
-    if (sceMsgDialogInit(&param) >= 0) {
+    const bool started = dialog.Start();
+    if (started) {
         int back = 0, front = 0;
-        while (sceMsgDialogGetStatus() == SCE_COMMON_DIALOG_STATUS_RUNNING) {
+        while (dialog.Status() == SCE_COMMON_DIALOG_STATUS_RUNNING) {
             if (renderer != nullptr) {
                 renderer->DialogFrame();
                 continue;
@@ -346,14 +353,165 @@ int RunMessageDialog(const char *text, int buttonType)
             back = (back + 1) % kDisplayBuffers;
             sceDisplayWaitVblankStart();
         }
+        dialog.Finish();
+    }
+    if (renderer == nullptr)
+        CloseDialogDisplay(buffers);
+    return started;
+}
+
+struct MessageDialog : CommonDialog {
+    SceMsgDialogUserMessageParam message{};
+    SceMsgDialogParam param{};
+    int button = SCE_MSG_DIALOG_BUTTON_ID_INVALID;
+
+    bool Start() override
+    {
+        sceMsgDialogParamInit(&param);
+        param.mode = SCE_MSG_DIALOG_MODE_USER_MSG;
+        param.userMsgParam = &message;
+        return sceMsgDialogInit(&param) >= 0;
+    }
+    SceCommonDialogStatus Status() override { return sceMsgDialogGetStatus(); }
+    void Finish() override
+    {
         SceMsgDialogResult result{};
         sceMsgDialogGetResult(&result);
         button = result.buttonId;
         sceMsgDialogTerm();
     }
-    if (renderer == nullptr)
-        CloseDialogDisplay(buffers);
-    return button;
+};
+
+// Returns the button the player chose, SCE_MSG_DIALOG_BUTTON_ID_INVALID if
+// the dialog could not open.
+int RunMessageDialog(const char *text, int buttonType)
+{
+    MessageDialog dialog;
+    dialog.message.buttonType = buttonType;
+    dialog.message.msg = (const SceChar8 *)text;
+    RunCommonDialog(dialog);
+    return dialog.button;
+}
+
+// ---- text entry -----------------------------------------------------------------
+// The game edits an entry while it calls Sys_RequestTextInput each frame. The
+// IME dialog opens as the entry starts, and again on Triangle. An offered
+// entry (the lobby's chat line) opens on Triangle only. The answer is typed
+// into the entry as on Android: one character a round of polls, as the game
+// takes one a frame from a queue of 30.
+
+constexpr SceUInt64 kEntryEndMicros = 250000;   // no request for this long: the entry ended
+
+struct ImeDialog : CommonDialog {
+    std::u16string title, initial;
+    std::vector<char16_t> buffer;
+    int maxLength = 1;
+    bool entered = false;
+
+    bool Start() override
+    {
+        SceImeDialogParam param;
+        sceImeDialogParamInit(&param);
+        param.supportedLanguages = SCE_IME_LANGUAGE_ENGLISH;
+        param.languagesForced = SCE_TRUE;
+        param.type = SCE_IME_TYPE_DEFAULT;
+        param.option = SCE_IME_OPTION_NO_ASSISTANCE;
+        param.title = (const SceWChar16 *)title.c_str();
+        param.maxTextLength = (SceUInt32)maxLength;
+        param.initialText = (SceWChar16 *)initial.data();
+        param.inputTextBuffer = (SceWChar16 *)buffer.data();
+        return sceImeDialogInit(&param) >= 0;
+    }
+    SceCommonDialogStatus Status() override { return sceImeDialogGetStatus(); }
+    void Finish() override
+    {
+        SceImeDialogResult result{};
+        sceImeDialogGetResult(&result);
+        entered = result.button == SCE_IME_DIALOG_BUTTON_ENTER;
+        sceImeDialogTerm();
+    }
+};
+
+SceUInt64 s_entryUntil;         // process time
+bool s_entryShown;              // the dialog opened for this entry (or waits for Triangle)
+bool s_triangleDown;
+bool s_entryHeld;               // the pad's actions wait for the answer to be typed
+std::vector<int> s_pendingText;
+bool s_textGiven;               // a character went to the game in this round of polls
+
+bool PadIdle(unsigned *buttons)
+{
+    SceCtrlData pad{};
+    if (sceCtrlPeekBufferPositive(0, &pad, 1) < 1)
+        return true;
+    *buttons = pad.buttons;
+    return pad.buttons == 0;
+}
+
+void OpenImeDialog(const char *label, const char *text, int maxLength)
+{
+    ImeDialog dialog;
+    dialog.maxLength = std::clamp(maxLength, 1, SCE_IME_DIALOG_MAX_TEXT_LENGTH);
+    dialog.title = TextEntry::Utf16FromWindows1252(label != NULL ? label : "");
+    if (dialog.title.size() > SCE_IME_DIALOG_MAX_TITLE_LENGTH)
+        dialog.title.resize(SCE_IME_DIALOG_MAX_TITLE_LENGTH);
+    const std::string old = text != NULL ? text : "";
+    dialog.initial = TextEntry::Utf16FromWindows1252(old);
+    if (dialog.initial.size() > (size_t)dialog.maxLength)
+        dialog.initial.resize(dialog.maxLength);
+    dialog.buffer.assign(dialog.maxLength + 1, 0);
+    if (!RunCommonDialog(dialog)) {
+        Sys_Log("ime: the dialog did not open");
+        return;
+    }
+    if (!dialog.entered) {
+        Sys_Log("ime: cancelled");
+        return;
+    }
+    s_pendingText = TextEntry::ReplaceKeys(old.size(), TextEntry::CodePointsFromUtf16(dialog.buffer.data()));
+    Sys_Log("ime: %u keys for the entry", (unsigned)s_pendingText.size());
+    // The Cross that closed the dialog would confirm the menu under it.
+    s_entryHeld = true;
+    Input_SetTextEntryOpen(TRUE);
+}
+
+void RequestTextInput(const char *label, const char *text, int maxLength, bool offered)
+{
+    if (sceKernelGetProcessTimeWide() >= s_entryUntil)
+        s_entryShown = offered;
+    unsigned buttons = 0;
+    PadIdle(&buttons);
+    const bool triangle = (buttons & SCE_CTRL_TRIANGLE) != 0;
+    const bool pressed = triangle && !s_triangleDown;
+    s_triangleDown = triangle;
+    if (s_pendingText.empty() && (!s_entryShown || pressed)) {
+        s_entryShown = true;
+        OpenImeDialog(label, text, maxLength);
+    }
+    // After the dialog: the game waited in it.
+    s_entryUntil = sceKernelGetProcessTimeWide() + kEntryEndMicros;
+}
+
+bool TakePendingText(SysEvent *event)
+{
+    if (s_textGiven || s_pendingText.empty())
+        return false;
+    memset(event, 0, sizeof(*event));
+    event->type = SYS_EVENT_TEXT;
+    event->character = s_pendingText.front();
+    s_pendingText.erase(s_pendingText.begin());
+    s_textGiven = true;
+    return true;
+}
+
+// The pad's actions come back once the answer is typed and the pad is let go.
+void ReleaseEntryHold()
+{
+    unsigned buttons = 0;
+    if (!s_entryHeld || !s_pendingText.empty() || !PadIdle(&buttons))
+        return;
+    s_entryHeld = false;
+    Input_SetTextEntryOpen(FALSE);
 }
 
 // ---- system events --------------------------------------------------------------
@@ -828,7 +986,11 @@ bool Platform_TakeResumed(void)
 extern "C" int Sys_PollEvent(SysEvent *event)
 {
     PollSystem();
-    return s_events.Pop(event) ? 1 : 0;
+    if (s_events.Pop(event) || TakePendingText(event))
+        return 1;
+    s_textGiven = false;
+    ReleaseEntryHold();
+    return 0;
 }
 
 extern "C" int Sys_WaitEvent(SysEvent *event)
@@ -838,8 +1000,15 @@ extern "C" int Sys_WaitEvent(SysEvent *event)
     return 1;
 }
 
-extern "C" void Sys_RequestTextInput(const char *, const char *, int) {}
-extern "C" void Sys_OfferTextInput(const char *, const char *, int) {}
+extern "C" void Sys_RequestTextInput(const char *label, const char *text, int maxLength)
+{
+    RequestTextInput(label, text, maxLength, false);
+}
+
+extern "C" void Sys_OfferTextInput(const char *label, const char *text, int maxLength)
+{
+    RequestTextInput(label, text, maxLength, true);
+}
 
 extern "C" BOOL Sys_CreateWindow(const char *, BOOL) { return TRUE; }
 extern "C" void Sys_DestroyWindow(void) {}
