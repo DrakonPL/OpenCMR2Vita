@@ -46,6 +46,7 @@ int PortRate(int rate)
 int Entry(SceSize, void *)
 {
     int block = 0;
+    int lastError = 0;
     while (!s_quit) {
         const SceUInt64 start = sceKernelGetProcessTimeWide();
         // Paused (the game is not in front): silence, and the sounds keep
@@ -58,7 +59,11 @@ int Entry(SceSize, void *)
         for (int i = 0; i < kBlockFrames * 2; i++)
             pcm[i] = (int16_t)(s_mix[i] * 32767.0f);
         s_mixerBusyMicros += (uint32_t)(sceKernelGetProcessTimeWide() - start);
-        sceAudioOutOutput(s_port, pcm);
+        // A port that goes bad (after a suspend, say) logs once for each new error.
+        const int result = sceAudioOutOutput(s_port, pcm);
+        if (result < 0 && result != lastError)
+            Sys_Log("audio: sceAudioOutOutput: 0x%08x", (unsigned)result);
+        lastError = result < 0 ? result : 0;
         block ^= 1;
     }
     // The last block plays to its end.
@@ -213,6 +218,7 @@ extern "C" void Audio_Shutdown(void)
         sceKernelWaitThreadEnd(s_thread, NULL, NULL);
         sceKernelDeleteThread(s_thread);
         s_thread = -1;
+        Sys_Log("audio: thread joined");
     }
     if (s_port >= 0) {
         sceAudioOutReleasePort(s_port);
