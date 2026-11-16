@@ -79,6 +79,16 @@ struct GfxRangeBox {
     uint32_t serial;
 };
 
+// Gfx_CreateIndexBuffer. used: the end of the part that the game wrote.
+struct GfxIndexBuffer {
+    std::vector<uint16_t> indices;
+    uint32_t used = 0;
+    uint32_t version = 1;           // bumped by every write
+    uint32_t referencedRecord = 0;  // recording that last drew from it
+    uint32_t drawnStart = 0, drawnEnd = 0;  // the indices that recording draws
+    void *gpu = nullptr;            // executor's copy
+};
+
 struct GfxVertexBuffer {
     std::vector<GfxVertex> vertices;
     uint32_t version = 1;           // bumped by every lock
@@ -226,7 +236,10 @@ struct GfxCommand {
     uint32_t firstVertexByte;   // into the buffer or the frame's vertex data,
                                 // a multiple of the vertex size
     uint32_t vertexCount;
-    uint32_t firstIndex;        // into the frame's indices, or ~0 for none
+    uint32_t firstIndex;        // into the frame's indices or into indexBuffer, or ~0 for none
+    // The executor's copy of this buffer has the indices
+    // (GfxExecutor::TakesIndexBuffers), else nullptr.
+    GfxIndexBuffer *indexBuffer;
     uint32_t indexCount;
     uint32_t state;             // index into the frame's states
     // The textures of the draw's two stages. For an executor that takes
@@ -376,6 +389,7 @@ struct GfxFrame {
     std::vector<GfxDrawState> states;
     std::vector<GfxCommand> commands;
     std::vector<GfxVertexBuffer *> buffers;     // drawn from, each once
+    std::vector<GfxIndexBuffer *> indexBuffers; // drawn from by reference, each once
     std::vector<GfxSnapshot> snapshots;         // each buffer once
     std::vector<GfxPatch> patches;              // of the buffers in buffers
     // The small batches, and the number of their last job (a frame is
@@ -392,6 +406,7 @@ struct GfxFrame {
         states.clear();
         commands.clear();
         buffers.clear();
+        indexBuffers.clear();
         snapshots.clear();
         patches.clear();
         if (batch != nullptr)
@@ -454,6 +469,12 @@ struct GfxExecutor {
     virtual void NoteWorkerTimes(const GfxWorkerTimes &) {}
     virtual void DestroyTexture(GfxTexture *texture) = 0;
     virtual void DestroyVertexBuffer(GfxVertexBuffer *) {}
+    virtual void DestroyIndexBuffer(GfxIndexBuffer *) {}
+    // Whether it keeps a copy of each index buffer that a frame draws from
+    // (GfxFrame::indexBuffers): a draw of a buffer that it has by reference
+    // then points into the index buffer. Otherwise the recorder copies the
+    // indices of each draw into the frame.
+    virtual bool TakesIndexBuffers() const { return false; }
     // Whether the recorder joins consecutive draws of one state from the
     // frame's vertex data into one command (a run of sprites or lines),
     // records small 3D draws in world space, starts no new state for a new

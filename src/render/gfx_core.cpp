@@ -484,6 +484,10 @@ int s_bufferRestSetting = 1;       // [video] buffer_rest: a buffer that rested 
 // The reach of the buffer draw that is recorded now, from its caller
 // (Gfx_DrawIndexedPrimitiveVBReach), else below zero.
 float s_givenReach = -1.0f;
+// The index buffer of the draw that is recorded now, and its first index
+// (Gfx_DrawIndexedPrimitiveIB), else nullptr.
+GfxIndexBuffer *s_givenIndexBuffer;
+uint32_t s_givenFirstIndex;
 
 // What the recorded state of the draw that is recorded now leaves out:
 // OVERRIDE_BLEND, OVERRIDE_TEST. A 3D draw and a 2D draw with one state of
@@ -1140,7 +1144,22 @@ void RecordNewDraw(int primitive, bool transformed, const void *vertices, DWORD 
     }
     if (cmd.hasBox && given >= 0.0f)
         cmd.reach = given;
-    if (indices != NULL) {
+    if (indices != NULL && s_givenIndexBuffer != NULL && cmd.buffer != NULL && s_executor->TakesIndexBuffers()) {
+        // The executor has the indices in its copy of the index buffer.
+        cmd.indexBuffer = s_givenIndexBuffer;
+        cmd.firstIndex = s_givenFirstIndex;
+        cmd.indexCount = indexCount;
+        if (s_givenIndexBuffer->referencedRecord != s_record) {
+            s_givenIndexBuffer->referencedRecord = s_record;
+            s_givenIndexBuffer->drawnStart = s_givenFirstIndex;
+            s_givenIndexBuffer->drawnEnd = s_givenFirstIndex;
+            s_frame.indexBuffers.push_back(s_givenIndexBuffer);
+        }
+        GfxIndexBuffer &drawn = *s_givenIndexBuffer;
+        const uint32_t end = s_givenFirstIndex + indexCount;
+        drawn.drawnStart = s_givenFirstIndex < drawn.drawnStart ? s_givenFirstIndex : drawn.drawnStart;
+        drawn.drawnEnd = end > drawn.drawnEnd ? end : drawn.drawnEnd;
+    } else if (indices != NULL) {
         cmd.firstIndex = (uint32_t)s_frame.indices.size();
         cmd.indexCount = indexCount;
         s_frame.indices.insert(s_frame.indices.end(), indices, indices + indexCount);
@@ -2164,6 +2183,59 @@ extern "C" void Gfx_DrawIndexedPrimitiveVBReach(int primitive, GfxVertexBuffer *
     s_givenReach = reach;
     RecordDraw(primitive, false, buffer->vertices.data() + firstVertex, vertexCount, indices, indexCount, buffer,
                firstVertex);
+    s_givenReach = -1.0f;
+}
+
+// ---- index buffers ----
+
+extern "C" GfxIndexBuffer *Gfx_CreateIndexBuffer(DWORD indexCount)
+{
+    GfxIndexBuffer *buffer = new GfxIndexBuffer;
+    buffer->indices.assign(indexCount, 0);
+    return buffer;
+}
+
+extern "C" void Gfx_DestroyIndexBuffer(GfxIndexBuffer *buffer)
+{
+    if (buffer == NULL)
+        return;
+    if (buffer->referencedRecord == s_record)
+        Flush(FLUSH_BUFFER_GONE);
+    if (s_executor != NULL)
+        s_executor->DestroyIndexBuffer(buffer);
+    delete buffer;
+}
+
+extern "C" void Gfx_WriteIndexBuffer(GfxIndexBuffer *buffer, DWORD firstIndex, const WORD *indices, DWORD count)
+{
+    if (buffer == NULL || indices == NULL || firstIndex > buffer->indices.size() ||
+        count > buffer->indices.size() - firstIndex)
+        return;
+    // The draws before keep their indices: the executor copies the buffer
+    // once for each frame, when it prepares the frame.
+    if (buffer->referencedRecord == s_record && firstIndex < buffer->drawnEnd &&
+        firstIndex + count > buffer->drawnStart)
+        Flush(FLUSH_BUFFER_LOCK);
+    memcpy(&buffer->indices[firstIndex], indices, count * sizeof(WORD));
+    buffer->used = firstIndex + count > buffer->used ? firstIndex + count : buffer->used;
+    buffer->version++;
+}
+
+extern "C" void Gfx_DrawIndexedPrimitiveIB(int primitive, GfxVertexBuffer *buffer, DWORD firstVertex,
+                                           DWORD vertexCount, GfxIndexBuffer *indices, DWORD firstIndex,
+                                           DWORD indexCount, float reach)
+{
+    s_traceCaller = __builtin_return_address(0);
+    if (buffer == NULL || indices == NULL || firstVertex + vertexCount > buffer->vertices.size() ||
+        firstIndex > indices->used || indexCount > indices->used - firstIndex)
+        return;
+    // A draw whose vertices go into the frame takes its indices with them.
+    s_givenReach = reach;
+    s_givenIndexBuffer = indices;
+    s_givenFirstIndex = firstIndex;
+    RecordDraw(primitive, false, buffer->vertices.data() + firstVertex, vertexCount, &indices->indices[firstIndex],
+               indexCount, buffer, firstVertex);
+    s_givenIndexBuffer = nullptr;
     s_givenReach = -1.0f;
 }
 

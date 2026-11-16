@@ -162,6 +162,14 @@ struct GxmVertexBuffer {
     uint32_t snapshotFirst = 0;
 };
 
+// The executor's copy of an index buffer, as GxmVertexBuffer for vertices.
+struct GxmIndexBuffer {
+    void *memory = nullptr;     // from the static pool
+    uint32_t version = 0;
+    uint32_t noRoomVersion = 0; // the version the pool had no room for (0: none)
+    uint32_t copiedStart = 0, copiedEnd = 0;    // the indices of that version in memory
+};
+
 // A fragment program variant: its patcher id and its fu[] parameter.
 struct Variant {
     SceGxmShaderPatcherId id = nullptr;
@@ -208,6 +216,7 @@ struct Stats {
     unsigned vertexUploads = 0, fragmentUploads = 0;    // default uniform buffers reserved and filled
     unsigned rangesMeasured = 0, rangeVertices = 0;     // vertex buffer ranges that the cache did not have
     unsigned snapshotBytes = 0;                         // vertices of buffers copied into the ring
+    unsigned indexUploadBytes = 0;                      // index buffers copied into the static pool
     unsigned patchBytes = 0;                            // vertices written into the GPU copies of buffers
     unsigned ownDraws = 0, ownVertices = 0;             // draws of the frame's vertices that were walked for the fade
     // The skies (gfx_sky_plan.h): drawn into the backdrop, stretched from
@@ -1332,6 +1341,51 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         }
     }
 
+    // A new version of an index buffer goes into new memory: frames still on
+    // the GPU may draw from the old copy.
+    void UploadIndexBuffers(const GfxFrame &frame)
+    {
+        for (GfxIndexBuffer *b : frame.indexBuffers) {
+            GxmIndexBuffer *g = (GxmIndexBuffer *)b->gpu;
+            if (g == nullptr)
+                b->gpu = g = new GxmIndexBuffer;
+            // Only the indices that the frame draws.
+            const uint32_t bytes = (b->drawnEnd - b->drawnStart) * (uint32_t)sizeof(uint16_t);
+            if ((g->memory != nullptr && g->version == b->version && g->copiedStart <= b->drawnStart &&
+                 g->copiedEnd >= b->drawnEnd) ||
+                bytes == 0 || g->noRoomVersion == b->version)
+                continue;
+            if (g->memory != nullptr)
+                staticDeferred.Add(g->memory, presented);
+            g->memory = memory.Static().Alloc(bytes);
+            if (g->memory == nullptr) {
+                if (!loggedStaticFull)
+                    Sys_Log("gxm: no room for an index buffer of %u KB", bytes / 1024);
+                loggedStaticFull = true;
+                g->noRoomVersion = b->version;
+                continue;
+            }
+            memcpy(g->memory, &b->indices[b->drawnStart], bytes);
+            g->version = b->version;
+            g->copiedStart = b->drawnStart;
+            g->copiedEnd = b->drawnEnd;
+            stats.indexUploadBytes += bytes;
+        }
+    }
+
+    bool TakesIndexBuffers() const override { return true; }
+
+    void DestroyIndexBuffer(GfxIndexBuffer *b) override
+    {
+        GxmIndexBuffer *g = (GxmIndexBuffer *)b->gpu;
+        if (g == nullptr)
+            return;
+        if (g->memory != nullptr)
+            staticDeferred.Add(g->memory, presented);
+        delete g;
+        b->gpu = nullptr;
+    }
+
     // Each draw costs CPU time here: a run of the game's sprites or lines
     // comes as one draw.
     bool JoinsDraws() const override { return true; }
@@ -1814,7 +1868,17 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         }
         const uint16_t *indices = identityIndices;
         unsigned count = c.vertexCount;
-        if (c.firstIndex != ~0u) {
+        if (c.indexBuffer != nullptr) {
+            const GxmIndexBuffer *g = (const GxmIndexBuffer *)c.indexBuffer->gpu;
+            // Prepare made the copy of this frame. The game may write the
+            // buffer for the next frame now.
+            if (g == nullptr || g->memory == nullptr || c.firstIndex < g->copiedStart ||
+                c.firstIndex + c.indexCount > g->copiedEnd)
+                vertices = nullptr;
+            else
+                indices = (const uint16_t *)g->memory + (c.firstIndex - g->copiedStart);
+            count = c.indexCount;
+        } else if (c.firstIndex != ~0u) {
             if (indexOffset == GxmFrameRing::kFull)
                 vertices = nullptr;
             else
@@ -2283,6 +2347,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         texturesChanged = gpuTextures.TakeChanged() || texturesChanged;
         const uint64_t buffersStart = sceKernelGetProcessTimeWide();
         UploadVertexBuffers(frame);
+        UploadIndexBuffers(frame);
         PatchVertexBuffers(frame);
         const uint64_t snapshotsStart = sceKernelGetProcessTimeWide();
         stats.textureMicros += (unsigned)(buffersStart - texturesStart);
@@ -2685,9 +2750,9 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         char recorder[512];
         Gfx_RecorderCountsText(recorder, sizeof(recorder));
         Sys_Log("gxm: per s ranges measured %u with %u vertices, own vertices walked %u in %u draws, snapshots %u KB, "
-                "patches %u KB; recorder: %s",
+                "patches %u KB, index buffers %u KB; recorder: %s",
                 stats.rangesMeasured, stats.rangeVertices, stats.ownVertices, stats.ownDraws, stats.snapshotBytes / 1024,
-                stats.patchBytes / 1024, recorder);
+                stats.patchBytes / 1024, stats.indexUploadBytes / 1024, recorder);
         // Prepare runs on the game's thread; Execute on the worker with the
         // threaded executor.
         const double frames = stats.frames > 0 ? (double)stats.frames : 1.0;
