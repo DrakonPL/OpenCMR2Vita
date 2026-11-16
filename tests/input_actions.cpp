@@ -11,6 +11,7 @@
 #include "platform/platform.h"
 #include "platform/testing.h"
 #include "input/input_internal.h"
+#include "input/vita_controls.h"
 #include "main.h"
 #include "Car.h"
 
@@ -894,6 +895,58 @@ void CheckBindingsFile(Pad &pad)
     std::filesystem::remove_all(dir);
 }
 
+// The Vita's controls page: a captured input trades places with the action
+// that had it, the defaults come back, and the capture waits for the opening
+// button to be let go.
+void CheckVitaCapture()
+{
+    Profile vita;
+    vita.section = "vita";
+    Bindings_SetDefaults(vita, NULL);
+    const Source cross = { SOURCE_VITA_BUTTON, VITA_CROSS, 0 };
+    const Source square = { SOURCE_VITA_BUTTON, VITA_SQUARE, 0 };
+    Bindings_Assign(vita, INPUT_HANDBRAKE, cross);
+    Check(vita.actions[INPUT_HANDBRAKE].size() == 1 && SameSource(vita.actions[INPUT_HANDBRAKE][0], cross),
+          "Cross is the handbrake");
+    Check(vita.actions[INPUT_SHIFT_UP].size() == 1 && SameSource(vita.actions[INPUT_SHIFT_UP][0], square),
+          "the old handbrake, Square, moves to shift up, which had Cross");
+    Check(SameSource(vita.actions[INPUT_MENU_CONFIRM][0], cross), "Cross still confirms in the menus");
+    Bindings_SetDefaults(vita, NULL);
+    Check(SameSource(vita.actions[INPUT_HANDBRAKE][0], square) && SameSource(vita.actions[INPUT_SHIFT_UP][0], cross),
+          "restore defaults brings the table back");
+
+    VitaPad pad = {};
+    VitaCapture capture;
+    Source found = {};
+    pad.buttons[VITA_CROSS] = true;
+    capture.Begin(INPUT_HANDBRAKE, pad, 1000);
+    Check(capture.Update(pad, 1016, &found) == 0, "the Cross that opened the capture is not taken");
+    pad.buttons[VITA_CROSS] = false;
+    pad.axes[VITA_LX] = 10000;
+    Check(capture.Update(pad, 1032, &found) == 0 && capture.Update(pad, 1048, &found) == 0,
+          "a stick moved less than half way is not taken");
+    pad.buttons[VITA_TRIANGLE] = true;
+    Check(capture.Update(pad, 1064, &found) == 1 && SameSource(found, { SOURCE_VITA_BUTTON, VITA_TRIANGLE, 0 }) &&
+          capture.Action() == INPUT_HANDBRAKE, "Triangle is captured");
+
+    VitaPad rest = {};
+    capture.Begin(INPUT_STEER_LEFT, rest, 2000);
+    Check(capture.Update(rest, 2016, &found) == 0, "nothing held at the start");
+    VitaPad stick = {};
+    stick.axes[VITA_LX] = -20000;
+    Check(capture.Update(stick, 2032, &found) == 1 && SameSource(found, { SOURCE_VITA_AXIS, VITA_LX, AXIS_NEGATIVE }),
+          "the left stick's left half is captured");
+
+    capture.Begin(INPUT_CAMERA, rest, 3000);
+    Check(capture.Update(rest, 13000, &found) == 0 && capture.Update(rest, 13001, &found) == -1,
+          "the capture gives up after ten seconds");
+
+    Check(std::string(VitaControls_Name(cross)) == "Cross" &&
+          std::string(VitaControls_Name({ SOURCE_VITA_AXIS, VITA_LX, AXIS_POSITIVE })) == "Left Stick Right" &&
+          std::string(VitaControls_Name({ SOURCE_VITA_AXIS, VITA_RY, AXIS_NEGATIVE })) == "Right Stick Up",
+          "the inputs have plain names");
+}
+
 } // namespace
 
 int main()
@@ -932,6 +985,7 @@ int main()
     CheckControlsPages(pad);
     CheckBindingsFile(pad);
     CheckVitaSection();
+    CheckVitaCapture();
 
     Check(Input_GetProfileCount() == 3 && Input_GetProfileKind(2) == INPUT_PROFILE_GAMEPAD,
           "the controls pages list the gamepads while one is connected");
