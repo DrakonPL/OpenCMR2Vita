@@ -54,6 +54,7 @@ const char kDataDir[] = "ux0:data/OpenCMR2/";
 const char kUserDir[] = "ux0:data/OpenCMR2/user/";
 
 SysSettings::Values s_settings;
+unsigned s_settingsSerial;     // SysVita_SettingsSerial
 SysEventRing s_events;
 // The file work of all threads, for the line of a long frame (dev builds):
 // opens, reads, bytes read, and the time in them.
@@ -1485,6 +1486,11 @@ extern "C" const char *Sys_GetOptionText(const char *name, const char *fallback)
     return Platform_GetSetting(name, fallback);
 }
 
+unsigned SysVita_SettingsSerial(void)
+{
+    return s_settingsSerial;
+}
+
 extern "C" BOOL Sys_SetOption(const char *name, int value)
 {
     const std::string key = SysPaths::Lower(name);
@@ -1493,6 +1499,7 @@ extern "C" BOOL Sys_SetOption(const char *name, int value)
         return FALSE;
     const std::string text = std::to_string(value);
     s_settings[key] = text;
+    s_settingsSerial++;
     const std::string file = std::string(kUserDir) + "opencmr2.ini";
     std::string contents;
     ReadWholeFile(file, contents);

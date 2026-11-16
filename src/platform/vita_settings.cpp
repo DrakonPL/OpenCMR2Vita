@@ -47,6 +47,12 @@ const char kDefaults[] =
     "; 1 = the merges of the ground and the objects keep their indices on the\n"
     "; GPU. The device measured no gain (VP-7.4), so 0.\n"
     "index_buffers = 0\n"
+    "; 1 = the frame rate over the picture (the screen options set it).\n"
+#ifdef OPENCMR2_DEV
+    "show_fps = 1\n"
+#else
+    "show_fps = 0\n"
+#endif
     "\n"
     "[input]\n"
     "; Milliseconds before a button held in the menus repeats, and between repeats.\n"

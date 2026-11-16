@@ -2839,12 +2839,6 @@ struct MergeIndexBuffer {
 };
 static int s_indexBuffersSetting = -1;
 
-// The screen options changed [video] index_buffers: the next merge reads it.
-void Game_ReadIndexBuffersSetting(void)
-{
-    s_indexBuffersSetting = -1;
-}
-
 // The buffer with the merge's indices from p->offset, NULL: none.
 static GfxIndexBuffer *Game_MergeIndices(MergeIndexBuffer *p, const GroundMerge *m)
 {
