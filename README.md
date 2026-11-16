@@ -239,6 +239,31 @@ The installation can also be set with the `OPENCMR2_DATA` environment variable
 or `[paths] data` in `opencmr2.ini`, or copied into a `Data` folder next to the
 executable, which is found without asking.
 
+### PS Vita
+
+The `.vpk` holds the program only. It holds no game data. The console must
+run HENkaku or Ensō, with VitaShell.
+
+1. Copy `opencmr2.vpk` to the memory card.
+2. Install it with VitaShell.
+3. Copy the folders `Game`, `FrontEnd`, `Sounds`, `CountrySpecific` and
+   `SetupRep` of your PC installation to `ux0:data/OpenCMR2/`.
+4. Optional: convert the movies for the hardware decoder of the Vita with
+   `tools/convert_movies_vita.sh`. Copy the output folders over the folders of
+   step 3. Without the converted movies, the CPU decodes the Bink movies more
+   slowly.
+5. Start OpenCMR2 from the LiveArea.
+
+If a folder is missing, the game shows a message with the missing names and
+stops. The settings, the controls, the saves and the log are in
+`ux0:data/OpenCMR2/user/`.
+
+The default controls: the left stick or the D-pad steers. R is the throttle
+and L is the brake. Square is the handbrake. Cross shifts up and Triangle
+shifts down. Select changes the camera, Circle looks back, and Start pauses.
+In the menus, Cross confirms and Circle goes back. The `[vita]` section of
+`controls.ini` changes the bindings.
+
 ## Configuration
 
 Settings are stored in `opencmr2.ini` in the user directory
@@ -368,6 +393,19 @@ signed with the release key given by `OPENCMR2_KEYSTORE`,
 `OPENCMR2_KEYSTORE_PASSWORD`, `OPENCMR2_KEY_ALIAS` and
 `OPENCMR2_KEY_PASSWORD` (or the `opencmr2.keystore` Gradle properties), and
 with the debug key otherwise.
+
+### PS Vita
+
+The `vita` preset builds with [VitaSDK](https://vitasdk.org) and needs
+`VITASDK` set and Python 3 on the `PATH`:
+
+```sh
+cmake --preset vita
+cmake --build --preset vita
+```
+
+The package is `build/vita/opencmr2.vpk`. The build fails when a name in the
+package is not ASCII, because VitaShell does not install such a package.
 
 ### Tests
 
