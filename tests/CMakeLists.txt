@@ -150,6 +150,12 @@ add_executable(sys_paths_test sys_paths.cpp ${PROJECT_SOURCE_DIR}/src/platform/s
 target_include_directories(sys_paths_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME sys_paths COMMAND sys_paths_test)
 
+# The default settings of the PS Vita and its language map, without SDL.
+add_executable(vita_settings_test vita_settings.cpp ${PROJECT_SOURCE_DIR}/src/platform/vita_settings.cpp
+    ${PROJECT_SOURCE_DIR}/src/platform/sys_common.cpp ${PROJECT_SOURCE_DIR}/src/platform/sys_paths.cpp)
+target_include_directories(vita_settings_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME vita_settings COMMAND vita_settings_test)
+
 # The keys of a draw's fragment program and pipeline, without SDL.
 add_executable(shader_key_test shader_key.cpp)
 target_include_directories(shader_key_test PRIVATE ${PROJECT_SOURCE_DIR}/src)

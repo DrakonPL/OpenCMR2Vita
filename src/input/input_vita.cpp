@@ -5,6 +5,7 @@
 
 #include "input/input_internal.h"
 #include "input/input_math.h"
+#include "platform/platform.h"
 #include "port/input.h"
 
 #include <psp2/ctrl.h>
@@ -227,8 +228,8 @@ extern "C" BOOL Input_IsKeyDown(int) { return FALSE; }
 
 extern "C" void Input_GetKeyRepeat(DWORD *delay, DWORD *interval)
 {
-    *delay = 500;
-    *interval = 33;
+    *delay = (DWORD)Platform_GetSettingInt("input.key_repeat_delay", 500);
+    *interval = (DWORD)Platform_GetSettingInt("input.key_repeat_interval", 33);
 }
 
 extern "C" const char *Input_GetKeyName(int) { return ""; }
