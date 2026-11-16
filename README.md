@@ -407,6 +407,10 @@ cmake --build --preset vita
 The package is `build/vita/opencmr2.vpk`. The build fails when a name in the
 package is not ASCII, because VitaShell does not install such a package.
 
+The LiveArea images in `res/vita` are placeholders. To use your own, run
+`tools/make_livearea.py PICTURE LOGO res/vita-local` (it needs Pillow). The
+build then takes the images from `res/vita-local`, which is not in git.
+
 ### Tests
 
 ```sh

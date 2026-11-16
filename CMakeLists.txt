@@ -111,7 +111,12 @@ if(VITA)
         VERBATIM
         COMMENT "Making eboot.bin")
 
+    # res/vita-local (not in git, tools/make_livearea.py) replaces the placeholders.
     set(VITA_SCE_SYS ${PROJECT_SOURCE_DIR}/res/vita/sce_sys)
+    if(EXISTS ${PROJECT_SOURCE_DIR}/res/vita-local/sce_sys/icon0.png)
+        set(VITA_SCE_SYS ${PROJECT_SOURCE_DIR}/res/vita-local/sce_sys)
+    endif()
+    message(STATUS "OpenCMR2: LiveArea images from ${VITA_SCE_SYS}")
     vita_create_vpk(opencmr2.vpk OCMR20001 ${VITA_EBOOT}
         VERSION 01.00
         NAME OpenCMR2
