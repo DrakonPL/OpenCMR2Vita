@@ -119,6 +119,10 @@ if(VITA)
         FILE ${VITA_SCE_SYS}/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
         FILE ${VITA_SCE_SYS}/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
         FILE ${VITA_SCE_SYS}/livearea/contents/template.xml sce_sys/livearea/contents/template.xml)
+    # VitaShell does not install a .vpk with a name outside ASCII.
+    add_custom_command(TARGET opencmr2.vpk-vpk POST_BUILD
+        COMMAND python3 ${PROJECT_SOURCE_DIR}/tools/check_vpk_names.py ${CMAKE_CURRENT_BINARY_DIR}/opencmr2.vpk
+        VERBATIM)
 endif()
 
 # The tests run on the build machine; the Android and Vita builds are the game alone.
