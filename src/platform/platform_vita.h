@@ -22,6 +22,9 @@ void SysVita_PushEvent(const SysEvent &event);
 // True once after the app came back from the LiveArea or from sleep: the
 // display queue must be idle before the next draw.
 bool Platform_TakeResumed(void);
+// One more for each setting that Sys_SetOption changes (a menu choice). The
+// renderer reads its settings again when the number changes. Main thread only.
+unsigned SysVita_SettingsSerial(void);
 
 #ifdef OPENCMR2_DEV
 // Called once per presented frame: every 5 seconds a heartbeat line in the log.

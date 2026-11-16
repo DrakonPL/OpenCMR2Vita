@@ -536,6 +536,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     // The frame rate over the picture (video.show_fps): the presented frames
     // of the last kFpsMicros, as a number at the top left.
     bool showFps = false;
+    unsigned settingsSerial = 0;    // SysVita_SettingsSerial of the settings read
     unsigned fpsFrames = 0;
     uint64_t fpsStart = 0;
     int fpsShown = -1;
@@ -812,13 +813,10 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
             keepUniformsTested = true;
             TestKeptUniforms();
         }
-        // Dev builds show the frame rate unless the settings say no.
 #ifdef OPENCMR2_DEV
         shotEvery = Platform_GetSettingInt("video.shot_every", 0);
-        showFps = Platform_GetSettingInt("video.show_fps", 1) != 0;
-#else
-        showFps = Platform_GetSettingInt("video.show_fps", 0) != 0;
 #endif
+        ReadMenuSettings();
         // Without it the scenery does not fade, and the game still runs.
         const int scale = Platform_GetSettingInt("video.backdrop_scale", 2);
         backdropScale = scale < 1 ? 1 : scale > 4 ? 4 : scale;
@@ -2321,8 +2319,19 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
     // readback is taken and asked for. With the threaded executor this runs
     // on the game's thread while no Execute runs, and Execute reads only the
     // frame (gfx_threaded.cpp).
+    // The settings of the screen options that apply at once. The defaults
+    // are in the Vita's defaults table (vita_settings.cpp).
+    void ReadMenuSettings()
+    {
+        settingsSerial = SysVita_SettingsSerial();
+        showFps = Platform_GetSettingInt("video.show_fps", 0) != 0;
+    }
+
     void Prepare(GfxFrame &frame, std::vector<GfxTexture *> &textures, GfxReadback &readback, bool present) override
     {
+        // Prepare runs on the game's thread, as the menu does.
+        if (settingsSerial != SysVita_SettingsSerial())
+            ReadMenuSettings();
         if (!ready) {
             for (GfxTexture *t : textures)
                 t->dirty = false;
