@@ -26,6 +26,7 @@ int TestDefaults()
     REQUIRE(values["input.key_repeat_delay"] == "500");
     REQUIRE(values["input.key_repeat_interval"] == "33");
     REQUIRE(values["net.enabled"] == "0");
+    REQUIRE(values["video.game_jobs"] == "1");
     // The system gives the language when the file does not.
     REQUIRE(values.count("install.language") == 0);
     return 0;

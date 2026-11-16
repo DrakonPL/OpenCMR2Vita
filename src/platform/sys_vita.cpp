@@ -10,6 +10,7 @@
 #include "platform/text_entry.h"
 #include "platform/vita_settings.h"
 #include "port/diagnostics.h"
+#include "port/game_jobs.h"
 #include "port/input.h"
 #include "port/sys.h"
 #include "render/gxm_dialog.h"
@@ -813,6 +814,7 @@ void SysVita_FramePresented(bool stats)
                 (music - lastMusic) / 1000.0 / seconds);
     lastMixer = mixer;
     lastMusic = music;
+    const GameJobsTimes jobs = GameJobs_TakeTimes();
     if (periodFrames > 0 && partsValid) {
         // The scene: the frame without its ticks and its present.
         const FrameParts &p = s_frameParts;
@@ -826,6 +828,10 @@ void SysVita_FramePresented(bool stats)
                 (p.frameMicros > known ? p.frameMicros - known : 0) / perFrame, p.recorderMicros / perFrame,
                 p.batchMicros / perFrame, (double)p.batchDraws / periodFrames, p.presentMicros / perFrame,
                 sumMs / periodFrames - p.frameMicros / perFrame);
+        // The game jobs on core 1 (port/game_jobs.h), and the wait of the
+        // game's thread at their joins.
+        Sys_Log("heartbeat: game jobs ms per frame: jobs %.2f, game thread waited %.2f; checks %u, mismatches %u",
+                jobs.jobs / perFrame, jobs.waited / perFrame, jobs.checks, jobs.mismatches);
         uint64_t parts = 0;
         for (int i = 1; i < Diagnostics::SCENE_PART_COUNT; i++)
             parts += p.partMicros[i];

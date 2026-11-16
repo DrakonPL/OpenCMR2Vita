@@ -85,6 +85,20 @@ void Quad2D_Queue(Quad2DVertices *pVerts, Texture *pTexture, UINT_PTR pDest);
 void Quad2D_LeaveOutTriangles(UINT_PTR pDest, unsigned int count);
 void Quad2D_QueueFixedTriangle(int, Quad2DInputVertex *pA, Quad2DInputVertex *pB, Quad2DInputVertex *pC,
                                Texture *pTexture, UINT_PTR pDest);
+// PORT: the state of the layer 0x20 at a point, for the check of the job of
+// the tyre marks ([video] game_jobs = 2): a mark, a rewind of the layer to
+// it, and a hash of what the layer got after it.
+struct Quad2DLayerCMark {
+    unsigned int count;
+    unsigned int leftOut;
+    BYTE overflow;
+};
+Quad2DLayerCMark Quad2D_MarkLayerC(void);
+void Quad2D_RewindLayerC(Quad2DLayerCMark mark);
+unsigned int Quad2D_HashLayerCSince(Quad2DLayerCMark mark);
+// PORT: waits for the job of the tyre marks, which fills the layer 0x20
+// (StageObjects.cpp).
+void CarEffects_JoinTyreMarks(void);
 
 // Queued 2D triangle (three transformed vertices); four layers of 0x400.
 struct Tri2D {

@@ -186,7 +186,7 @@ def verify_replay(log):
             'last_playing_tick': playback[-1][0], 'first_finished_tick': finished[0][0]}
 
 
-def verify(probe, data, output, cpu_runs=False, only=None, trace=False):
+def verify(probe, data, output, cpu_runs=False, only=None, trace=False, video=()):
     report = {}
     for name, (count, settings) in SCENARIOS.items():
         if only is not None:
@@ -202,7 +202,8 @@ def verify(probe, data, output, cpu_runs=False, only=None, trace=False):
         settings = dict(settings)
         menu_scale = settings.pop('menu_scale', '0')
         challenge_layout = settings.pop('challenge_layout', None)
-        (run / 'user' / 'opencmr2.ini').write_text(f'[video]\nmenu_scale = {menu_scale}\n')
+        video_lines = ''.join(f'{setting}\n' for setting in video)
+        (run / 'user' / 'opencmr2.ini').write_text(f'[video]\nmenu_scale = {menu_scale}\n{video_lines}')
         env = {k: v for k, v in os.environ.items() if not k.startswith('OPENCMR2_PROBE_')}
         env.update(OPENCMR2_HEADLESS='1', SDL_VIDEODRIVER='dummy',
                    SDL_AUDIODRIVER='dummy', XDG_DATA_HOME=str(run / 'user'))
@@ -263,16 +264,20 @@ def main():
     parser.add_argument('--only', help='comma-separated scenario names to run (any kind)')
     parser.add_argument('--trace', action='store_true',
                         help='write the frame trace of each run (OPENCMR2_GFX_TRACE) to gfx.trace in its folder')
+    parser.add_argument('--video', action='append', default=[], metavar='KEY=VALUE',
+                        help='a [video] setting of each run, e.g. game_jobs=1 (repeatable)')
     args = parser.parse_args()
     only = set(args.only.split(',')) if args.only else None
     if only and not only <= SCENARIOS.keys():
         parser.error(f'unknown scenarios: {", ".join(sorted(only - SCENARIOS.keys()))}')
     if args.output:
         args.output.mkdir(parents=True, exist_ok=False)
-        verify(args.probe.resolve(), args.data.resolve(), args.output.resolve(), args.cpu_runs, only, args.trace)
+        verify(args.probe.resolve(), args.data.resolve(), args.output.resolve(), args.cpu_runs, only, args.trace,
+               args.video)
     else:
         with tempfile.TemporaryDirectory(prefix='opencmr2-runtime-') as directory:
-            verify(args.probe.resolve(), args.data.resolve(), Path(directory), args.cpu_runs, only, args.trace)
+            verify(args.probe.resolve(), args.data.resolve(), Path(directory), args.cpu_runs, only, args.trace,
+                   args.video)
 
 
 if __name__ == '__main__':

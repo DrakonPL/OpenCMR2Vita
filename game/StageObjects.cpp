@@ -42,6 +42,7 @@ short Car_GetOrderCount(void);
 #include "MeshVertex.h"
 #include "CarParts.h"
 #include "EyePlane.h"
+#include "port/game_jobs.h"
 #include "CarLightState.h"
 #include "Graphics.h"
 #include "Font.h"
@@ -98,7 +99,7 @@ void CarSkid_ClearWheelTrails(void);
 void StageObject_LoadSkidTrailTextures(void);
 void StageObject_UpdateRaceSkidTrails(int param_1);
 void StageObject_RebuildCarExhaustPoints(int car);
-void CarEffects_DrawTyreMarks(int index);
+void CarEffects_DrawTyreMarks(int index, const EyePlane &eye);
 int StageObject_GetWheelSlip(int carIndex, int wheelIndex);
 int StageObject_GetNormalizedWheelSlip(int car, int wheel);
 int StageObject_ClampByteRange(int value);
@@ -1196,8 +1197,11 @@ int StageObject_ClampByteRange(int value);
 // point to the previous consecutive one with a textured quad (two triangles)
 // whose alpha fades with the points' age, and picks the mark texture from the
 // surface the point was laid on.
+// PORT: eye is the plane of the eye of the view (EyePlane.h). The caller
+// takes it on the game's thread: this function can run on the thread of the
+// game jobs (CarEffects_RunTyreMarkJob).
 // FUNCTION: CMR2 0x004658e0
-void CarEffects_DrawTyreMarks(int index)
+void CarEffects_DrawTyreMarks(int index, const EyePlane &eye)
 {
     BYTE curColour[4] = { 0, 0, 0, 25 };
     BYTE prevColour[4] = { 0, 0, 0, 25 };
@@ -1221,17 +1225,13 @@ void CarEffects_DrawTyreMarks(int index)
     int alpha3;
     Texture *pTexture;
 
-    if (index >= 8 || CGameInfo::GetGraphicsOptionBits25To26() == 2)
+    // PORT: the caller reads the graphics option (bits 25 and 26) on the
+    // game's thread. A menu can change it while this function runs.
+    if (index >= 8)
         return;
     // PORT: a mark with each corner behind the eye of the view draws nothing
     // (EyePlane.h), so its two triangles are not made. In a race most marks
-    // of a car are behind the camera. The view of the renderer is the view
-    // of the draw of the layer: nothing sets it between here and there.
-    GfxMatrix eyeView;
-    GfxMatrix eyeProjection;
-    Gfx_GetTransform(GFX_TRANSFORM_VIEW, &eyeView);
-    Gfx_GetTransform(GFX_TRANSFORM_PROJECTION, &eyeProjection);
-    const EyePlane eye = EyePlane_Of(&eyeView._11, &eyeProjection._11);
+    // of a car are behind the camera.
     pHead = g_unk0x00549ba0[index];
     base = index * 800;
     a.u = 0;
@@ -1363,6 +1363,62 @@ void CarEffects_DrawTyreMarks(int index)
 }
 #undef TRAIL_POINT
 #undef TRAIL_FADE
+
+// PORT: the tyre marks of the cars of a view as one game job
+// (port/game_jobs.h). The job reads the trail points, which no code changes
+// before the draw of the layer 0x20, and it writes only that layer. The
+// layer's draw (Quad2D_DrawLayer) joins the job.
+struct TyreMarkJob {
+    EyePlane eye;
+    int cars[8];
+    int carCount;
+    Quad2DLayerCMark start;     // the layer before the job, for the check
+    uint32_t number;            // 0: no job to join
+};
+static TyreMarkJob s_tyreMarkJob;
+
+static void CarEffects_RunTyreMarkJob(void *context)
+{
+    const TyreMarkJob *pJob = (const TyreMarkJob *)context;
+
+    for (int k = 0; k < pJob->carCount; k++)
+        CarEffects_DrawTyreMarks(pJob->cars[k], pJob->eye);
+}
+
+// PORT: the start of the job of a view. The view of the renderer is the
+// view of the draw of the layer: nothing sets it between here and there.
+static void CarEffects_StartTyreMarks(TyreMarkJob *pJob)
+{
+    GfxMatrix eyeView;
+    GfxMatrix eyeProjection;
+
+    Gfx_GetTransform(GFX_TRANSFORM_VIEW, &eyeView);
+    Gfx_GetTransform(GFX_TRANSFORM_PROJECTION, &eyeProjection);
+    pJob->eye = EyePlane_Of(&eyeView._11, &eyeProjection._11);
+    pJob->start = Quad2D_MarkLayerC();
+    if (GameJobs_Mode() == GAME_JOBS_INLINE)
+        CarEffects_RunTyreMarkJob(pJob);
+    else
+        pJob->number = GameJobs_Add(CarEffects_RunTyreMarkJob, pJob);
+}
+
+// PORT: see Sprite.h. With [video] game_jobs = 2 the marks are made again
+// here, on the game's thread, and the two layers are compared.
+void CarEffects_JoinTyreMarks(void)
+{
+    TyreMarkJob *pJob = &s_tyreMarkJob;
+
+    if (pJob->number == 0)
+        return;
+    GameJobs_Wait(pJob->number);
+    pJob->number = 0;
+    if (GameJobs_Mode() != GAME_JOBS_CHECK)
+        return;
+    const unsigned int deferred = Quad2D_HashLayerCSince(pJob->start);
+    Quad2D_RewindLayerC(pJob->start);
+    CarEffects_RunTyreMarkJob(pJob);
+    GameJobs_Check("tyre marks", Quad2D_HashLayerCSince(pJob->start), deferred);
+}
 
 // FUNCTION: CMR2 0x00465ea0
 int StageObject_ClampByteRange(int value)
@@ -8331,8 +8387,6 @@ void StageObject_SeedRaceRandomAndCPURevs(char replay, char restart)
     }
 }
 
-void CarEffects_DrawTyreMarks(int index);
-
 // Refreshes the skid trails of every car in the race order, skipping the
 // replay-style modes where CGameInfo::GetGraphicsOptionBits25To26() returns 2.
 // FUNCTION: CMR2 0x00465780
@@ -8340,19 +8394,26 @@ void StageObject_UpdateRaceSkidTrails(int param_1)
 {
     short s;
     int i;
+    // PORT: the marks of the cars go to one job (CarEffects_StartTyreMarks).
+    // The job of an earlier view ends first: both fill the layer 0x20.
+    TyreMarkJob *pJob = &s_tyreMarkJob;
 
+    CarEffects_JoinTyreMarks();
+    pJob->carCount = 0;
     if (CGameInfo::GetGraphicsOptionBits25To26() != 2) {
         i = 0;
         s = Car_GetOrderCount();
         if (0 < s) {
             do {
                 if (i < 8 && StageObject_GetPairedCarValue(i, param_1) != 7)
-                    CarEffects_DrawTyreMarks(i);
+                    pJob->cars[pJob->carCount++] = i;
                 i = i + 1;
                 s = Car_GetOrderCount();
             } while (i < s);
         }
     }
+    if (pJob->carCount > 0)
+        CarEffects_StartTyreMarks(pJob);
 }
 
 CarContact *StageObject_GetMotionRecord(int index);

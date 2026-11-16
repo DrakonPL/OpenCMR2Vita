@@ -2350,6 +2350,9 @@ char g_str0x005207fc[] = "gamegauge";
 // every second one (30 frames a second at 60 Hz), 0 for none.
 void Graphics_PresentFrameAndResetCounters(void)
 {
+    // PORT: no job of the tyre marks runs into the next frame, whose ticks
+    // change the trail points (Sprite.h).
+    CarEffects_JoinTyreMarks();
     CMain::UpdateFrameTime();
     g_sceneStatCopied = 0;
     g_sceneStatMultiplied = 0;
