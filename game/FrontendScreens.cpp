@@ -1,5 +1,6 @@
 #include "SavedGame.h"
 #include "port/sys.h"
+#include "port/game_jobs.h"
 #include "ChampionshipDriver.h"
 #include "Frontend.h"
 #include "FloatToInt.h"
@@ -12077,12 +12078,17 @@ void FrontendMenu_DrawNetworkSessionSetup(Menu *pMenu)
 // the performance stats of a development build ([video] perf_stats), for a
 // measurement without their cost. Where the renderer can (the PS Vita), the
 // last row draws the sky at half the size and stretches it ([video]
-// sky_half): faster, a little softer.
+// sky_half): faster, a little softer. On the PS Vita two more rows are
+// A-B switches for the device measurements: the jobs of the game on core 1
+// ([video] game_jobs, port/game_jobs.h) and the index buffers of the merges
+// ([video] index_buffers). Both apply at once. The Vita has no Full Screen
+// row: it is always full screen.
 // They are saved in opencmr2.ini when OK is chosen; Back leaves them
 // as they were. The original's layout in pixels (a size of 0) stays an
 // opencmr2.ini setting.
 
 Menu g_screenOptionsMenu;
+void Game_ReadIndexBuffersSetting(void);
 
 enum ScreenOptionsItem {
     SCREEN_ITEM_HUD,
@@ -12093,6 +12099,8 @@ enum ScreenOptionsItem {
     SCREEN_ITEM_ALPHA_TEST,
     SCREEN_ITEM_PERF_STATS,
     SCREEN_ITEM_SKY,
+    SCREEN_ITEM_GAME_JOBS,
+    SCREEN_ITEM_INDEX_BUFFERS,
     SCREEN_ITEM_COUNT,
     SCREEN_ITEM_OK = 0xe
 };
@@ -12107,6 +12115,8 @@ enum ScreenOptionsText {
     SCREEN_TEXT_ALPHA_TEST,
     SCREEN_TEXT_PERF_STATS,
     SCREEN_TEXT_SKY,
+    SCREEN_TEXT_GAME_JOBS,
+    SCREEN_TEXT_INDEX_BUFFERS,
     SCREEN_TEXT_COUNT
 };
 
@@ -12114,17 +12124,22 @@ enum ScreenOptionsText {
 // some symbols: 0xb1 is l with a stroke).
 static const char *const g_screenOptionsText[6][SCREEN_TEXT_COUNT] = {
     { "Screen", "HUD Size", "Menu Size", "Vertical Sync", "Full Screen", "Alpha Blending (Test)",
-      "Alpha Test (Test)", "Performance Stats", "Half-Resolution Sky" },
+      "Alpha Test (Test)", "Performance Stats", "Half-Resolution Sky", "Jobs on Core 1", "Index Buffers" },
     { "\xc9" "cran", "Taille du HUD", "Taille des menus", "Synchro verticale", "Plein \xe9" "cran",
-      "Fusion alpha (test)", "Test alpha (test)", "Statistiques", "Ciel en demi-r\xe9solution" },
+      "Fusion alpha (test)", "Test alpha (test)", "Statistiques", "Ciel en demi-r\xe9solution",
+      "T\xe2" "ches sur le c\x9c" "ur 1", "Tampons d'indices" },
     { "Pantalla", "Tama\xf1o del HUD", "Tama\xf1o de los men\xfas", "Sincronizaci\xf3n vertical", "Pantalla completa",
-      "Mezcla alfa (prueba)", "Prueba alfa (prueba)", "Estad\xedsticas", "Cielo a media resoluci\xf3n" },
+      "Mezcla alfa (prueba)", "Prueba alfa (prueba)", "Estad\xedsticas", "Cielo a media resoluci\xf3n",
+      "Tareas en el n\xfa" "cleo 1", "B\xfa" "feres de \xed" "ndices" },
     { "Schermo", "Dimensione HUD", "Dimensione menu", "Sincronia verticale", "Schermo intero",
-      "Fusione alfa (test)", "Test alfa (test)", "Statistiche", "Cielo a met\xe0 risoluzione" },
+      "Fusione alfa (test)", "Test alfa (test)", "Statistiche", "Cielo a met\xe0 risoluzione",
+      "Lavori sul core 1", "Buffer di indici" },
     { "Bildschirm", "HUD-Gr\xf6\xdf" "e", "Men\xfcgr\xf6\xdf" "e", "VSync", "Vollbild", "Alpha-Blending (Test)",
-      "Alpha-Test (Test)", "Leistungsstatistik", "Himmel in halber Aufl\xf6sung" },
+      "Alpha-Test (Test)", "Leistungsstatistik", "Himmel in halber Aufl\xf6sung", "Jobs auf Kern 1",
+      "Indexpuffer" },
     { "Ekran", "Rozmiar HUD", "Rozmiar menu", "Synchronizacja pionowa", "Pe\xb1ny ekran", "Mieszanie alfa (test)",
-      "Test alfa (test)", "Statystyki silnika", "Uproszczone niebo" },
+      "Test alfa (test)", "Statystyki silnika", "Uproszczone niebo", "Zadania na rdzeniu 1",
+      "Bufory indeks\xf3w" },
 };
 
 // The choices of the vertical sync row: 60 frames a second, 30, off
@@ -12185,12 +12200,17 @@ void FrontendMenu_EnterScreenOptions(Menu *pMenu, int param)
     // On is the first choice, as in the graphics menu.
     const int vsync = Sys_GetOption("video.vsync", 1);
     Menu_GetItem(pMenu, SCREEN_ITEM_VSYNC)->max = vsync >= 2 ? 1 : vsync != 0 ? 0 : 2;
-    Menu_GetItem(pMenu, SCREEN_ITEM_FULLSCREEN)->max = g_pGraphics->isFullscreen ? 0 : 1;
+    if (MenuItem *pFullscreen = Menu_GetItem(pMenu, SCREEN_ITEM_FULLSCREEN))
+        pFullscreen->max = g_pGraphics->isFullscreen ? 0 : 1;
     Menu_GetItem(pMenu, SCREEN_ITEM_ALPHA_BLEND)->max = Sys_GetOption("video.alpha_blend", 1) != 0 ? 0 : 1;
     Menu_GetItem(pMenu, SCREEN_ITEM_ALPHA_TEST)->max = Sys_GetOption("video.alpha_test", 1) != 0 ? 0 : 1;
     Menu_GetItem(pMenu, SCREEN_ITEM_PERF_STATS)->max = Sys_GetOption("video.perf_stats", 1) != 0 ? 0 : 1;
     if (MenuItem *pSky = Menu_GetItem(pMenu, SCREEN_ITEM_SKY))
         pSky->max = Sys_GetOption("video.sky_half", 1) != 0 ? 0 : 1;
+    if (MenuItem *pJobs = Menu_GetItem(pMenu, SCREEN_ITEM_GAME_JOBS))
+        pJobs->max = GameJobs_Mode() != GAME_JOBS_INLINE ? 0 : 1;
+    if (MenuItem *pIndices = Menu_GetItem(pMenu, SCREEN_ITEM_INDEX_BUFFERS))
+        pIndices->max = Sys_GetOption("video.index_buffers", 1) != 0 ? 0 : 1;
     for (int i = 0; i < SCREEN_ITEM_COUNT; i++) {
         MenuItem *pShown = Menu_GetItem(pMenu, i);
         g_screenOptionsShown[i] = pShown != NULL ? pShown->max : 0;
@@ -12210,7 +12230,8 @@ void FrontendMenu_ApplyScreenOptions(Menu *pMenu, MenuItem *pItem)
     value = Menu_GetItem(pMenu, SCREEN_ITEM_VSYNC)->max;
     if (value != g_screenOptionsShown[SCREEN_ITEM_VSYNC] && value < 3)
         Sys_SetOption("video.vsync", g_screenVsyncValues[value]);
-    value = Menu_GetItem(pMenu, SCREEN_ITEM_FULLSCREEN)->max;
+    MenuItem *pFullscreen = Menu_GetItem(pMenu, SCREEN_ITEM_FULLSCREEN);
+    value = pFullscreen != NULL ? pFullscreen->max : g_screenOptionsShown[SCREEN_ITEM_FULLSCREEN];
     if (value != g_screenOptionsShown[SCREEN_ITEM_FULLSCREEN]) {
         // As Alt+Enter does.
         g_pGraphics->isFullscreen = value == 0;
@@ -12229,6 +12250,16 @@ void FrontendMenu_ApplyScreenOptions(Menu *pMenu, MenuItem *pItem)
     if (MenuItem *pSky = Menu_GetItem(pMenu, SCREEN_ITEM_SKY))
         if (pSky->max != g_screenOptionsShown[SCREEN_ITEM_SKY])
             Sys_SetOption("video.sky_half", pSky->max == 0);
+    if (MenuItem *pJobs = Menu_GetItem(pMenu, SCREEN_ITEM_GAME_JOBS))
+        if (pJobs->max != g_screenOptionsShown[SCREEN_ITEM_GAME_JOBS]) {
+            Sys_SetOption("video.game_jobs", pJobs->max == 0);
+            GameJobs_Start(pJobs->max == 0 ? GAME_JOBS_DEFERRED : GAME_JOBS_INLINE);
+        }
+    if (MenuItem *pIndices = Menu_GetItem(pMenu, SCREEN_ITEM_INDEX_BUFFERS))
+        if (pIndices->max != g_screenOptionsShown[SCREEN_ITEM_INDEX_BUFFERS]) {
+            Sys_SetOption("video.index_buffers", pIndices->max == 0);
+            Game_ReadIndexBuffersSetting();
+        }
 }
 
 // The rows of the advanced graphics page: a label, then the value as
@@ -12297,12 +12328,16 @@ void FrontendMenu_DrawScreenOptions(Menu *pMenu)
         case SCREEN_ITEM_ALPHA_TEST:
         case SCREEN_ITEM_PERF_STATS:
         case SCREEN_ITEM_SKY:
+        case SCREEN_ITEM_GAME_JOBS:
+        case SCREEN_ITEM_INDEX_BUFFERS:
             strcpy(CFrontend::m_stringDest,
                    ScreenOptions_Text(pItem->value == SCREEN_ITEM_VSYNC         ? SCREEN_TEXT_VSYNC
                                       : pItem->value == SCREEN_ITEM_FULLSCREEN  ? SCREEN_TEXT_FULLSCREEN
                                       : pItem->value == SCREEN_ITEM_ALPHA_BLEND ? SCREEN_TEXT_ALPHA_BLEND
                                       : pItem->value == SCREEN_ITEM_ALPHA_TEST  ? SCREEN_TEXT_ALPHA_TEST
                                       : pItem->value == SCREEN_ITEM_SKY         ? SCREEN_TEXT_SKY
+                                      : pItem->value == SCREEN_ITEM_GAME_JOBS   ? SCREEN_TEXT_GAME_JOBS
+                                      : pItem->value == SCREEN_ITEM_INDEX_BUFFERS ? SCREEN_TEXT_INDEX_BUFFERS
                                                                                 : SCREEN_TEXT_PERF_STATS));
             Font_DrawText(1, CFrontend::m_stringDest, x, textY, (int *)pColour, 0x11);
             for (j = 0; j < pItem->min; j++) {
@@ -12346,12 +12381,18 @@ void FrontendMenu_BuildScreenOptions(void)
     Menu_AddItemType3(&g_screenOptionsMenu, 0, -1, ScreenOptions_SizeCount(SCREEN_SIZE_MAX), 0, 0, 0, 0,
                       SCREEN_ITEM_MENU);
     Menu_AddItemType3(&g_screenOptionsMenu, 0, -1, 3, 0, 0, 0, 0, SCREEN_ITEM_VSYNC);
+#ifndef VITA
     Menu_AddItemType3(&g_screenOptionsMenu, 0, -1, 2, 0, 0, 0, 0, SCREEN_ITEM_FULLSCREEN);
+#endif
     Menu_AddItemType3(&g_screenOptionsMenu, 0, -1, 2, 0, 0, 0, 0, SCREEN_ITEM_ALPHA_BLEND);
     Menu_AddItemType3(&g_screenOptionsMenu, 0, -1, 2, 0, 0, 0, 0, SCREEN_ITEM_ALPHA_TEST);
     Menu_AddItemType3(&g_screenOptionsMenu, 0, -1, 2, 0, 0, 0, 0, SCREEN_ITEM_PERF_STATS);
     if (Gfx_SupportsHalfSky())
         Menu_AddItemType3(&g_screenOptionsMenu, 0, -1, 2, 0, 0, 0, 0, SCREEN_ITEM_SKY);
+#ifdef VITA
+    Menu_AddItemType3(&g_screenOptionsMenu, 0, -1, 2, 0, 0, 0, 0, SCREEN_ITEM_GAME_JOBS);
+    Menu_AddItemType3(&g_screenOptionsMenu, 0, -1, 2, 0, 0, 0, 0, SCREEN_ITEM_INDEX_BUFFERS);
+#endif
     Menu_AddItemType1(&g_screenOptionsMenu, 0, 0x67, (MenuItemAction)FrontendMenu_ApplyScreenOptions, SCREEN_ITEM_OK);
     Menu_SetCallbacks(&g_screenOptionsMenu, FrontendMenu_EnterScreenOptions, NULL,
                       (MenuCallback)FrontendMenu_DrawScreenOptions, NULL);
