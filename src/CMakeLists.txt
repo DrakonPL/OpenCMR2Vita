@@ -330,6 +330,7 @@ if(VITA)
     target_sources(opencmr2_platform PRIVATE
         platform/sys_vita.cpp
         platform/vita_settings.cpp
+        platform/text_entry.cpp
         render/gfx_gxm.cpp
         render/gxm_device.cpp
         render/gxm_memory.cpp
