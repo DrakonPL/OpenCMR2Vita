@@ -919,6 +919,24 @@ void StopNetwork()
     s_netStarted = false;
 }
 
+// ---- log files ------------------------------------------------------------------
+// The logs of the sessions before stay: opencmr2.log becomes opencmr2.1.log,
+// that one opencmr2.2.log, and so on. A device run is often several starts.
+
+constexpr int kKeptLogs = 9;
+
+std::string LogPath(int session)
+{
+    return std::string(kUserDir) + (session == 0 ? "opencmr2.log" : "opencmr2." + std::to_string(session) + ".log");
+}
+
+void KeepOldLogs()
+{
+    sceIoRemove(LogPath(kKeptLogs).c_str());
+    for (int session = kKeptLogs - 1; session >= 0; session--)
+        sceIoRename(LogPath(session).c_str(), LogPath(session + 1).c_str());
+}
+
 // ---- platform -------------------------------------------------------------------
 
 bool Platform_Init(int, char **)
@@ -935,7 +953,8 @@ bool Platform_Init(int, char **)
     s_settings["install.language"] = VitaSettings::Language(systemLanguage);
     s_dirs.Clear();
     s_host.MakeDirectory(kUserDir);
-    s_logFile = sceIoOpen((std::string(kUserDir) + "opencmr2.log").c_str(), SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+    KeepOldLogs();
+    s_logFile = sceIoOpen(LogPath(0).c_str(), SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
     const std::string settingsFile = std::string(kUserDir) + "opencmr2.ini";
     std::string text;
     if (ReadWholeFile(settingsFile, text))
