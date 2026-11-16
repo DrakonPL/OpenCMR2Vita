@@ -7,6 +7,7 @@
 #include "platform/sys_common.h"
 #include "platform/sys_event_ring.h"
 #include "platform/sys_paths.h"
+#include "platform/vita_settings.h"
 #include "port/diagnostics.h"
 #include "port/sys.h"
 #include "render/gxm_dialog.h"
@@ -25,6 +26,7 @@
 #include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/message_dialog.h>
+#include <psp2/system_param.h>
 
 #include <malloc.h>
 #include <stdarg.h>
@@ -40,22 +42,6 @@ namespace {
 
 const char kDataDir[] = "ux0:data/OpenCMR2/";
 const char kUserDir[] = "ux0:data/OpenCMR2/user/";
-
-// Defaults that differ from the PC's. opencmr2.ini overrides them.
-// outline_fonts: fitting the outlines to a font takes about 20 s on the
-// Vita at every start. 0 draws the original's bitmap fonts.
-// vector_icons: the trace of the co-driver arrows takes about 48 s on the
-// Vita at the first stage load of every start, that of the menu icons 4 s
-// and that of an arcade map 11 s. 0 draws the original's bitmaps.
-// movie_workers: the Bink decode uses the two other cores.
-// relight_budget: when the light of the scene changes, the sectors in view
-// are lit again over some frames, not in one of 50 ms (RelightBudget.h).
-const char kVitaDefaults[] =
-    "[video]\n"
-    "outline_fonts = 0\n"
-    "vector_icons = 0\n"
-    "movie_workers = 2\n"
-    "relight_budget = 10000\n";
 
 SysSettings::Values s_settings;
 SysEventRing s_events;
@@ -240,6 +226,18 @@ void StopLogWriter()
     s_logSync = true;
 }
 
+// The system settings and the dialogs need it once.
+void InitAppUtil(void)
+{
+    static bool initialized;
+    if (initialized)
+        return;
+    SceAppUtilInitParam init{};
+    SceAppUtilBootParam boot{};
+    sceAppUtilInit(&init, &boot);
+    initialized = true;
+}
+
 // ---- message dialog -------------------------------------------------------------
 // A system dialog draws only while the app calls sceCommonDialogUpdate with a
 // display buffer before each flip. Before the renderer starts GXM, the dialog
@@ -306,9 +304,7 @@ int RunMessageDialog(const char *text, int buttonType)
 {
     static bool configured;
     if (!configured) {
-        SceAppUtilInitParam init{};
-        SceAppUtilBootParam boot{};
-        sceAppUtilInit(&init, &boot);
+        InitAppUtil();
         SceCommonDialogConfigParam config{};
         sceCommonDialogConfigParamInit(&config);
         sceCommonDialogSetConfigParam(&config);
@@ -716,13 +712,21 @@ bool Platform_Init(int, char **)
     if (s_logIoMutex < 0)
         s_logIoMutex = sceKernelCreateMutex("opencmr2_log_io", 0, 0, NULL);
     s_settings.clear();
-    SysSettings::Parse(kVitaDefaults, s_settings);
+    SysSettings::Parse(VitaSettings::kDefaults, s_settings);
+    InitAppUtil();
+    int systemLanguage = -1;
+    sceAppUtilSystemParamGetInt(SCE_SYSTEM_PARAM_ID_LANG, &systemLanguage);
+    s_settings["install.language"] = VitaSettings::Language(systemLanguage);
     s_dirs.Clear();
     s_host.MakeDirectory(kUserDir);
     s_logFile = sceIoOpen((std::string(kUserDir) + "opencmr2.log").c_str(), SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+    const std::string settingsFile = std::string(kUserDir) + "opencmr2.ini";
     std::string text;
-    if (ReadWholeFile(std::string(kUserDir) + "opencmr2.ini", text))
+    if (ReadWholeFile(settingsFile, text))
         SysSettings::Parse(text, s_settings);
+    else if (!WriteWholeFile(settingsFile, VitaSettings::CommentedOut(VitaSettings::kDefaults)))
+        Sys_Log("could not write %s", settingsFile.c_str());
+    Sys_Log("language: %s (system language %d)", Platform_GetSetting("install.language", "English"), systemLanguage);
 
     const std::string missing = s_dirs.MissingGameData(kDataDir);
     if (!missing.empty()) {
