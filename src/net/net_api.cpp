@@ -105,8 +105,7 @@ net::Config LoadConfig()
     return config;
 }
 
-// [net] enabled = 0: no provider (the PS Vita's default, which then loads no
-// network module).
+// [net] enabled = 0: no provider (the PS Vita then loads no network module).
 bool NetEnabled()
 {
     return Platform_GetSettingInt("net.enabled", 1) != 0;

@@ -25,7 +25,7 @@ int TestDefaults()
     REQUIRE(values["video.hud_aspect"] == "16:9");
     REQUIRE(values["input.key_repeat_delay"] == "500");
     REQUIRE(values["input.key_repeat_interval"] == "33");
-    REQUIRE(values["net.enabled"] == "0");
+    REQUIRE(values["net.enabled"] == "1");
     REQUIRE(values["video.game_jobs"] == "1");
     REQUIRE(values["video.index_buffers"] == "0");
     // The system gives the language when the file does not.

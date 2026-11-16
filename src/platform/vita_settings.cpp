@@ -61,8 +61,9 @@ const char kDefaults[] =
     "; The bindings of the buttons are in controls.ini.\n"
     "\n"
     "[net]\n"
-    "; 1 = races over the network (LAN). 0 loads no network module.\n"
-    "enabled = 0\n";
+    "; 1 = races over the network (Wi-Fi, LAN, the internet). 0 loads no network\n"
+    "; module and saves 1 MB of memory.\n"
+    "enabled = 1\n";
 
 std::string CommentedOut(const std::string &text)
 {

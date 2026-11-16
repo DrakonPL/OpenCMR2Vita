@@ -882,7 +882,7 @@ bool s_netStarted;
 
 void StartNetwork()
 {
-    if (Platform_GetSettingInt("net.enabled", 0) == 0) {
+    if (Platform_GetSettingInt("net.enabled", 1) == 0) {
         Sys_Log("net: off ([net] enabled = 0), no network module loaded");
         return;
     }
