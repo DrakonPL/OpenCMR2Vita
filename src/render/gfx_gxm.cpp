@@ -6,6 +6,7 @@
 #include "platform/platform_vita.h"
 #include "port/diagnostics.h"
 #include "port/sys.h"
+#include "render/bmp_file.h"
 #include "render/gfx_batch_worker.h"
 #include "render/gfx_executor_shared.h"
 #include "render/gfx_internal.h"
@@ -467,6 +468,8 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
 
     // The frame being recorded.
     unsigned presented = 0;     // frames shown: the number of the frame being recorded
+    int shotEvery = 0;          // [video] shot_every (dev builds): a screenshot each N frames
+    int shots = 0;
     bool frameStarted = false;
     bool backBufferBegun = false;   // its scene was begun this frame
     bool backdropAhead = false;     // this Execute copies the backdrop: the back buffer scene stores its depth
@@ -802,6 +805,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         }
         // Dev builds show the frame rate unless the settings say no.
 #ifdef OPENCMR2_DEV
+        shotEvery = Platform_GetSettingInt("video.shot_every", 0);
         showFps = Platform_GetSettingInt("video.show_fps", 1) != 0;
 #else
         showFps = Platform_GetSettingInt("video.show_fps", 0) != 0;
@@ -2449,6 +2453,7 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         EndScene(fragment);
         backdropAhead = false;
         ProbeCheckFrame();
+        WriteShot();
         // The time of the frame's commands, without the wait of the present.
         const uint64_t presentStart = sceKernelGetProcessTimeWide();
         stats.executeMicros += (unsigned)(presentStart - entered);
@@ -2458,6 +2463,33 @@ struct Executor : GfxExecutor, GxmDialogPresenter {
         ProbeTick();
         presented++;
         frameStarted = false;
+    }
+
+    // A screenshot of the frame as a BMP in the user directory, for the
+    // compare with the PC's frame dumps (tools/vita_shot_compare.py). The
+    // write takes some 100 ms: a dev build only, and a few shots.
+    void WriteShot()
+    {
+#ifdef OPENCMR2_DEV
+        constexpr int kMostShots = 20;
+        if (shotEvery <= 0 || shots >= kMostShots || presented % (unsigned)shotEvery != 0)
+            return;
+        device.Finish();
+        const int w = device.Width(), h = device.Height();
+        std::vector<uint32_t> pixels((size_t)w * h);     // 0xAARRGGBB: B, G, R, A in memory
+        device.ReadPixels(device.BackBuffer(), 0, 0, w, h, pixels.data());
+        uint8_t header[kBmpHeaderBytes];
+        Bmp_Header(w, h, header);
+        char path[512];
+        snprintf(path, sizeof(path), "%sshot-%06u.bmp", Platform_GetUserDir(), presented);
+        FILE *file = fopen(path, "wb");
+        const bool written = file != NULL && fwrite(header, sizeof(header), 1, file) == 1 &&
+                             fwrite(pixels.data(), pixels.size() * 4, 1, file) == 1;
+        if (file != NULL)
+            fclose(file);
+        shots++;
+        Sys_Log("gxm: shot %s (%dx%d)%s", path, w, h, written ? "" : ": not written");
+#endif
     }
 
     // The frame time probe, after each present (dev builds).
