@@ -5,6 +5,7 @@
 #include "GameInfo.h"
 #include "Frontend.h"
 #include "port/sys.h"
+#include "port/game_jobs.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -682,6 +683,10 @@ BYTE g_quad2DConvertOverflow;
 BYTE g_quad2DOverflow;
 // PORT: the triangles left out of the layer 0x20 (Quad2D_LeaveOutTriangles).
 static unsigned int s_quad2DLeftOutC;
+// PORT: the overflow flag of the layer 0x20. The tyre marks fill that layer
+// on the thread of the game jobs (StageObjects.cpp), so the flag joins
+// g_quad2DConvertOverflow at the draw of the layer.
+static BYTE s_quad2DConvertOverflowC;
 
 // pDest carries either numeric layer flags or a native destination address.
 // flags retains only the 32-bit render mask; it is never used to rebuild p.
@@ -791,6 +796,11 @@ void Quad2D_DrawLayer(unsigned int layer)
         pQuad = g_quad2DLayerB;
         g_quad2DCountB = 0;
     } else if (layer & 0x20) {
+        // PORT: the job of the tyre marks fills this layer (StageObjects.cpp).
+        CarEffects_JoinTyreMarks();
+        if (s_quad2DConvertOverflowC != 0 && g_quad2DConvertOverflow == 0)
+            g_quad2DConvertOverflow = 1;
+        s_quad2DConvertOverflowC = 0;
         count = g_quad2DCountC;
         pQuad = g_quad2DLayerC;
         g_quad2DCountC = 0;
@@ -871,9 +881,40 @@ void Quad2D_LeaveOutTriangles(UINT_PTR pDest, unsigned int count)
 {
     if ((pDest & 0x18) != 0 || (pDest & 0x20) == 0)
         return;
-    if (g_quad2DCountC + s_quad2DLeftOutC + count > 0x800 && g_quad2DConvertOverflow == 0)
-        g_quad2DConvertOverflow = 1;
+    if (g_quad2DCountC + s_quad2DLeftOutC + count > 0x800 && s_quad2DConvertOverflowC == 0)
+        s_quad2DConvertOverflowC = 1;
     s_quad2DLeftOutC += count;
+}
+
+// PORT: see Sprite.h.
+Quad2DLayerCMark Quad2D_MarkLayerC(void)
+{
+    Quad2DLayerCMark mark;
+
+    mark.count = g_quad2DCountC;
+    mark.leftOut = s_quad2DLeftOutC;
+    mark.overflow = s_quad2DConvertOverflowC;
+    return mark;
+}
+
+// PORT: see Sprite.h.
+void Quad2D_RewindLayerC(Quad2DLayerCMark mark)
+{
+    g_quad2DCountC = mark.count;
+    s_quad2DLeftOutC = mark.leftOut;
+    s_quad2DConvertOverflowC = mark.overflow;
+}
+
+// PORT: see Sprite.h.
+unsigned int Quad2D_HashLayerCSince(Quad2DLayerCMark mark)
+{
+    uint32_t hash = kGameJobsHashStart;
+
+    if (g_quad2DCountC > mark.count)
+        hash = GameJobs_Hash(hash, &g_quad2DLayerC[mark.count], (g_quad2DCountC - mark.count) * sizeof(Quad2D));
+    hash = GameJobs_Hash(hash, &g_quad2DCountC, sizeof(g_quad2DCountC));
+    hash = GameJobs_Hash(hash, &s_quad2DLeftOutC, sizeof(s_quad2DLeftOutC));
+    return GameJobs_Hash(hash, &s_quad2DConvertOverflowC, sizeof(s_quad2DConvertOverflowC));
 }
 
 // Converts three fixed-point vertices and queues them in the selected layer.
@@ -903,8 +944,9 @@ void Quad2D_QueueFixedTriangle(int, Quad2DInputVertex *pA,
         g_quad2DCountB++;
     } else if (pDest & 0x20) {
         if (g_quad2DCountC + s_quad2DLeftOutC >= 0x800) {
-            if (g_quad2DConvertOverflow == 0)
-                g_quad2DConvertOverflow = 1;
+            // PORT: the flag of the layer 0x20 (s_quad2DConvertOverflowC).
+            if (s_quad2DConvertOverflowC == 0)
+                s_quad2DConvertOverflowC = 1;
             return;
         }
         p = &g_quad2DLayerC[g_quad2DCountC];

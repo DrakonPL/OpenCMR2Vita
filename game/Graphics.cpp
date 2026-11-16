@@ -2339,6 +2339,8 @@ extern int g_fixMatrixMultiplyCount;
 // GLOBAL: CMR2 0x005207fc
 char g_str0x005207fc[] = "gamegauge";
 
+void Game_JoinSectorCull(void);
+
 // Ends the frame: resets the per frame counters and presents the back buffer,
 // which in windowed mode means blitting it into the client area of the game
 // window and in fullscreen mode flipping (waiting for the vertical blank only
@@ -2350,6 +2352,10 @@ char g_str0x005207fc[] = "gamegauge";
 // every second one (30 frames a second at 60 Hz), 0 for none.
 void Graphics_PresentFrameAndResetCounters(void)
 {
+    // PORT: no game job runs into the next frame, whose ticks change the
+    // trail points and the camera (Sprite.h, Game.cpp).
+    CarEffects_JoinTyreMarks();
+    Game_JoinSectorCull();
     CMain::UpdateFrameTime();
     g_sceneStatCopied = 0;
     g_sceneStatMultiplied = 0;

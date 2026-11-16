@@ -1,5 +1,6 @@
 #include "port/sys.h"
 #include "port/diagnostics.h"
+#include "port/game_jobs.h"
 #include "RaceCallbackStorage.h"
 #include "FloatToInt.h"
 #include "StageBlock.h"
@@ -3564,6 +3565,77 @@ static inline void Game_ScenePart(int part)
 #define GAME_TIMED(part, call) call
 #endif
 
+// PORT: the sector cull of a view as a game job (port/game_jobs.h). It
+// starts when the projection of the view is set (Game_StartSectorCull) and
+// the scene of the view joins it (Game_CullSectors). Between the two no code
+// reads the visible sectors or changes the projection and the camera.
+struct SectorCullJob {
+    SceneNode camera;       // the cull reads only its world matrix
+    SceneNode *pView;       // the camera of the view
+    uint32_t number;        // 0: no job to join
+};
+static SectorCullJob s_sectorCullJob;
+
+static void Game_RunSectorCullJob(void *context)
+{
+    SectorCullJob *pJob = (SectorCullJob *)context;
+
+    Sector_CullGridAroundViewNode(&pJob->camera, NULL);
+}
+
+// PORT: the outputs of the cull that the scene reads.
+static unsigned int Game_HashSectorCull(void)
+{
+    uint32_t hash = kGameJobsHashStart;
+
+    hash = GameJobs_Hash(hash, g_sectorVisibleBits, sizeof(g_sectorVisibleBits));
+    hash = GameJobs_Hash(hash, &g_sectorCullEnabled, sizeof(g_sectorCullEnabled));
+    return GameJobs_Hash(hash, g_visibleSectorIndices, (size_t)g_sectorCullEnabled * sizeof(g_visibleSectorIndices[0]));
+}
+
+// PORT: see Game_StartSectorCull.
+void Game_JoinSectorCull(void)
+{
+    if (s_sectorCullJob.number == 0)
+        return;
+    GameJobs_Wait(s_sectorCullJob.number);
+    s_sectorCullJob.number = 0;
+}
+
+// PORT: called after View_SetPlayerProjection, for the camera whose scene
+// the view draws next (RallyData_DrawViewEndFrameOverlay).
+void Game_StartSectorCull(SceneNode *pCamera)
+{
+    SectorCullJob *pJob = &s_sectorCullJob;
+
+    Game_JoinSectorCull();
+    if (GameJobs_Mode() == GAME_JOBS_INLINE || CGraphics::m_unk0x0072d56c == 0)
+        return;
+    memset(&pJob->camera, 0, sizeof(pJob->camera));
+    pJob->camera.world = pCamera->world;
+    pJob->pView = pCamera;
+    pJob->number = GameJobs_Add(Game_RunSectorCullJob, pJob);
+}
+
+// PORT: the cull of the scene: the job's, or inline without a job for this
+// camera. With [video] game_jobs = 2 the cull runs again here and the two
+// outputs are compared.
+static void Game_CullSectors(SceneNode *pCamera, void *pRect)
+{
+    const int joined = s_sectorCullJob.number != 0 && s_sectorCullJob.pView == pCamera;
+
+    Game_JoinSectorCull();
+    if (!joined) {
+        Sector_CullGridAroundViewNode(pCamera, pRect);
+        return;
+    }
+    if (GameJobs_Mode() != GAME_JOBS_CHECK)
+        return;
+    const unsigned int deferred = Game_HashSectorCull();
+    Sector_CullGridAroundViewNode(pCamera, pRect);
+    GameJobs_Check("sector cull", Game_HashSectorCull(), deferred);
+}
+
 // match 94%: the residual diff is register allocation (the relight loop walks
 // the sector list from a register where the original keeps the pointer in the
 // argument slot, and the inlined fixed point normalisation uses different
@@ -3614,7 +3686,8 @@ int Game_DrawSceneViewport(SceneNode *pRoot, SceneNode *pCamera, void *pRect, in
     if (flag != 0) {
         if (CGraphics::m_unk0x0072d56c != 0) {
             Gfx_SetTransform(GFX_TRANSFORM_WORLD, &g_identityWorldMatrix);
-            GAME_TIMED(SCENE_PART_SECTOR_CULL, Sector_CullGridAroundViewNode(pCamera, pRect));
+            // PORT: maybe from a job (Game_CullSectors).
+            GAME_TIMED(SCENE_PART_SECTOR_CULL, Game_CullSectors(pCamera, pRect));
             {
 #ifdef OPENCMR2_DEV
                 Diagnostics::ScenePartNest relightPart(Diagnostics::SCENE_PART_RELIGHT);
