@@ -13,6 +13,7 @@
 #include "port/net.h"
 #include "port/sys.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,6 +41,15 @@ std::vector<std::string> Split(const char *list)
             item += *p;
         }
     }
+    return out;
+}
+
+#ifndef VITA
+std::string Lower(const char *text)
+{
+    std::string out = text != NULL ? text : "";
+    for (char &c : out)
+        c = (char)tolower((unsigned char)c);
     return out;
 }
 
@@ -75,6 +85,7 @@ std::vector<std::string> TailscalePeers()
         Sys_Log("net: %u Tailscale peers online", (unsigned)peers.size());
     return peers;
 }
+#endif
 
 net::Config LoadConfig()
 {
@@ -84,18 +95,28 @@ net::Config LoadConfig()
         config.port = (uint16_t)port;
     config.peers = Split(Platform_GetSetting("net.peers", ""));
     config.broadcast = Platform_GetSettingInt("net.broadcast", 1) != 0;
-    const char *tailscale = Platform_GetSetting("net.tailscale", "auto");
-    if (SDL_strcasecmp(tailscale, "0") != 0 && SDL_strcasecmp(tailscale, "off") != 0)
+#ifndef VITA
+    // The Vita has no tailscale command.
+    const std::string tailscale = Lower(Platform_GetSetting("net.tailscale", "auto"));
+    if (tailscale != "0" && tailscale != "off")
         config.extraPeers = TailscalePeers;
+#endif
     config.log = Sys_Log;
     return config;
+}
+
+// [net] enabled = 0: no provider (the PS Vita's default, which then loads no
+// network module).
+bool NetEnabled()
+{
+    return Platform_GetSettingInt("net.enabled", 1) != 0;
 }
 
 } // namespace
 
 extern "C" HRESULT Net_EnumProviders(NetProviderCallback callback, void *context)
 {
-    if (callback != NULL)
+    if (callback != NULL && NetEnabled())
         callback(0, "Internet / LAN (UDP)", context);
     return NET_OK;
 }
@@ -104,6 +125,8 @@ extern "C" HRESULT Net_InitializeConnection(int provider)
 {
     if (provider != 0)
         return NET_ERR_INVALIDPARAMS;
+    if (!NetEnabled())
+        return NET_ERR_UNAVAILABLE;
     if (!s_session)
         s_session.reset(new net::Session(LoadConfig()));
     return s_session->Start();
