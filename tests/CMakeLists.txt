@@ -106,6 +106,8 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/reference_capture.py)
     add_test(NAME raw_access_audit
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/raw_access_audit.py)
+    add_test(NAME vita_shot_compare
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/vita_shot_compare.py)
 endif()
 
 set(OPENCMR2_BINK_TEST_DATA_DIR "" CACHE PATH "Optional original game data for movie and physics regression tests")
@@ -296,6 +298,9 @@ add_test(NAME gfx_batch_worker COMMAND gfx_batch_worker_test)
 add_executable(readback_pack_test readback_pack.cpp)
 target_include_directories(readback_pack_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME readback_pack COMMAND readback_pack_test)
+add_executable(bmp_file_test bmp_file.cpp)
+target_include_directories(bmp_file_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME bmp_file COMMAND bmp_file_test)
 add_executable(input_math_test input_math.cpp ${PROJECT_SOURCE_DIR}/src/input/input_math.cpp)
 target_include_directories(input_math_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME input_math COMMAND input_math_test)
