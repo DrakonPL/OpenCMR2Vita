@@ -6055,6 +6055,7 @@ float Graphics_GetFrameRate(void);
 void StageTiming_DrawProjectedCarMarker(int param1, int param2);
 void StageTiming_DrawClockAndCountdown(void);
 void View_SetPlayerProjection(unsigned int player);
+void Game_StartSectorCull(SceneNode *pCamera);
 void StageObject_ApplyInterpolatedNodeMatrices(int param1);
 void Race_DrawPlayerCallSlots(unsigned int player, int *pViewRect);
 void Dash_Draw(int player, int *pViewRect);
@@ -6251,6 +6252,9 @@ void RallyData_UpdateViewFrameAndDebugOverlay(CallbackStateMachine *param1, int 
     Diagnostics::ScenePart(Diagnostics::SCENE_PART_VIEW);
     Graphics_SetShadowGeometryState(!CGameInfo::IsRecordFlagSet(0xf));
     View_SetPlayerProjection(param2);
+    // PORT: the sector cull of the scene of this view starts here, on the
+    // thread of the game jobs (Game.cpp).
+    Game_StartSectorCull(g_viewNodes[maskedView]);
     if ((g_pGraphics->field913_0x3bc & 4) != 0) {
         BYTE colour[4];
 
