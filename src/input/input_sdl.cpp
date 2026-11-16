@@ -1116,11 +1116,6 @@ std::string SourceName(const Source &source)
     return "";
 }
 
-bool SameSource(const Source &a, const Source &b)
-{
-    return a.kind == b.kind && a.index == b.index && a.direction == b.direction;
-}
-
 // The input waited for by the controls pages.
 struct Capture {
     Profile *profile = NULL;
@@ -1222,28 +1217,6 @@ std::vector<Sint16> AxisState(InputDevice *device, bool gamepadLayout)
             axes.push_back(SDL_GetJoystickAxis(device->joystick, axis));
     }
     return axes;
-}
-
-// Binds the input, trading places with a driving action that had it.
-void Assign(Profile &profile, int action, const Source &source)
-{
-    std::vector<Source> previous = profile.actions[action];
-    for (int other = 0; other <= INPUT_PAUSE; other++) {
-        if (other == action)
-            continue;
-        std::vector<Source> &list = profile.actions[other];
-        for (size_t i = 0; i < list.size(); i++) {
-            if (!SameSource(list[i], source))
-                continue;
-            if (!previous.empty())
-                list[i] = previous[0];
-            else
-                list.erase(list.begin() + i);
-            break;
-        }
-    }
-    profile.actions[action] = { source };
-    Bindings_MarkChanged();
 }
 
 } // namespace
@@ -1396,7 +1369,7 @@ extern "C" int Input_UpdateCapture(void)
     }
     if (!found)
         return 0;
-    Assign(*capture.profile, capture.action, source);
+    Bindings_Assign(*capture.profile, capture.action, source);
     capture.profile = NULL;
     return 1;
 }

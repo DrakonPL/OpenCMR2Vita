@@ -517,6 +517,32 @@ void Bindings_MarkChanged(void)
     s_changed = true;
 }
 
+bool SameSource(const Source &a, const Source &b)
+{
+    return a.kind == b.kind && a.index == b.index && a.direction == b.direction;
+}
+
+void Bindings_Assign(Profile &profile, int action, const Source &source)
+{
+    std::vector<Source> previous = profile.actions[action];
+    for (int other = 0; other <= INPUT_PAUSE; other++) {
+        if (other == action)
+            continue;
+        std::vector<Source> &list = profile.actions[other];
+        for (size_t i = 0; i < list.size(); i++) {
+            if (!SameSource(list[i], source))
+                continue;
+            if (!previous.empty())
+                list[i] = previous[0];
+            else
+                list.erase(list.begin() + i);
+            break;
+        }
+    }
+    profile.actions[action] = { source };
+    Bindings_MarkChanged();
+}
+
 #ifndef VITA
 namespace {
 

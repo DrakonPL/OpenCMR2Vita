@@ -5,10 +5,12 @@
 
 #include "input/input_internal.h"
 #include "input/input_math.h"
+#include "input/vita_controls.h"
 #include "platform/platform.h"
 #include "port/input.h"
 
 #include <psp2/ctrl.h>
+#include <psp2/kernel/processmgr.h>
 
 #include <string.h>
 
@@ -156,7 +158,8 @@ Profile *EditableProfile(int index)
 } // namespace
 
 extern "C" int Input_GetProfileCount(void) { return 1; }
-extern "C" int Input_GetProfileKind(int) { return INPUT_PROFILE_GAMEPAD; }
+// A joystick's kind: the page shows the name below, and no rumble.
+extern "C" int Input_GetProfileKind(int) { return INPUT_PROFILE_JOYSTICK; }
 extern "C" int Input_GetLastUsedProfile(void) { return s_used ? 0 : -1; }
 extern "C" const char *Input_GetProfileName(int) { return "PS Vita"; }
 
@@ -166,7 +169,7 @@ extern "C" void Input_GetBindingText(int index, int action, char *text, int size
     Profile *profile = EditableProfile(index);
     if (profile != NULL && action >= 0 && action < INPUT_ACTION_COUNT)
         for (const Source &source : profile->actions[action])
-            names += (names.empty() ? "" : " / ") + FormatSource(*profile, source);
+            names += std::string(names.empty() ? "" : " / ") + VitaControls_Name(source);
     if (size > 0) {
         strncpy(text, names.c_str(), size - 1);
         text[size - 1] = '\0';
@@ -207,9 +210,42 @@ extern "C" void Input_RestoreDefaults(int index)
     Bindings_MarkChanged();
 }
 
-// The controls page cannot bind a button yet: the capture gives up at once.
-extern "C" void Input_BeginCapture(int, int) {}
-extern "C" int Input_UpdateCapture(void) { return -1; }
+namespace {
+
+VitaCapture s_capture;
+
+VitaPad PadNow()
+{
+    VitaPad pad;
+    for (int button = 0; button < VITA_BUTTON_COUNT; button++)
+        pad.buttons[button] = (s_pad.buttons & kButtonBits[button]) != 0;
+    for (int axis = 0; axis < VITA_AXIS_COUNT; axis++)
+        pad.axes[axis] = StickAxis(axis);
+    return pad;
+}
+
+uint32_t NowMs()
+{
+    return (uint32_t)(sceKernelGetProcessTimeWide() / 1000);
+}
+
+} // namespace
+
+// Every button binds, Circle too: the capture gives up after ten seconds only.
+extern "C" void Input_BeginCapture(int index, int action)
+{
+    if (EditableProfile(index) != NULL && action >= 0 && action < INPUT_ACTION_COUNT)
+        s_capture.Begin(action, PadNow(), NowMs());
+}
+
+extern "C" int Input_UpdateCapture(void)
+{
+    Source source;
+    const int result = s_capture.Update(PadNow(), NowMs(), &source);
+    if (result == 1)
+        Bindings_Assign(VitaProfile(), s_capture.Action(), source);
+    return result;
+}
 
 extern "C" void Input_ReloadBindings(void)
 {

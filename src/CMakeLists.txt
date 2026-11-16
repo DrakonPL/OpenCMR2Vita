@@ -339,6 +339,7 @@ if(VITA)
         input/bindings.cpp
         input/input_math.cpp
         input/input_vita.cpp
+        input/vita_controls.cpp
         net/net_api_vita.cpp)
 else()
     target_sources(opencmr2_platform PRIVATE

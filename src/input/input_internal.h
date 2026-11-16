@@ -78,6 +78,10 @@ Profile *Bindings_Find(const std::string &section);
 Profile *Bindings_ForJoystick(SDL_Joystick *joystick, bool gamepad);
 void Bindings_Load(void);
 void Bindings_MarkChanged(void);
+bool SameSource(const Source &a, const Source &b);
+// Binds the input to the action. An input bound to another driving action
+// trades places with the action's own.
+void Bindings_Assign(Profile &profile, int action, const Source &source);
 // The defaults of a profile, from the device for a joystick's.
 void Bindings_SetDefaults(Profile &profile, SDL_Joystick *joystick);
 // The defaults of the settings not chosen: for a device section, from the
