@@ -171,8 +171,13 @@ void LogFpscrOnce()
         return;
     s_fpscrLogged = true;
     const uint32_t job = s_jobFpscr.load();
+    // AHP, DN, FZ and RMode: the bits that change a result. The others are
+    // condition and cumulative exception flags.
+    constexpr uint32_t kFpscrControl = 0x07c00000;
     Sys_Log("game jobs: FPSCR game thread %08x, job thread %08x: %s", (unsigned)s_gameFpscr, (unsigned)job,
-            s_gameFpscr == job ? "same" : "DIFFERENT, a float step of a job can give other bits");
+            (s_gameFpscr & kFpscrControl) == (job & kFpscrControl)
+                ? "same control bits"
+                : "DIFFERENT control bits, a float step of a job can give other bits");
 }
 
 #else
