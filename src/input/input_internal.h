@@ -38,6 +38,11 @@ enum VitaAxis { VITA_LX, VITA_LY, VITA_RX, VITA_RY, VITA_AXIS_COUNT };
 extern const char *const kVitaButtonNames[VITA_BUTTON_COUNT];
 extern const char *const kVitaAxisNames[VITA_AXIS_COUNT];
 
+#ifndef VITA
+// Where a joystick's axis rests (AxisRest, input_math.h).
+AxisRest Joystick_AxisRest(SDL_Joystick *joystick, int axis);
+#endif
+
 struct Source {
     SourceKind kind;
     int index;
@@ -55,7 +60,12 @@ struct Profile {
     int player = 0;                 // 1 or 2; 0 follows the connection order
     int rumble = 100;               // percent of the gamepad's rumble
     int steeringCurve = 0;          // percent of cubic response of the steering axes
+    int force = 100;                // percent of the game's force feedback (the original's at 100)
+    bool enabled = true;            // a device section: false leaves the device out
     unsigned chosen = 0;            // SETTING_* bits set by the user (written to controls.ini)
+    // The keys' actions held at each player's previous update (keyboard
+    // profiles), for telling when one is pressed.
+    mutable bool keyActive[INPUT_PLAYERS][INPUT_ACTION_COUNT] = {};
 };
 
 // Settings of a profile; those not chosen follow the defaults of its kind.
@@ -64,6 +74,7 @@ enum {
     SETTING_SATURATION = 2,
     SETTING_CURVE = 4,
     SETTING_RUMBLE = 8,
+    SETTING_FORCE = 16,
 };
 
 bool IsAnalog(const Source &source);
@@ -72,11 +83,13 @@ std::string FormatSource(const Profile &profile, const Source &source);
 // controls.ini: defaults, reading and writing.
 std::deque<Profile> &Bindings_Get(void);
 Profile *Bindings_Find(const std::string &section);
-// The profile of a joystick or wheel without one: SDL's layout of a known
-// gamepad, else the joystick defaults with its pedals found from where its
-// axes rest.
-Profile *Bindings_ForJoystick(SDL_Joystick *joystick, bool gamepad);
+// The profile of a joystick or wheel: SDL's layout of a known gamepad, else
+// its device section, made from where its axes rest when it has none
+// (*created set).
+Profile *Bindings_ForJoystick(SDL_Joystick *joystick, bool gamepad, bool *created);
 void Bindings_Load(void);
+// Writes the driving bindings of a profile to the log.
+void Bindings_LogProfile(const Profile &profile, const char *what);
 void Bindings_MarkChanged(void);
 bool SameSource(const Source &a, const Source &b);
 // Binds the input to the action. An input bound to another driving action

@@ -10,11 +10,12 @@
 
 namespace InputMath {
 
-int AxisValue(int16_t raw, int range)
+int AxisValue(int16_t raw, int range, AxisRest rest)
 {
+    long long from = rest == REST_MIN ? -32768 : rest == REST_MAX ? 32767 : 0;
     switch (range) {
-    case AXIS_NEGATIVE: return raw < 0 ? (int)(-(long long)raw * INPUT_FULL / 32768) : 0;
-    case AXIS_POSITIVE: return raw > 0 ? (int)((long long)raw * INPUT_FULL / 32767) : 0;
+    case AXIS_NEGATIVE: return raw < from ? (int)((from - raw) * INPUT_FULL / (from + 32768)) : 0;
+    case AXIS_POSITIVE: return raw > from ? (int)((raw - from) * INPUT_FULL / (32767 - from)) : 0;
     case AXIS_RISING: return (int)(((long long)raw + 32768) * INPUT_FULL / 65535);
     default: return (int)((32767 - (long long)raw) * INPUT_FULL / 65535);
     }
