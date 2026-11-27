@@ -1443,6 +1443,32 @@ extern "C" BOOL Sys_FileExists(const char *path)
     return !s_dirs.ResolveForReading(kUserDir, kDataDir, path).empty();
 }
 
+// sceIoRename does not replace a file: the old copy goes just before the
+// rename, so only a crash between the two leaves the temporary alone.
+bool Platform_SaveFile(const char *path, const void *data, size_t size)
+{
+    const std::string temporary = std::string(path) + ".tmp";
+    if (!WriteWholeFile(temporary, std::string((const char *)data, size))) {
+        sceIoRemove(temporary.c_str());
+        return false;
+    }
+    sceIoRemove(path);
+    return sceIoRename(temporary.c_str(), path) >= 0;
+}
+
+extern "C" BOOL Sys_SaveFile(const char *path, const void *data, DWORD size)
+{
+    std::vector<std::string> parts = SysPaths::SplitGamePath(path);
+    if (parts.empty())
+        return FALSE;
+    std::string host = s_dirs.PathForWriting(kUserDir, parts);
+    if (!Platform_SaveFile(host.c_str(), data, size)) {
+        Sys_Log("cannot save %s", host.c_str());
+        return FALSE;
+    }
+    return TRUE;
+}
+
 extern "C" BOOL Sys_DeleteFile(const char *path)
 {
     // Only files in the user directory can be deleted.

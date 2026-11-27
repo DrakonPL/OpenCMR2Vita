@@ -137,6 +137,10 @@ void Sys_FlushFile(SysFile *file);
    nothing changes elsewhere). Reads and seeks keep their meaning. */
 void Sys_SetFileReadAhead(SysFile *file, DWORD blockBytes);
 
+/* Replaces a whole file under the user directory in one step: a crash or a
+   full disk leaves the previous copy. Returns 0 on failure (logged). */
+BOOL Sys_SaveFile(const char *path, const void *data, DWORD size);
+
 BOOL Sys_FileExists(const char *path);
 BOOL Sys_DeleteFile(const char *path);
 

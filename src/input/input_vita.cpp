@@ -34,6 +34,7 @@ int s_values[INPUT_ACTION_COUNT];
 bool s_analog[CHANNEL_COUNT] = { true, false };
 bool s_textEntryOpen;
 bool s_used;    // an input was given: the controls page opens on the pad's profile
+bool s_clearPressed;    // Square went down at the last update (Input_IsClearPressed)
 
 Profile &VitaProfile()
 {
@@ -104,8 +105,10 @@ extern "C" void Input_Update(void)
         s_ready = true;
     }
     // An error, or no sample yet.
+    const bool squareWasDown = (s_pad.buttons & SCE_CTRL_SQUARE) != 0;
     if (sceCtrlPeekBufferPositive(0, &s_pad, 1) < 1)
         ReleasePad();
+    s_clearPressed = !squareWasDown && (s_pad.buttons & SCE_CTRL_SQUARE) != 0;
     UpdateActions(VitaProfile());
 }
 
@@ -184,6 +187,9 @@ extern "C" int Input_GetSetting(int index, int setting)
     switch (setting) {
     case INPUT_SETTING_DEADZONE: return profile->deadzone;
     case INPUT_SETTING_CURVE: return profile->steeringCurve;
+    case INPUT_SETTING_PLAYER: return 1;     // the one pad is player 1's
+    case INPUT_SETTING_ENABLED: return 1;    // and never left out
+    case INPUT_SETTING_FORCE: return 0;      // no force feedback
     default: return profile->rumble;
     }
 }
@@ -193,6 +199,8 @@ extern "C" void Input_SetSetting(int index, int setting, int value)
     Profile *profile = EditableProfile(index);
     if (profile == NULL || Input_GetSetting(index, setting) == value)
         return;
+    if (setting == INPUT_SETTING_PLAYER || setting == INPUT_SETTING_ENABLED || setting == INPUT_SETTING_FORCE)
+        return;
     switch (setting) {
     case INPUT_SETTING_DEADZONE: profile->deadzone = std::clamp(value, 0, 99); profile->chosen |= SETTING_DEADZONE; break;
     case INPUT_SETTING_CURVE: profile->steeringCurve = std::clamp(value, 0, 100); profile->chosen |= SETTING_CURVE; break;
@@ -200,6 +208,35 @@ extern "C" void Input_SetSetting(int index, int setting, int value)
     }
     Bindings_MarkChanged();
 }
+
+// What the pad's inputs of an action give now: the values of the last update.
+extern "C" int Input_GetProfileAction(int index, int action)
+{
+    if (EditableProfile(index) == NULL || action < 0 || action >= INPUT_ACTION_COUNT)
+        return 0;
+    return s_values[action];
+}
+
+extern "C" void Input_ClearBinding(int index, int action)
+{
+    Profile *profile = EditableProfile(index);
+    if (profile == NULL || action < 0 || action >= INPUT_ACTION_COUNT || profile->actions[action].empty())
+        return;
+    profile->actions[action].clear();
+    Bindings_MarkChanged();
+}
+
+// Square clears a binding on the controls pages, as a gamepad's west button.
+extern "C" BOOL Input_IsClearPressed(void)
+{
+    return s_clearPressed;
+}
+
+extern "C" const char *Input_GetClearButtonName(void) { return "Square"; }
+extern "C" void Input_SetShownProfile(int) {}
+extern "C" BOOL Input_HasForceFeedback(int) { return FALSE; }
+extern "C" void Input_TestFeedback(int) {}
+extern "C" unsigned int Input_GetFeedbackStrength(int) { return 0; }
 
 extern "C" void Input_RestoreDefaults(int index)
 {
