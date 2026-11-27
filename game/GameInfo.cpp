@@ -6637,6 +6637,11 @@ void OptionMenu_FadeBackgroundToGrey(int param1, int unused)
     rect[2] = (short)((int)g_pGraphics->resX * 2 / 3);
     rect[3] = (short)((int)g_pGraphics->resY * 2 / 3);
     t = (CMain::GetFrameDelta() * 1000 - g_unk0x0082b0a4 * 1000) / 50;
+    // PORT: t is clamped to the fade (0..1000). The original extrapolates
+    // past it: a frame drawn late (on the PS Vita the textures of the screen
+    // load for about 3 s first) wraps the bytes of the colour, and the clear
+    // keeps that colour (purple, green) under the option menu's pages.
+    t = t < 0 ? 0 : t > 1000 ? 1000 : t;
     inv = 1000 - t;
     // Fades between the menu colour and the grey (141, 151, 159) used by
     // OptionMenu_InitBackground while the level is built.
@@ -6668,6 +6673,8 @@ void OptionMenu_FadeToStoredColour(int param1, int unused)
     rect[2] = (short)((int)g_pGraphics->resX * 2 / 3);
     rect[3] = (short)((int)g_pGraphics->resY * 2 / 3);
     t = (CMain::GetFrameDelta() * 1000 - g_unk0x0082b0a4 * 1000) / 50;
+    // PORT: clamped to the fade, as in OptionMenu_FadeBackgroundToGrey.
+    t = t < 0 ? 0 : t > 1000 ? 1000 : t;
     colour[0] = (BYTE)((((g_menuFadeColour & 0xff) - 141) * t + 141000) / 1000);
     colour[1] = (BYTE)((((g_menuFadeColour >> 8 & 0xff) - 151) * t + 151000) / 1000);
     colour[2] = (BYTE)((((g_menuFadeColour >> 16 & 0xff) - 159) * t + 159000) / 1000);
